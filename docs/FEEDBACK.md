@@ -19,18 +19,19 @@ users cannot read them. The developer reads feedback with admin credentials.
 
 ## Developer alert
 
-`publishFeedbackNotification` runs when a document is created and posts a short alert to the
-developer's ntfy topic: the app version, platform, and how many images and logs are attached, with
-a tap-through to the record in the Firebase console (which needs the developer's sign-in). The
-message, contact email, images and diagnostics are never sent to ntfy
-([tests](../functions/test/feedback-notification.test.js)).
+`publishFeedbackNotification` runs when a document is created and posts a short alert to a
+webhook in the developer's private Discord channel: the app version, platform, and how many images
+and logs are attached, with a link to the record in the Firebase console (which needs the
+developer's sign-in). The message, contact email, images and diagnostics are never sent to Discord
+([tests](../functions/test/feedback-notification.test.js)), and the alert cannot mention anyone.
 
-The topic URL is the `FEEDBACK_NTFY_URL` secret in Secret Manager, an unguessable topic name, so
-it is not in this repository. Cloud Functions delivery is at least once, so a retry can produce a
-duplicate alert; the Firestore document is the source of truth.
+The webhook URL is the `FEEDBACK_DISCORD_WEBHOOK_URL` secret in Secret Manager, so it is not in this
+repository. A webhook can post to its channel but cannot read it. Cloud Functions delivery is at
+least once, so a retry can produce a duplicate alert; the Firestore document is the source of
+truth.
 
-To change the topic, set a new secret version and redeploy the function:
+To change the webhook, set a new secret version and redeploy the function:
 
 ```sh
-firebase functions:secrets:set FEEDBACK_NTFY_URL   # paste https://ntfy.sh/<random topic>
+firebase functions:secrets:set FEEDBACK_DISCORD_WEBHOOK_URL
 ```

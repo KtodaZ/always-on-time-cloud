@@ -1,5 +1,5 @@
 // The developer alert says only that feedback arrived. The message, contact email, screenshots and
-// diagnostics stay in Firestore and Storage, so nothing a user wrote passes through ntfy.
+// diagnostics stay in Firestore and Storage, so nothing a user wrote passes through the alert service.
 
 const FIRESTORE_CONSOLE_DATA_URL =
   "https://console.firebase.google.com/project/always-on-time-zombit-2026/firestore/databases/-default-/data/";
@@ -23,9 +23,23 @@ function buildFeedbackNotification(feedback, feedbackId) {
   };
 }
 
+/** Discord webhook body. Mentions are disabled so an alert can never ping anyone. */
+function discordPayload(notification) {
+  return {
+    username: "Always On Time",
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: notification.title,
+      description: notification.body,
+      url: notification.click,
+      color: 0x2f80ed,
+    }],
+  };
+}
+
 /** appVersion is client-supplied, so only a short version-like string is echoed. */
 function safeVersion(value) {
   return typeof value === "string" && /^[0-9A-Za-z._+-]{1,40}$/.test(value) ? value : "unknown";
 }
 
-module.exports = { buildFeedbackNotification };
+module.exports = { buildFeedbackNotification, discordPayload };

@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { buildFeedbackNotification } = require("../feedback-notification");
+const { buildFeedbackNotification, discordPayload } = require("../feedback-notification");
 
 const feedback = {
   message: "The screenshot shows the alarm button disappearing.",
@@ -28,8 +28,8 @@ test("the alert says feedback arrived, with only version, platform and attachmen
   );
 });
 
-test("nothing the user wrote or attached reaches ntfy", () => {
-  const serialized = JSON.stringify(buildFeedbackNotification(feedback, "abc123"));
+test("nothing the user wrote or attached reaches Discord", () => {
+  const serialized = JSON.stringify(discordPayload(buildFeedbackNotification(feedback, "abc123")));
 
   assert.doesNotMatch(serialized, /alarm button/);
   assert.doesNotMatch(serialized, /person@example\.com/);
@@ -50,4 +50,14 @@ test("one screenshot is singular and missing fields fall back safely", () => {
     buildFeedbackNotification({ attachments: [{}] }, "x").body,
     "vunknown · unknown platform · 1 screenshot",
   );
+});
+
+test("the Discord payload is one embed that can never mention anyone", () => {
+  const payload = discordPayload(buildFeedbackNotification(feedback, "abc123"));
+
+  assert.deepEqual(payload.allowed_mentions, { parse: [] });
+  assert.equal(payload.embeds.length, 1);
+  assert.equal(payload.embeds[0].title, "New Always On Time feedback");
+  assert.equal(payload.embeds[0].description, "v1.2.3 · Android · 2 screenshots · diagnostics attached");
+  assert.match(payload.embeds[0].url, /~2Ffeedback~2Fabc123$/);
 });
