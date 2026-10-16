@@ -10,6 +10,6 @@
     "test": "npm --prefix functions test && node --test 'scripts/test/*.test.mjs'"
   },
   "devDependencies": {
-    "firebase-tools": "15.13.0"
+    "firebase-tools": "15.33.0"
   }
 }
