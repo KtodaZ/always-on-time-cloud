@@ -14,6 +14,13 @@ Google Cloud's Workload Identity Federation exchanges it for the deploy service 
 `refs/heads/main` of this repository, started by hand. Other workflows, branches, forks and pull
 requests cannot deploy.
 
+The run has three jobs:
+
+1. **test** runs the tests and checks the targets, with no cloud identity.
+2. **deploy** refuses to run unless its commit is still the head of `main` (so an old run cannot
+   roll production back), installs packages without install scripts, and deploys.
+3. **sign** installs no packages; it downloads what is now live and signs it.
+
 Secrets stay in Secret Manager and are bound to functions at deploy time:
 
 | Secret | Used by |
@@ -31,12 +38,13 @@ stops instead of deleting it. The Firebase CLI version is pinned in the root `pa
 After deploying, the workflow downloads what is now live and signs it with a
 [build provenance attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations):
 
-- each deployed function's source archive, the exact zip Google built the function from;
-- the active Firestore and Storage rules;
-- every file in the live Firebase Hosting release.
+- each function this deploy updated: the exact source zip Google built it from, and its settings
+  (runtime, memory, region, trigger, environment, secret names, who may invoke it);
+- the active Firestore and Storage rules, and the Firestore index and field settings;
+- every file in the live Firebase Hosting release, plus its headers and redirects.
 
 The signature (Sigstore, recorded in a public transparency log) binds each file's SHA-256 to this
-repository, the Deploy workflow, the commit and the run. Index-only deploys change no signed file.
+repository, the Deploy workflow, the commit and the run.
 
 ## Verifying production
 
@@ -44,32 +52,43 @@ The [Verify live workflow](../.github/workflows/verify.yml) runs daily, after ev
 demand, with a read-only account (`github-verify`, usable only by that workflow file on `main`).
 It fails if:
 
-1. any live function archive, rules file or hosting file lacks a signature from the Deploy
-   workflow on `main`;
-2. any of those files differs from the repository at the commit its signature names; or
-3. Google Cloud's Admin Activity audit log shows a deploy of functions, rules, indexes, schedules or
-   Cloud Run services, or a key or access grant for the deploy account, by anyone other than the
-   deploy account. Audit monitoring starts at `MONITORING_STARTS` in
-   [`scripts/verify-live.mjs`](../scripts/verify-live.mjs).
+1. any live function archive or settings, rules file, index setting or hosting file lacks a
+   signature from the Deploy workflow on `main`;
+2. any of those differs from the repository at the commit its signature names, or a file in
+   `account-web/` is missing from hosting;
+3. the project has something the signatures do not cover: a Cloud Run service that is not one of
+   the functions, another hosting site, a preview channel, or another Firestore database; or
+4. Google Cloud's Admin Activity audit log shows a deploy of functions, rules, indexes, schedules or
+   Cloud Run services by anyone other than the Deploy workflow, or any change to who can deploy
+   (workload identity providers, service account keys, token-creator or similar grants, or IAM on
+   the deploy and verify accounts). Audit monitoring starts at `MONITORING_STARTS` in
+   [`scripts/verify-live.mjs`](../scripts/verify-live.mjs) and always covers everything since.
 
-It also lists other changes made outside CI, such as secret rotation or permission changes, without
-naming people. Hosting releases are not in the audit log, so hosting is covered by the signature
-check alone.
+It also lists other changes made outside CI, such as secret rotation or enabling an API, without
+naming people. Any hosting change in the audit log counts as a deploy, but hosting releases have
+not been seen there, so hosting relies mainly on the signature check.
 
 You can check a file yourself with the GitHub CLI. For example, the privacy policy:
 
 ```sh
 curl -sO https://always-on-time-zombit-2026.web.app/privacy-policy.html
 gh attestation verify privacy-policy.html --repo KtodaZ/always-on-time-cloud \
-  --signer-workflow KtodaZ/always-on-time-cloud/.github/workflows/deploy.yml --source-ref refs/heads/main
+  --cert-identity https://github.com/KtodaZ/always-on-time-cloud/.github/workflows/deploy.yml@refs/heads/main \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 ### What this does not prove
 
-The checks detect changes; they cannot stop a project owner from changing production. Settings
-that are not code (secret values, App Check enforcement, billing) are not signed, though changes to
-them appear in the audit log listing. The Android and iOS apps are built from a separate private
-repository.
+- The checks detect changes; they cannot stop a project owner from changing production.
+- Settings that are not code (secret values, App Check enforcement, billing) are not signed, though
+  changes to them appear in the audit log listing.
+- The deploy job runs the Firebase CLI and this repository's function code (to discover functions)
+  while it holds the deploy identity, so a malicious locked dependency could act during a deploy.
+  The lockfiles are reviewed through Dependabot pull requests, and anything it deployed would still
+  need to match the repository to pass verification.
+- GitHub disables scheduled workflows after 60 days without repository activity; the badge then
+  goes stale rather than red.
+- The Android and iOS apps are built from a separate private repository.
 
 ### One-time setup before monitoring
 

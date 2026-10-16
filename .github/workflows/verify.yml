@@ -8,10 +8,6 @@ on:
     workflows: [Deploy]
     types: [completed]
   workflow_dispatch:
-    inputs:
-      since_hours:
-        description: "Audit log window in hours"
-        default: "26"
 
 permissions: {}
 
@@ -43,5 +39,4 @@ jobs:
         env:
           GOOGLE_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
           GH_TOKEN: ${{ github.token }}
-          SINCE_HOURS: ${{ inputs.since_hours || '26' }}
-        run: node scripts/verify-live.mjs --since-hours "$SINCE_HOURS"
+        run: node scripts/verify-live.mjs

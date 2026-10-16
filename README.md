@@ -14,12 +14,14 @@ specific feature needs.
 
 ## Is this really what runs in production?
 
-Production (`always-on-time-zombit-2026`) is deployed only by the public
-[Deploy workflow](.github/workflows/deploy.yml), which signs everything it deploys. The
-[Verify live workflow](.github/workflows/verify.yml) checks every day that each live function,
-rules file and hosted page carries that signature and matches this repository, and that Google
-Cloud's audit log shows no deploys from anywhere else. Its badge above is the current result. How
-it works, how to check a file yourself, and its limits: [docs/DEPLOYING.md](docs/DEPLOYING.md).
+Production (`always-on-time-zombit-2026`) is deployed by the public
+[Deploy workflow](.github/workflows/deploy.yml), which signs what it deploys. The
+[Verify live workflow](.github/workflows/verify.yml) checks every day that each live function
+(source and settings), rules file, index setting and hosted file carries that signature and matches
+this repository, and that Google Cloud's audit log shows no deploys or deploy-access changes from
+anywhere else. Its badge above is the current result. The checks detect changes rather than prevent
+them; how they work, how to check a file yourself, and their limits:
+[docs/DEPLOYING.md](docs/DEPLOYING.md).
 
 ## What is here
 
