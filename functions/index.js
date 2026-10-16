@@ -3,7 +3,7 @@ const { logger } = require("firebase-functions");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { defineSecret } = require("firebase-functions/params");
 
-const { buildFeedbackNotification } = require("./feedback-notification");
+const { buildFeedbackNotification, discordPayload } = require("./feedback-notification");
 
 initializeApp();
 
@@ -12,9 +12,9 @@ Object.assign(exports, require("./ios-push-functions"));
 Object.assign(exports, require("./account-sync-functions"));
 Object.assign(exports, require("./travel-route-functions"));
 
-// ntfy.sh topics are readable by anyone who knows the name, so the topic URL is an unguessable
-// secret rather than a constant in this public repository.
-const feedbackNtfyUrl = defineSecret("FEEDBACK_NTFY_URL");
+// A Discord webhook URL can post to the developer's private channel but not read it. It is still a
+// secret so nobody else can post alerts.
+const feedbackWebhookUrl = defineSecret("FEEDBACK_DISCORD_WEBHOOK_URL");
 
 exports.publishFeedbackNotification = onDocumentCreated(
   {
@@ -22,7 +22,7 @@ exports.publishFeedbackNotification = onDocumentCreated(
     region: "us-central1",
     maxInstances: 1,
     retry: true,
-    secrets: [feedbackNtfyUrl],
+    secrets: [feedbackWebhookUrl],
   },
   async (event) => {
     const snapshot = event.data;
@@ -42,27 +42,21 @@ exports.publishFeedbackNotification = onDocumentCreated(
 
     try {
       const notification = buildFeedbackNotification(feedback, feedbackId);
-      const response = await fetch(feedbackNtfyUrl.value(), {
+      const response = await fetch(feedbackWebhookUrl.value(), {
         method: "POST",
-        headers: {
-          "Content-Type": "text/plain; charset=utf-8",
-          "X-Title": notification.title,
-          "X-Priority": "default",
-          "X-Tags": "speech_balloon",
-          "X-Click": notification.click,
-        },
-        body: notification.body,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(discordPayload(notification)),
         signal: AbortSignal.timeout(10_000),
       });
       if (!response.ok) {
         const retryAfter = response.headers.get("retry-after");
         const retryHint = retryAfter ? `; Retry-After: ${retryAfter}` : "";
-        throw new Error(`ntfy returned HTTP ${response.status}${retryHint}`);
+        throw new Error(`Discord returned HTTP ${response.status}${retryHint}`);
       }
 
       logger.info("Published feedback notification", {
         feedbackId,
-        ntfyStatus: response.status,
+        status: response.status,
       });
     } catch (error) {
       logger.error("Could not publish feedback notification", { feedbackId, error });

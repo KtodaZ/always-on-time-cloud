@@ -99,7 +99,7 @@ Firestore database. Optional screenshots or photos are uploaded to Firebase Clou
 user-scoped path that other app users cannot read. Firebase Anonymous Authentication creates a
 random account identifier solely to authorize the submission; that identifier is not included in
 the feedback document. After submission, a trusted Firebase backend sends the developer a short
-alert through the ntfy notification service saying that feedback arrived. The alert contains only
+alert in a private Discord channel saying that feedback arrived. The alert contains only
 the app version, the platform, and the number of attached images and logs; your feedback text,
 email address, images, and logs are not included in it.
 

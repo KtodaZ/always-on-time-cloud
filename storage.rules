@@ -3,8 +3,8 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     // Firebase's downloadUrl requires Storage read permission for the uploading client. Scope
-    // that permission to the anonymous user segment; the resulting download URL is a public
-    // bearer link used only in the developer's ntfy notification.
+    // that permission to the anonymous user segment. The resulting download URL is a bearer link
+    // stored only in the feedback document, which clients cannot read.
     match /feedback/{userId}/{feedbackId}/{attachmentId} {
       allow read: if request.auth != null && request.auth.uid == userId;
       allow write: if request.auth != null

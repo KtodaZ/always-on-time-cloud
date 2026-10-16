@@ -23,8 +23,8 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
   assert.equal(feedback.eventTrigger.eventType, "google.cloud.firestore.document.v1.created");
   assert.deepEqual(feedback.eventTrigger.eventFilterPathPatterns, { document: "feedback/{feedbackId}" });
   assert.equal(feedback.eventTrigger.retry, true);
-  assert.deepEqual(feedback.secretEnvironmentVariables, [{ key: "FEEDBACK_NTFY_URL" }],
-    "the feedback trigger reads only its ntfy topic secret, never the APNs key");
+  assert.deepEqual(feedback.secretEnvironmentVariables, [{ key: "FEEDBACK_DISCORD_WEBHOOK_URL" }],
+    "the feedback trigger reads only its webhook secret, never the APNs key");
 
   const api = functions.iosPushApi.__endpoint;
   assert.deepEqual(api.httpsTrigger, { invoker: ["public"] });
