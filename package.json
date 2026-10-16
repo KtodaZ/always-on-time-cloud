@@ -1,0 +1,15 @@
+{
+  "name": "always-on-time-cloud",
+  "private": true,
+  "description": "Open-source cloud code for Always On Time: Calendar Alarm",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "test": "npm --prefix functions test && node --test 'scripts/test/*.test.mjs'"
+  },
+  "devDependencies": {
+    "firebase-tools": "15.13.0"
+  }
+}

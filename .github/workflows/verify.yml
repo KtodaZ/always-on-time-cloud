@@ -1,0 +1,47 @@
+name: Verify live
+
+# Proves production matches signed deploys from main and that nobody deployed around CI.
+on:
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_run:
+    workflows: [Deploy]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      since_hours:
+        description: "Audit log window in hours"
+        default: "26"
+
+permissions: {}
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      # Read-only account: function sources, rules, hosting metadata and audit logs.
+      - id: gcp
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_VERIFY_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_VERIFY_SERVICE_ACCOUNT }}
+          token_format: access_token
+          create_credentials_file: false
+      - name: Verify production
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
+          GH_TOKEN: ${{ github.token }}
+          SINCE_HOURS: ${{ inputs.since_hours || '26' }}
+        run: node scripts/verify-live.mjs --since-hours "$SINCE_HOURS"

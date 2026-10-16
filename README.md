@@ -1,5 +1,9 @@
 # Always On Time — cloud code
 
+[![Verify live](https://github.com/KtodaZ/always-on-time-cloud/actions/workflows/verify.yml/badge.svg)](https://github.com/KtodaZ/always-on-time-cloud/actions/workflows/verify.yml)
+[![Test](https://github.com/KtodaZ/always-on-time-cloud/actions/workflows/test.yml/badge.svg)](https://github.com/KtodaZ/always-on-time-cloud/actions/workflows/test.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/KtodaZ/always-on-time-cloud/badge)](https://scorecard.dev/viewer/?uri=github.com/KtodaZ/always-on-time-cloud)
+
 This is the server-side code for [Always On Time: Calendar Alarm](https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime).
 It is the code that receives, stores or forwards user data, published so anyone can check what
 happens to that data after it leaves the phone.
@@ -8,9 +12,14 @@ The app itself schedules alarms on the phone. Your calendar is read and processe
 none of the code here reads your calendar. Everything below is optional or limited to what a
 specific feature needs.
 
-The production Firebase project (`always-on-time-zombit-2026`) is deployed from this repository by
-the [Deploy workflow](.github/workflows/deploy.yml). Each deploy runs in public GitHub Actions, so
-its log shows exactly which commit is live.
+## Is this really what runs in production?
+
+Production (`always-on-time-zombit-2026`) is deployed only by the public
+[Deploy workflow](.github/workflows/deploy.yml), which signs everything it deploys. The
+[Verify live workflow](.github/workflows/verify.yml) checks every day that each live function,
+rules file and hosted page carries that signature and matches this repository, and that Google
+Cloud's audit log shows no deploys from anywhere else. Its badge above is the current result. How
+it works, how to check a file yourself, and its limits: [docs/DEPLOYING.md](docs/DEPLOYING.md).
 
 ## What is here
 
@@ -31,7 +40,7 @@ More detail: [feedback](docs/FEEDBACK.md), [travel routes](docs/TRAVEL_ROUTES.md
 ## Tests
 
 ```sh
-cd functions && npm ci && npm test
+npm ci && npm ci --prefix functions && npm test
 ```
 
 Security rules, the Firestore store and account deletion also have emulator tests (Java 21 and the
@@ -41,16 +50,17 @@ values first:
 ```sh
 printf 'APNS_AUTH_KEY_P8=x\nFEEDBACK_DISCORD_WEBHOOK_URL=http://127.0.0.1:9/\nTOMTOM_API_KEY=x\nTRAVEL_ROUTE_API_KEY=x\n' > functions/.secret.local
 cp functions/.env.always-on-time-zombit-2026 functions/.env.local
-firebase emulators:exec --only firestore --project demo-account-sync 'node functions/testing/account-sync-rules.cjs && npm --prefix functions test'
-firebase emulators:exec --only auth,firestore,functions --project demo-account-sync 'node functions/testing/account-delete.cjs'
+npx firebase emulators:exec --only firestore --project demo-account-sync 'node functions/testing/account-sync-rules.cjs && npm --prefix functions test'
+npx firebase emulators:exec --only auth,firestore,functions --project demo-account-sync 'node functions/testing/account-delete.cjs'
 ```
 
 The [Test workflow](.github/workflows/test.yml) runs all of these on every push and pull request.
 
-## Reporting a problem
+## Contributing and security
 
-Privacy or security questions: zombit.studios@gmail.com. Please report security issues privately
-by email rather than in a public issue.
+Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Report security
+problems privately as described in [SECURITY.md](SECURITY.md). Privacy questions:
+zombit.studios@gmail.com.
 
 ## License
 
