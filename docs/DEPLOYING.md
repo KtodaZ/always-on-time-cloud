@@ -95,7 +95,9 @@ gh attestation verify privacy-policy.html --repo KtodaZ/always-on-time-cloud \
 On 2026-10-16 the maintainer created the deploy and verify service accounts, the Workload Identity
 pool and providers, their IAM bindings, the gcf-sources bucket read access, and the
 `FEEDBACK_DISCORD_WEBHOOK_URL` secret. Earlier production deploys were made from the maintainer's
-machine; the first signed deploy replaced every function, rules file and hosting file.
+machine; the first signed deploy replaced every function, rules file and hosting file. The
+maintainer also enabled the Cloud Billing API during that deploy, because the Firebase CLI reads the
+project's billing plan; that change is listed in the Verify report.
 
 ## Repository protections
 

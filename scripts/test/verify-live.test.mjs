@@ -8,7 +8,7 @@ const entry = (methodName, principalEmail, extra = {}) => ({ protoPayload: {
 } });
 const person = "someone@example.com";
 const ciDelegation = { serviceAccountDelegationInfo: [{ principalSubject:
-  "principal://iam.googleapis.com/projects/1054144143721/locations/global/workloadIdentityPools/github/subject/repo:KtodaZ/always-on-time-cloud:environment:production" }] };
+  "principal://iam.googleapis.com/projects/1054144143721/locations/global/workloadIdentityPools/github/subject/repo:KtodaZ@8885124/always-on-time-cloud@1422600008:environment:production" }] };
 
 test("deploys by a person outside CI are failures", () => {
   for (const method of [
@@ -27,7 +27,9 @@ test("the deploy account is expected only when CI uses it for this repository", 
   assert.equal(classifyAuditEntry({ protoPayload: { methodName: method, authenticationInfo: { principalEmail: DEPLOY_ACCOUNT, ...ciDelegation } } }), null);
   assert.equal(classifyAuditEntry(entry(method, DEPLOY_ACCOUNT)), "deploy");
   assert.equal(classifyAuditEntry({ protoPayload: { methodName: method, authenticationInfo: { principalEmail: DEPLOY_ACCOUNT,
-    serviceAccountDelegationInfo: [{ principalSubject: "principal://iam.googleapis.com/projects/1054144143721/locations/global/workloadIdentityPools/github/subject/repo:someone/else:ref" }] } } }), "deploy");
+    serviceAccountDelegationInfo: [{ principalSubject: "principal://iam.googleapis.com/projects/1054144143721/locations/global/workloadIdentityPools/github/subject/repo:someone@1/else@2:ref" }] } } }), "deploy");
+  assert.equal(classifyAuditEntry({ protoPayload: { methodName: method, authenticationInfo: { principalEmail: DEPLOY_ACCOUNT,
+    serviceAccountDelegationInfo: [{ principalSubject: "principal://iam.googleapis.com/projects/1054144143721/locations/global/workloadIdentityPools/github/subject/repo:KtodaZ@8885124/always-on-time-cloud@999:ref" }] } } }), "deploy");
 });
 
 test("CI cannot change who can deploy either", () => {

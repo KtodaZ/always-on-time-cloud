@@ -34,8 +34,10 @@ export const VERIFY_ACCOUNT = `github-verify@${PROJECT}.iam.gserviceaccount.com`
 // Audit entries name service accounts by email or by numeric unique ID.
 const PIPELINE_ACCOUNTS = [DEPLOY_ACCOUNT, VERIFY_ACCOUNT, "113881711650884068808", "111698826332115105244"];
 // CI acts as the deploy account through this repository's Workload Identity pool.
-const CI_SUBJECT_PREFIX =
-  `principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github/subject/repo:${REPOSITORY}:`;
+// GitHub's immutable subject names the owner and repository by ID, so a renamed or recreated
+// repository with the same name does not match.
+const CI_SUBJECT_PREFIX = `principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/` +
+  "workloadIdentityPools/github/subject/repo:KtodaZ@8885124/always-on-time-cloud@1422600008:";
 // Audit monitoring covers changes from this moment on; the one-time setup before it is described in
 // docs/DEPLOYING.md.
 export const MONITORING_STARTS = "2026-10-16T22:42:00Z";
