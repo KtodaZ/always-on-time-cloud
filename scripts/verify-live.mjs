@@ -38,7 +38,7 @@ const CI_SUBJECT_PREFIX =
   `principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github/subject/repo:${REPOSITORY}:`;
 // Audit monitoring covers changes from this moment on; the one-time setup before it is described in
 // docs/DEPLOYING.md.
-export const MONITORING_STARTS = "2026-10-16T23:00:00Z";
+export const MONITORING_STARTS = "2026-10-16T22:42:00Z";
 
 // Changes that replace live code, settings, rules, indexes or hosting.
 const DEPLOY_METHODS = [
