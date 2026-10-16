@@ -8,6 +8,10 @@ on:
         description: "Firebase deploy targets (passed to --only)"
         default: "functions,firestore,storage,hosting"
         required: true
+      dry_run:
+        description: "Validate and show what would change without deploying"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,8 +42,9 @@ jobs:
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
-      - name: Deploy ${{ inputs.only }} at ${{ github.sha }}
+      - name: Deploy ${{ inputs.only }} at ${{ github.sha }}${{ inputs.dry_run && ' (dry run)' || '' }}
         env:
           ONLY: ${{ inputs.only }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
         # No --force: a deploy that would delete a live function stops instead.
-        run: npx --yes firebase-tools@15 deploy --only "$ONLY" --project always-on-time-zombit-2026 --non-interactive
+        run: npx --yes firebase-tools@15 deploy --only "$ONLY" --project always-on-time-zombit-2026 --non-interactive $DRY_RUN
