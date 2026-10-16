@@ -1,0 +1,45 @@
+name: Deploy
+
+# Production deploys run only from main, by hand, so the public log records which commit is live.
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Firebase deploy targets (passed to --only)"
+        default: "functions,firestore,storage,hosting"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+      - run: npm ci
+        working-directory: functions
+      - run: npm test
+        working-directory: functions
+      # Keyless: GitHub's OIDC token is exchanged through Workload Identity Federation, which only
+      # trusts workflow_dispatch runs on main of this repository. No credential is stored here.
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - name: Deploy ${{ inputs.only }} at ${{ github.sha }}
+        env:
+          ONLY: ${{ inputs.only }}
+        # No --force: a deploy that would delete a live function stops instead.
+        run: npx --yes firebase-tools@15 deploy --only "$ONLY" --project always-on-time-zombit-2026 --non-interactive
