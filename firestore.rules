@@ -1,0 +1,165 @@
+rules_version = '2';
+
+service cloud.firestore {
+  function isValidFeedbackAttachment(attachment, feedbackId) {
+    let pathSegments = attachment.path.split('/');
+    return attachment is map
+      && attachment.keys().hasOnly([
+        'id', 'path', 'contentType', 'sizeBytes', 'downloadUrl'
+      ])
+      && attachment.keys().hasAll([
+        'id', 'path', 'contentType', 'sizeBytes', 'downloadUrl'
+      ])
+      && attachment.id is string
+      && attachment.id.size() > 0
+      && attachment.id.size() <= 100
+      && attachment.path is string
+      && attachment.path.matches('^feedback/[^/]+/[^/]+/[^/]+$')
+      && pathSegments.size() == 4
+      && pathSegments[0] == 'feedback'
+      && pathSegments[1] == request.auth.uid
+      && pathSegments[2] == feedbackId
+      && pathSegments[3] == attachment.id
+      && attachment.contentType is string
+      && (
+        attachment.contentType == 'image/jpeg' ||
+        attachment.contentType == 'image/jpg' ||
+        attachment.contentType == 'image/png' ||
+        attachment.contentType == 'image/webp' ||
+        attachment.contentType == 'image/heic' ||
+        attachment.contentType == 'image/heif'
+      )
+      && attachment.sizeBytes is int
+      && attachment.sizeBytes > 0
+      && attachment.sizeBytes <= 5 * 1024 * 1024
+      && attachment.downloadUrl is string
+      && attachment.downloadUrl.size() > 0
+      && attachment.downloadUrl.size() <= 2048;
+  }
+
+  function isValidFeedbackDiagnosticLog(log, feedbackId) {
+    let pathSegments = log.path.split('/');
+    return log is map
+      && log.keys().hasOnly([
+        'id', 'path', 'contentType', 'sizeBytes'
+      ])
+      && log.keys().hasAll([
+        'id', 'path', 'contentType', 'sizeBytes'
+      ])
+      && log.id is string
+      && log.id.size() > 0
+      && log.id.size() <= 100
+      && log.path is string
+      && log.path.matches('^feedback/[^/]+/[^/]+/[^/]+$')
+      && pathSegments.size() == 4
+      && pathSegments[0] == 'feedback'
+      && pathSegments[1] == request.auth.uid
+      && pathSegments[2] == feedbackId
+      && pathSegments[3] == log.id
+      && log.contentType is string
+      && log.contentType == 'text/plain'
+      && log.sizeBytes is int
+      && log.sizeBytes > 0
+      && log.sizeBytes <= 5 * 1024 * 1024;
+  }
+
+  match /databases/{database}/documents {
+    function isGoogleAccount(uid) {
+      return request.auth != null && request.auth.uid == uid
+        && request.auth.token.firebase.identities.keys().hasAny(['google.com']);
+    }
+    function activeAccount(uid) {
+      return isGoogleAccount(uid)
+        && get(/databases/$(database)/documents/accounts/$(uid)).data.active == true;
+    }
+    match /accounts/{uid} {
+      allow read: if isGoogleAccount(uid);
+      allow create: if isGoogleAccount(uid)
+        && request.resource.data.keys().hasOnly(['active', 'schemaVersion'])
+        && request.resource.data.active == true && request.resource.data.schemaVersion == 1;
+      allow update, delete: if false;
+      match /values/{recordId} {
+        allow read: if activeAccount(uid);
+        allow create, update: if activeAccount(uid)
+          && recordId.matches('^(p_[a-z_]+|[cse]_[a-f0-9]{64})$')
+          && request.resource.data.keys().hasOnly(['payload'])
+          && request.resource.data.payload is string && request.resource.data.payload.size() <= 16384;
+        allow delete: if false;
+      }
+      match /history/{recordId} {
+        allow read: if activeAccount(uid);
+        allow create, update: if activeAccount(uid)
+          && recordId.matches('^[a-f0-9]{64}$')
+          && request.resource.data.keys().hasOnly(['payload', 'createdAt'])
+          && request.resource.data.payload is string && request.resource.data.payload.size() <= 8192
+          && request.resource.data.createdAt is int
+          && request.resource.data.createdAt >= request.time.toMillis() - 1209600000
+          && request.resource.data.createdAt <= request.time.toMillis() + 300000;
+        allow delete: if activeAccount(uid);
+      }
+    }
+
+    match /feedback/{feedbackId} {
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly([
+          'message', 'contactEmail', 'attachments', 'diagnosticLog', 'createdAt', 'appVersion', 'source'
+        ])
+        && request.resource.data.keys().hasAll([
+          'message', 'contactEmail', 'attachments', 'createdAt', 'appVersion', 'source'
+        ])
+        && request.resource.data.message is string
+        && request.resource.data.message.size() > 0
+        && request.resource.data.message.size() <= 5000
+        && request.resource.data.contactEmail is string
+        && request.resource.data.contactEmail.size() > 0
+        && request.resource.data.contactEmail.size() <= 254
+        && request.resource.data.contactEmail.matches('^[^@ ]+@[^@ ]+\\.[^@ ]+$')
+        && request.resource.data.attachments is list
+        && request.resource.data.attachments.size() <= 3
+        && (
+          request.resource.data.attachments.size() < 1 ||
+          isValidFeedbackAttachment(request.resource.data.attachments[0], feedbackId)
+        )
+        && (
+          request.resource.data.attachments.size() < 2 ||
+          isValidFeedbackAttachment(request.resource.data.attachments[1], feedbackId)
+        )
+        && (
+          request.resource.data.attachments.size() < 3 ||
+          isValidFeedbackAttachment(request.resource.data.attachments[2], feedbackId)
+        )
+        && (
+          !request.resource.data.keys().hasAny(['diagnosticLog']) ||
+          isValidFeedbackDiagnosticLog(request.resource.data.diagnosticLog, feedbackId)
+        )
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.appVersion is string
+        && request.resource.data.appVersion.size() <= 100
+        && request.resource.data.source == 'android';
+      allow read, update, delete: if false;
+    }
+
+    // iOS relay push state is written only by Cloud Functions through the Admin SDK, which
+    // bypasses these rules. Clients get no access to any document or subcollection.
+    match /iosPushInstalls/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /iosPushSubscriptions/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /iosPushRateLimits/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /iosPushDispatches/{document=**} {
+      allow read, write: if false;
+    }
+
+    // Per-install route call counters, written only by the route function.
+    match /travelRouteUsage/{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

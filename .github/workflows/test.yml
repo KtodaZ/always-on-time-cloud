@@ -1,0 +1,37 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+        working-directory: functions
+      - name: Unit tests
+        run: npm test
+        working-directory: functions
+      - name: Emulator placeholders
+        # The emulator loads every function, so declared secrets and params need stand-in values.
+        run: |
+          printf 'APNS_AUTH_KEY_P8=emulator\nFEEDBACK_NTFY_URL=http://127.0.0.1:9/unused\nTOMTOM_API_KEY=emulator\nTRAVEL_ROUTE_API_KEY=emulator\n' > functions/.secret.local
+          cp functions/.env.always-on-time-zombit-2026 functions/.env.local
+      - name: Security rules and Firestore store tests
+        run: npx --yes firebase-tools@15 emulators:exec --only firestore --project demo-account-sync 'node functions/testing/account-sync-rules.cjs && npm --prefix functions test'
+      - name: Account deletion end to end
+        run: npx --yes firebase-tools@15 emulators:exec --only auth,firestore,functions --project demo-account-sync 'node functions/testing/account-delete.cjs'
