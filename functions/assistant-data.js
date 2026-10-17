@@ -122,8 +122,8 @@ const MAX_ATTEMPTS = 5;
  * may add writes to the same commit.
  *
  * Every write is guarded by the update time it was read at (or must create the document), so a
- * concurrent change makes the commit fail and the change is rebuilt. `writtenAt` is then set to the
- * commit's write time, which equals the values' `updatedAt` that phones report back.
+ * concurrent change makes the commit fail and the change is rebuilt. The activity's `writtenAt` and
+ * the values' `updatedAt` are the same server timestamp, which phones report back.
  */
 async function recordChange(db, uid, { recordIds, build, assistant, tool, summary, now, afterWrite }) {
   const values = refs.values(db, uid);
@@ -159,13 +159,15 @@ async function recordChange(db, uid, { recordIds, build, assistant, tool, summar
       tool,
       summary: String(summary).slice(0, 500),
       records,
-      writtenAt: null,
+      // Every server timestamp in one commit resolves to the same value, so this equals the
+      // values' updatedAt below, which phones report back.
+      writtenAt: FieldValue.serverTimestamp(),
       expiresAt: new Date(now + ACTIVITY_TTL_MS),
     });
     for (const [recordId, { after }] of Object.entries(records)) {
       const doc = snapshots.get(values.doc(recordId).path);
-      // `updatedAt` is the commit time too: Android's Firestore SDK doesn't expose updateTime, so
-      // phones report this field back as valuesAppliedThrough. Phone writes replace it.
+      // Android's Firestore SDK doesn't expose updateTime, so phones report this field back as
+      // valuesAppliedThrough. Phone writes replace it.
       const value = { payload: after, updatedAt: FieldValue.serverTimestamp() };
       if (doc.exists) batch.update(doc.ref, value, { lastUpdateTime: doc.updateTime });
       else batch.create(doc.ref, value);
@@ -178,9 +180,8 @@ async function recordChange(db, uid, { recordIds, build, assistant, tool, summar
       if (CONFLICT_CODES.has(error?.code) && attempt < MAX_ATTEMPTS) continue;
       throw error;
     }
-    const writtenAt = results[0].writeTime;
-    await activityRef.update({ writtenAt });
-    return { changeId, records, writtenAt };
+    const written = await activityRef.get();
+    return { changeId, records, writtenAt: written.data().writtenAt ?? results[0].writeTime };
   }
 }
 

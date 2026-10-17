@@ -23,16 +23,16 @@ test("connector writes, connections and cleanup work on real Firestore", { skip 
   const db = getFirestore(app);
   const uid = `emulator-${Date.now()}`;
   try {
-    // writtenAt is the commit's write time: exactly the values' update time phones report back.
+    // writtenAt is the same server timestamp as the values' updatedAt, which phones report back.
     const write = (build) => recordChange(db, uid, {
       recordIds: ["p_alarm_volume", "p_max_snoozes"], build, assistant: "Claude", tool: "update_settings", summary: "Changed settings", now: Date.now(),
     });
     const first = await write(() => ({ p_alarm_volume: 70, p_max_snoozes: 3 }));
     const activity = (await refs.activity(db, uid).doc(first.changeId).get()).data();
     const value = await refs.values(db, uid).doc("p_alarm_volume").get();
-    assert.equal(activity.writtenAt.isEqual(value.updateTime), true);
-    // updatedAt carries that time for phones whose SDK does not expose updateTime.
     assert.equal(activity.writtenAt.isEqual(value.data().updatedAt), true);
+    assert.equal(first.writtenAt.isEqual(value.data().updatedAt), true);
+    assert.equal((await refs.values(db, uid).doc("p_max_snoozes").get()).data().updatedAt.isEqual(activity.writtenAt), true);
     // The next change is guarded by those update times and wins a race with a phone by retrying.
     let attempts = 0;
     const second = await write(async () => {

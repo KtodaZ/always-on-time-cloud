@@ -11,8 +11,8 @@ deletes everything under "Connector data" below.
 
 Existing account sync: `accounts/{uid}` (`active`, `schemaVersion`),
 `accounts/{uid}/values/{recordId}` (`payload` string) and `accounts/{uid}/history/{id}`. Values the
-connector writes also carry `updatedAt`, a server timestamp equal to the commit time (the Android
-SDK doesn't expose `updateTime`). Phones write `payload` only, which drops it.
+connector writes also carry `updatedAt`, a server timestamp from the same commit as the change's
+`writtenAt` (the Android SDK doesn't expose `updateTime`). Phones write `payload` only, which drops it.
 
 Connector data:
 
@@ -93,9 +93,8 @@ publish request that caused it) and `payload` (JSON string ≤ 800,000 character
 `accounts/{uid}/assistantActivity/{changeId}` (server-written, 30-day TTL on `expiresAt`):
 `assistant` (client display name), `tool`, `summary` (plain-language, may contain an event title),
 `records` (map of recordId → `{before: string|null, after: string|null}` payloads), `writtenAt`
-(timestamp: the commit time of the batch that wrote the entry and the `values`, so it equals those
-documents' `updateTime`; null for the moment between that commit and the follow-up write that sets
-it), `undoneAt` (timestamp or absent),
+(server timestamp written in the same commit as the `values`, so it equals their `updatedAt`),
+`undoneAt` (timestamp or absent),
 `expiresAt` (timestamp).
 
 ## Record keys and payloads

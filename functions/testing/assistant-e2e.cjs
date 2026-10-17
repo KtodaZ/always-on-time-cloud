@@ -87,7 +87,7 @@ const json = { 'Content-Type': 'application/json' };
   assert.equal((await db.doc(`accounts/${uid}/values/e_${'c'.repeat(64)}`).get()).data().payload, '{"leadTimes":[15],"enabled":true}');
   const activity = (await db.doc(`accounts/${uid}/assistantActivity/${changed.structuredContent.changeId}`).get()).data();
   const value = await db.doc(`accounts/${uid}/values/e_${'c'.repeat(64)}`).get();
-  assert.ok(activity.writtenAt.isEqual(value.updateTime), 'writtenAt equals the values update time');
+  assert.ok(activity.writtenAt.isEqual(value.data().updatedAt), 'writtenAt equals the values updatedAt');
 
   // Refresh rotates; the old access token keeps working until it expires.
   const rotated = await fetch(`${site}/oauth/token`, form({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: client.client_id })).then(r => r.json());

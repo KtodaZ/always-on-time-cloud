@@ -168,7 +168,7 @@ async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite })
 
 /**
  * When a change was written, in ms. Normally its activity entry's writtenAt; if the server stopped
- * before recording it, the values' own update time (while they still hold what the change wrote).
+ * before recording it, the values' own updatedAt (while they still hold what the change wrote).
  */
 async function changeWriteTime(ctx, activity) {
   const recorded = toMillis(activity.writtenAt);
@@ -176,7 +176,7 @@ async function changeWriteTime(ctx, activity) {
   const ids = Object.keys(activity.records ?? {}).filter(isRecordId);
   const docs = await Promise.all(ids.map((id) => refs.values(ctx.db, ctx.uid).doc(id).get()));
   const times = docs.filter((doc, index) => doc.exists && doc.data().payload === activity.records[ids[index]].after)
-    .map((doc) => toMillis(doc.updateTime)).filter((time) => time !== null);
+    .map((doc) => toMillis(doc.data().updatedAt)).filter((time) => time !== null);
   if (!times.length) throw new ToolError("That change has since been replaced by a newer one.");
   return Math.max(...times);
 }
