@@ -6,7 +6,9 @@
 
 const z = require("zod");
 
-const { CHANGE_ID_PATTERN, DAY_MS, UNDO_DAYS, readDevices, refs } = require("./assistant-data");
+const {
+  CHANGE_ID_PATTERN, DAY_MS, UNDO_DAYS, readDevices, readValues, refs,
+} = require("./assistant-data");
 const {
   PAUSED_UNTIL, RecordError, isRecordId, samePayload, validatePayload,
 } = require("./assistant-records");
@@ -22,6 +24,7 @@ const {
 const { eventInputs } = require("./assistant-tools-read");
 
 const MAX_PAUSE_DAYS = 366;
+const RESPECT_DND = "p_respect_dnd";
 
 // Hints for clients (MCP tool annotations): any of these can stop alarms from ringing, so clients
 // that confirm destructive actions ask first. resume_alarms only turns alarms back on.
@@ -143,18 +146,20 @@ const TOOLS = [
   writeTool({
     name: "set_calendar",
     title: "Change a calendar's alarms",
-    description: "Changes one calendar on the phone: whether the app watches it (rings for its events), its default lead times, and which invitations ring. All-day events are an app-wide setting (update_settings ignoreAllDayEvents). Local-only calendars can't be changed here. Returns a changeId; then call confirm_change.",
+    description: "Changes one calendar on the phone: whether the app watches it (rings for its events), its default lead times, which invitations ring, and whether its alarms ring through Do Not Disturb (for important calendars when update_settings respectDoNotDisturb is on; otherwise alarms already ring whenever the system allows). All-day events are an app-wide setting (update_settings ignoreAllDayEvents). Local-only calendars can't be changed here. Returns a changeId; then call confirm_change.",
     inputSchema: {
       calendar: z.string().min(1).max(300).describe("Calendar key, name, or Google calendarId."),
       watched: z.boolean().optional().describe("true to ring for this calendar's events, false to stop."),
       leadTimes: leadTimesInput.optional(),
       useAppDefaultLeadTimes: z.boolean().optional().describe("true to drop the calendar's own lead times and use the app default."),
       rsvpFilter: z.enum(RSVP_FILTER_VALUES).optional().describe("Which invitations ring."),
+      ringThroughDoNotDisturb: z.boolean().optional()
+        .describe("true for this calendar's alarms to ring with sound during Do Not Disturb while Respect Do Not Disturb is on; false to keep them silent then. Android only."),
     },
     async plan(ctx, args) {
-      const { watched, leadTimes, useAppDefaultLeadTimes, rsvpFilter } = args;
-      if ([watched, leadTimes, useAppDefaultLeadTimes, rsvpFilter].every((value) => value === undefined)) {
-        throw new ToolError("Say what to change: watched, leadTimes, useAppDefaultLeadTimes or rsvpFilter.");
+      const { watched, leadTimes, useAppDefaultLeadTimes, rsvpFilter, ringThroughDoNotDisturb } = args;
+      if ([watched, leadTimes, useAppDefaultLeadTimes, rsvpFilter, ringThroughDoNotDisturb].every((value) => value === undefined)) {
+        throw new ToolError("Say what to change: watched, leadTimes, useAppDefaultLeadTimes, rsvpFilter or ringThroughDoNotDisturb.");
       }
       if (leadTimes && useAppDefaultLeadTimes) throw new ToolError("Use either leadTimes or useAppDefaultLeadTimes, not both.");
       const snapshot = await latestSnapshot(ctx);
@@ -165,6 +170,12 @@ const TOOLS = [
       if (leadTimes) parts.push(`ringing ${leadTimesText(tidyLeadTimes(leadTimes))}`);
       if (useAppDefaultLeadTimes) parts.push("using the app's default lead times");
       if (rsvpFilter) parts.push(`invitations: ${rsvpFilter.replace(/_/g, " ")}`);
+      if (ringThroughDoNotDisturb === true) {
+        const respectDnd = parseStored((await readValues(ctx.db, ctx.uid, [RESPECT_DND]))[RESPECT_DND]) === true;
+        parts.push(respectDnd ? "rings through Do Not Disturb"
+          : "rings through Do Not Disturb once Respect Do Not Disturb is on (it is off, so alarms already ring when the system allows)");
+      }
+      if (ringThroughDoNotDisturb === false) parts.push("silent during Do Not Disturb while Respect Do Not Disturb is on");
       return {
         recordIds: [key],
         summary: `Set ${name}: ${parts.join(", ")}`,
@@ -175,6 +186,9 @@ const TOOLS = [
           if (leadTimes) overrides.leadTimes = leadTimes;
           if (useAppDefaultLeadTimes) delete overrides.leadTimes;
           if (rsvpFilter) overrides.rsvpFilter = rsvpFilter;
+          // Only true is stored; off is no override, as the app writes it.
+          if (ringThroughDoNotDisturb === true) overrides.ringThroughDnd = true;
+          if (ringThroughDoNotDisturb === false) delete overrides.ringThroughDnd;
           const meaningful = Object.values(overrides).some((value) => value !== null && value !== undefined);
           return { [key]: { ...stored, selected: watched ?? stored.selected ?? null, overrides: meaningful ? overrides : null } };
         },

@@ -131,6 +131,8 @@ test("payloads are validated with the app's limits before anything is written", 
     ["c_" + "a".repeat(64), '{"overrides":{"travelLeadTimes":[]}}'],
     ["c_" + "a".repeat(64), '{"overrides":{"travelLeadTimes":[0,10,20,30,40]}}'],
     ["c_" + "a".repeat(64), '{"overrides":{"travelLeadTimes":[180]}}'],
+    ["c_" + "a".repeat(64), '{"overrides":{"ringThroughDnd":"yes"}}'],
+    ["c_" + "a".repeat(64), '{"overrides":{"ringThroughDnd":1}}'],
     ["c_" + "a".repeat(64), '{"selected":"yes"}'],
     ["c_" + "a".repeat(64), "null"],
     ["p_alarm_volume", "101"],
@@ -148,6 +150,10 @@ test("payloads are validated with the app's limits before anything is written", 
   for (const [id, payload] of bad) assert.throws(() => validatePayload(id, payload), RecordError, `${id} ${payload.slice(0, 60)}`);
   assert.deepEqual(validatePayload("c_" + "a".repeat(64), '{"selected":false,"overrides":{"travelLeadTimes":[0,10],"ignoreAllDay":true}}'),
     { selected: false, overrides: { travelLeadTimes: [0, 10], ignoreAllDay: true } });
+  // The app writes only true, but false is a valid (kept) value, as kotlinx keeps it.
+  assert.equal(encodePayload("c_" + "a".repeat(64), { overrides: { ringThroughDnd: false, rsvpFilter: "all_events", leadTimes: [5] } }),
+    '{"overrides":{"leadTimes":[5],"rsvpFilter":"all_events","ringThroughDnd":false}}');
+  assert.equal(samePayload("c_" + "a".repeat(64), '{"overrides":{"leadTimes":[10]}}', '{"overrides":{"leadTimes":[10],"ringThroughDnd":null}}'), true);
   for (const [id, value] of [["p_alarm_volume", 100], ["p_alarms_paused_until", -1], ["p_alarms_paused_until", 4102444800000], ["p_respect_dnd", null], ["p_accent_id", "any accent"]]) {
     assert.equal(encodePayload(id, value), JSON.stringify(value));
   }

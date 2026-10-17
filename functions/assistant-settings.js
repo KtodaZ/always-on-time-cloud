@@ -70,7 +70,6 @@ const SETTINGS = {
   maxSnoozes: setting("max_snoozes", "Maximum snoozes"),
   smartSnoozeSuggestions: setting("smart_snooze_suggestions", "Smart snooze suggestions"),
   respectDoNotDisturb: setting("respect_dnd", "Respect Do Not Disturb"),
-  overrideDndForPriority: setting("override_dnd_for_priority", "Ring through Do Not Disturb for priority events"),
   overrideSystemVolume: setting("override_system_volume", "Override system volume"),
   ignoreAllDayEvents: setting("ignore_all_day_events", "Skip all-day events"),
   rsvpFilter: setting("rsvp_filter", "Which invitations ring"),

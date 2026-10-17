@@ -159,7 +159,9 @@ Payloads (`values/{key}.payload`, ≤ 16 KB):
 - `Override`: `leadTimes` (≤ 20 ints in −1440..10080), `enabled` (bool), `volume` (0..100),
   `vibrationPattern` (≤ 100 chars), `ignoreAllDay` (bool, calendars), `rsvpFilter` (≤ 100 chars,
   calendars), `addedLeadTimes` (≤ 20 ints), `travelLeadTimes` (1..4 ints in 0..179, calendars; the app's per-event alarm limit and
-  longest travel lead). Absent fields mean "inherit". Phones ignore unknown fields; the server
+  longest travel lead), `ringThroughDnd` (bool, calendars, Android only: the calendar's alarms
+  ring with sound during Do Not Disturb while `respect_dnd` is on; only `true` is written, absent
+  means off). Absent fields mean "inherit". Phones ignore unknown fields; the server
   validates only the fields it knows and keeps unknown ones when it rewrites a record, so a newer
   app's fields survive an assistant change.
 - `p_`: JSON scalars (`null` clears). Booleans: `dynamic_color`, `apply_accent_to_app`,
@@ -167,8 +169,10 @@ Payloads (`values/{key}.payload`, ≤ 16 KB):
   `spoken_alarm_include_time_until_event`, `spoken_alarm_include_location`,
   `spoken_alarm_include_helpful_reminder`, `respect_dnd`, `override_dnd_for_priority`,
   `ignore_all_day_events`, `auto_detect_meeting_urls`, `override_system_volume`,
-  `smart_snooze_suggestions`. Integers: `default_lead_time_minutes` 0..10080, `alarm_volume`
-  0..100, `snooze_duration_minutes` 1..1440, `alarm_duration_seconds` 0..86400, `max_snoozes`
+  `smart_snooze_suggestions`. `override_dnd_for_priority` is retired (replaced by the calendar
+  override `ringThroughDnd`): it stays allowed so older phones' records validate, but nothing reads
+  it and the assistant neither shows nor changes it. Integers: `default_lead_time_minutes`
+  0..10080, `alarm_volume` 0..100, `snooze_duration_minutes` 1..1440, `alarm_duration_seconds` 0..86400, `max_snoozes`
   0..100, `spoken_alarm_speech_rate_hundredths` 25..400. Strings (≤ 500): `theme_preference`
   (`system`, `light`, `dark`), `accent_id`, `default_lead_times_csv` (a JSON list, e.g. `[0,10]`),
   `alert_type` (`sound_and_vibration`, `vibration_only`, `visual_only`), `vibration_pattern`,
@@ -180,12 +184,12 @@ Payloads (`values/{key}.payload`, ≤ 16 KB):
 
 Canonical encoding: payloads are written the way kotlinx serialization writes the app's data
 classes. Fields appear in the data class's order (`leadTimes`, `enabled`, `volume`,
-`vibrationPattern`, `ignoreAllDay`, `rsvpFilter`, `addedLeadTimes`, `travelLeadTimes`; `selected`,
-`overrides`), null fields are left out, lead-time lists are sorted ascending without duplicates,
-and there are no spaces. So `c_` with only `selected` is `{"selected":true}`. Unknown fields
-follow the known ones. Equal meaning, not equal text, is what counts: comparisons (skipping a
-change that changes nothing, undo's "changed since" check) parse both payloads and compare their
-canonical forms.
+`vibrationPattern`, `ignoreAllDay`, `rsvpFilter`, `addedLeadTimes`, `travelLeadTimes`,
+`ringThroughDnd`; `selected`, `overrides`), null fields are left out, lead-time lists are sorted
+ascending without duplicates, and there are no spaces. So `c_` with only `selected` is
+`{"selected":true}`. Unknown fields follow the known ones. Equal meaning, not equal text, is what
+counts: comparisons (skipping a change that changes nothing, undo's "changed since" check) parse
+both payloads and compare their canonical forms.
 
 The server validates every write against these limits before writing; phones validate again on
 apply.

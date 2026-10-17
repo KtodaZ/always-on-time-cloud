@@ -56,6 +56,10 @@ const PREFERENCE_LONGS = new Map([[PAUSED_UNTIL, [-1, PAUSED_UNTIL_MAX]]]);
 const PREFERENCE_NAMES = new Set([
   ...PREFERENCE_BOOLEANS, ...PREFERENCE_INTEGERS.keys(), ...PREFERENCE_STRINGS.keys(), ...PREFERENCE_LONGS.keys(),
 ]);
+// Preferences the app no longer reads. They stay allowed so older phones' records still validate,
+// but the assistant neither shows nor changes them. override_dnd_for_priority was replaced by the
+// per-calendar override ringThroughDnd.
+const RETIRED_PREFERENCES = new Set(["override_dnd_for_priority"]);
 
 class RecordError extends Error {}
 
@@ -201,6 +205,7 @@ function googleEventKeys(calendar, { eventId, recurringEventId, originalStartTim
 
 const OVERRIDE_FIELDS = [
   "leadTimes", "enabled", "volume", "vibrationPattern", "ignoreAllDay", "rsvpFilter", "addedLeadTimes", "travelLeadTimes",
+  "ringThroughDnd",
 ];
 const CALENDAR_FIELDS = ["selected", "overrides"];
 const LEAD_TIME_LISTS = new Set(["leadTimes", "addedLeadTimes", "travelLeadTimes"]);
@@ -230,6 +235,7 @@ function validateOverride(value) {
         break;
       case "enabled":
       case "ignoreAllDay":
+      case "ringThroughDnd":
         if (typeof item !== "boolean") throw new RecordError(`${field} must be true or false`);
         break;
       case "volume":
@@ -362,6 +368,7 @@ module.exports = {
   PREFERENCE_NAMES,
   PREFERENCE_STRINGS,
   PREFERENCE_STRING_MAX,
+  RETIRED_PREFERENCES,
   RecordError,
   TRAVEL_LEAD_TIME_MAX,
   calendarKey,
