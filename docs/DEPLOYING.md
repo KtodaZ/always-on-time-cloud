@@ -25,7 +25,7 @@ Secrets stay in Secret Manager and are bound to functions at deploy time:
 
 | Secret | Used by |
 | --- | --- |
-| `FEEDBACK_DISCORD_WEBHOOK_URL` | `publishFeedbackNotification` |
+| `FEEDBACK_DISCORD_WEBHOOK_URL` | `publishFeedbackNotification`, `sendAssistantUsageSummary` |
 | `TOMTOM_API_KEY`, `TRAVEL_ROUTE_API_KEY` | `calculateTravelRoute` |
 | `APNS_AUTH_KEY_P8` | iOS relay push functions |
 

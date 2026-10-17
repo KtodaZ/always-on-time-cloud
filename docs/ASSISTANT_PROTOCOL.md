@@ -20,7 +20,8 @@ Connector data:
 | `accounts/{uid}/assistantDevices/{deviceId}` | owner | owner, server | see Devices |
 | `accounts/{uid}/assistantSnapshots/{deviceId}` | owner | owner, server | see Snapshot |
 | `accounts/{uid}/assistantActivity/{changeId}` | server | owner | see Activity |
-| `oauthClients/{clientId}`, `oauthCodes/{hash}`, `oauthGrants/{grantId}`, `oauthTokens/{hash}` | server | server | OAuth state (no client access) |
+| `oauthClients/{hash}`, `oauthRequests/{hash}`, `oauthCodes/{hash}`, `oauthGrants/{grantId}`, `oauthTokens/{hash}` | server | server | OAuth state (no client access) |
+| `assistantRateLimits/{hash}` | server | server | rate limit counts with a TTL (no client access) |
 | `assistantUsage/{yyyy-mm-dd}` | server | server | anonymous daily counters (no client access) |
 
 `deviceId` is a random UUID the phone creates once per install and per account (not an Android
@@ -36,7 +37,7 @@ ID). The owner is the signed-in Google account `uid` with an active account, as 
 | `deviceName` | string ≤ 100 | Model label, e.g. "Pixel 9" (same label as synced history) |
 | `appVersion` | string ≤ 40 | |
 | `fcmToken` | string ≤ 4096 | Android; absent on iOS until its relay is wired |
-| `capabilities` | list of strings ≤ 20 | `travel`, `spokenAlarms`, `plus`, `pause` |
+| `capabilities` | list of strings ≤ 20 | Only `travel`, `spokenAlarms`, `plus`, `pause` (the rules reject others, so a new capability needs a rules change first) |
 | `lastPing` | map | `{id: string ≤ 64, receivedAt: timestamp}` echo of the latest test ping |
 | `updatedAt` | timestamp | `request.time` |
 
@@ -90,7 +91,9 @@ publish request that caused it) and `payload` (JSON string ≤ 800,000 character
 `accounts/{uid}/assistantActivity/{changeId}` (server-written, 30-day TTL on `expiresAt`):
 `assistant` (client display name), `tool`, `summary` (plain-language, may contain an event title),
 `records` (map of recordId → `{before: string|null, after: string|null}` payloads), `writtenAt`
-(timestamp, equals the `values` write's update time), `undoneAt` (timestamp or absent),
+(timestamp: the commit time of the batch that wrote the entry and the `values`, so it equals those
+documents' `updateTime`; null for the moment between that commit and the follow-up write that sets
+it), `undoneAt` (timestamp or absent),
 `expiresAt` (timestamp).
 
 ## Record keys and payloads
@@ -124,8 +127,9 @@ Payloads (`values/{key}.payload`, ≤ 16 KB):
 - `s_`, `e_`: `Override` JSON, or the string `null` to clear the rule or override.
 - `Override`: `leadTimes` (≤ 20 ints in −1440..10080), `enabled` (bool), `volume` (0..100),
   `vibrationPattern` (≤ 100 chars), `ignoreAllDay` (bool, calendars), `rsvpFilter` (≤ 100 chars,
-  calendars), `addedLeadTimes` (≤ 20 ints), `travelLeadTimes` (1..max ints, calendars). Absent
-  fields mean "inherit". Unknown fields are ignored by phones.
+  calendars), `addedLeadTimes` (≤ 20 ints), `travelLeadTimes` (1..4 ints in 0..179, calendars; the app's per-event alarm limit and
+  longest travel lead). Absent fields mean "inherit". Unknown fields are ignored by phones; the
+  server never writes them.
 - `p_`: JSON scalars (`null` clears). Booleans: `dynamic_color`, `apply_accent_to_app`,
   `vibration_enabled`, `gradual_volume_enabled`, `spoken_alarm_include_event_name`,
   `spoken_alarm_include_time_until_event`, `spoken_alarm_include_location`,
@@ -156,7 +160,9 @@ snapshot per 10 seconds; extra requests coalesce.
 
 ## Connection lifecycle
 
-1. Approving an OAuth grant sets `assistant/state` to connected and bumps `connections`.
+1. Exchanging an approved authorization code creates the grant, sets `assistant/state` to
+   connected and updates `connections`. Connecting the same assistant again replaces its earlier
+   grant; grants unused for 90 days are revoked by a daily job.
 2. A signed-in phone sees the flag (live listener while the app runs, or the next periodic account
    sync), writes its device document with an FCM token, and publishes a snapshot.
 3. The assistant's first call runs `test_connection`: the server sends `ping` to each device,
