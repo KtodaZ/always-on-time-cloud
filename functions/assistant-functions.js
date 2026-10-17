@@ -62,7 +62,6 @@ exports.assistantMcp = onRequest(
       const { db, messaging, usage } = services();
       mcpHandler = createMcpHandler({
         db, messaging, usage, logger, origin, accountEmails, sdk: loadSdk(),
-        fields: { serverTimestamp: () => FieldValue.serverTimestamp() },
       });
     }
     return mcpHandler(req, res);

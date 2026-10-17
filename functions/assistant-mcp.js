@@ -37,7 +37,7 @@ const bearer = (req) => {
 const memoryLimiter = createMemoryLimiter(LIMITS.toolCalls);
 
 /**
- * Builds the MCP request handler. `deps`: db, messaging, fields ({serverTimestamp, increment}),
+ * Builds the MCP request handler. `deps`: db, messaging,
  * usage(counts), accountEmails(uid), logger, now, sleep, origin, sdk ({McpServer,
  * StreamableHTTPServerTransport}; loaded lazily so other functions don't pay for it).
  */
@@ -80,7 +80,6 @@ function createMcpHandler(deps) {
       origin: u.origin,
       now,
       sleep,
-      fields: deps.fields,
       messaging: deps.messaging,
       logger,
       accountEmails: () => deps.accountEmails(grant.uid),

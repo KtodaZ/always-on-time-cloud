@@ -56,6 +56,7 @@ function snapshotPayload({ appliedThrough = T0 - HOUR } = {}) {
 function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabilities = ["travel", "spokenAlarms", "pause"] } = {}) {
   const db = new FakeFirestore();
   const clock = { time: T0 };
+  db.now = () => clock.time;
   const messaging = createRecordingMessaging();
   const handled = new Set();
   const phoneState = { answers: true, applies: true };
@@ -86,7 +87,6 @@ function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabil
       clock.time += ms;
       react();
     },
-    fields: { serverTimestamp: () => new Date(clock.time) },
     usage: createUsage({ db, increment: (n) => ({ __increment: n }), now: () => clock.time }),
     accountEmails: async () => ["alex@example.com"],
     sdk: loadSdk(),
@@ -263,7 +263,9 @@ test("a change from Google Calendar ids is validated, logged, pushed and confirm
     assert.deepEqual(activity.records[STANDUP], { before: null, after: '{"leadTimes":[30,5],"enabled":true}' });
     assert.equal(activity.assistant, "Claude");
     assert.equal(activity.tool, "set_event_alarms");
-    assert.ok(activity.expiresAt.getTime() - activity.writtenAt.getTime() === 30 * 24 * HOUR);
+    // writtenAt is the values' own update time, which is what phones report back.
+    assert.equal(activity.writtenAt.getTime(), db.updateTimes.get(`accounts/alice/values/${STANDUP}`));
+    assert.ok(Math.abs(activity.expiresAt.getTime() - activity.writtenAt.getTime() - 30 * 24 * HOUR) < 1000);
     const sync = messaging.sent.at(-1);
     assert.deepEqual([sync.token, sync.data.type, sync.data.changeId], ["fcm-token", "sync", changeId]);
     const confirmed = await call(token, "confirm_change", { changeId, waitSeconds: 5 });

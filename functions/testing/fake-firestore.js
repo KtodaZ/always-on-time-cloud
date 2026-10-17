@@ -5,6 +5,8 @@
 // transactional read must precede the first write, `update` fails on missing documents, and
 // range filters only match values of the same type (so null fields drop out, as in Firestore).
 // Merge writes apply increments written as `{ __increment: n }` (tests pass that as FieldValue).
+// Documents carry an update time (a Date from `db.now()`); batches commit atomically at one time,
+// honour `lastUpdateTime` preconditions and return write results, as Firestore does.
 
 function clone(value) {
   return value === undefined ? undefined : structuredClone(value);
@@ -16,6 +18,7 @@ class DocumentSnapshot {
     this.id = this.ref.id;
     this.exists = db.documents.has(path);
     this._data = clone(db.documents.get(path));
+    this.updateTime = this.exists ? new Date(db.updateTimes.get(path) ?? 0) : undefined;
   }
 
   data() {
@@ -48,12 +51,30 @@ class DocumentReference {
   }
 
   async create(value) {
-    if (this.db.documents.has(this.path)) {
+    this.check("create");
+    this.db.write(this.path, clone(value));
+  }
+
+  /** Throws the Firestore error a write would fail with. */
+  check(kind, precondition) {
+    if (kind === "create" && this.db.documents.has(this.path)) {
       const error = new Error("document already exists");
       error.code = 6;
       throw error;
     }
-    this.db.write(this.path, clone(value));
+    if (kind === "update" && !this.db.documents.has(this.path)) {
+      const error = new Error(`no document to update: ${this.path}`);
+      error.code = 5;
+      throw error;
+    }
+    if (precondition?.lastUpdateTime !== undefined) {
+      const expected = precondition.lastUpdateTime instanceof Date ? precondition.lastUpdateTime.getTime() : precondition.lastUpdateTime?.toMillis?.();
+      if ((this.db.updateTimes.get(this.path) ?? 0) !== expected) {
+        const error = new Error("precondition failed");
+        error.code = 9;
+        throw error;
+      }
+    }
   }
 
   async set(value, options = {}) {
@@ -62,18 +83,14 @@ class DocumentReference {
     } else this.db.write(this.path, clone(value));
   }
 
-  async update(value) {
-    const current = this.db.documents.get(this.path);
-    if (!current) {
-      const error = new Error(`no document to update: ${this.path}`);
-      error.code = 5;
-      throw error;
-    }
-    this.db.write(this.path, { ...current, ...clone(value) });
+  async update(value, precondition) {
+    this.check("update", precondition);
+    this.db.write(this.path, { ...this.db.documents.get(this.path), ...clone(value) });
   }
 
   async delete() {
     this.db.documents.delete(this.path);
+    this.db.updateTimes.delete(this.path);
     this.db.writes += 1;
   }
 }
@@ -172,29 +189,51 @@ class Transaction {
 }
 
 class WriteBatch {
-  constructor() {
+  constructor(db) {
+    this.db = db;
     this.pending = [];
   }
 
-  delete(ref) { this.pending.push(() => ref.delete()); }
-  set(ref, value) { this.pending.push(() => ref.set(value)); }
-  update(ref, value) { this.pending.push(() => ref.update(value)); }
+  create(ref, value) { this.pending.push({ kind: "create", ref, apply: () => ref.create(value) }); }
+  delete(ref) { this.pending.push({ kind: "delete", ref, apply: () => ref.delete() }); }
+  set(ref, value, options) { this.pending.push({ kind: "set", ref, apply: () => ref.set(value, options) }); }
+  update(ref, value, precondition) { this.pending.push({ kind: "update", ref, precondition, apply: () => ref.update(value, precondition) }); }
 
+  /** All-or-nothing at a single commit time. */
   async commit() {
-    for (const write of this.pending) await write();
+    for (const { kind, ref, precondition } of this.pending) ref.check(kind, precondition);
+    const time = this.db.commitTime();
+    this.db.frozenTime = time;
+    try {
+      for (const { apply } of this.pending) await apply();
+    } finally {
+      this.db.frozenTime = null;
+    }
+    return this.pending.map(() => ({ writeTime: new Date(time) }));
   }
 }
 
 class FakeFirestore {
   constructor() {
     this.documents = new Map();
+    this.updateTimes = new Map();
+    this.now = () => Date.now();
+    this.lastTime = 0;
+    this.frozenTime = null;
     this.queue = Promise.resolve();
     this.reads = 0;
     this.writes = 0;
   }
 
+  /** A strictly increasing commit time, like Firestore's. */
+  commitTime() {
+    this.lastTime = Math.max(this.now(), this.lastTime + 1);
+    return this.lastTime;
+  }
+
   write(path, value) {
     this.documents.set(path, value);
+    this.updateTimes.set(path, this.frozenTime ?? this.commitTime());
     this.writes += 1;
   }
 
@@ -203,7 +242,7 @@ class FakeFirestore {
   }
 
   batch() {
-    return new WriteBatch();
+    return new WriteBatch(this);
   }
 
   /** Deletes a collection's documents and everything nested below them. */

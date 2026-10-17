@@ -151,7 +151,7 @@ async function sleepUntil(ctx, deadline, check) {
 /** Saves a change, logs it for undo and nudges the phones. */
 async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite }) {
   const { changeId, records } = await recordChange(ctx.db, ctx.uid, {
-    recordIds, build, assistant: ctx.grant.clientName, tool, summary, now: ctx.now(), fields: ctx.fields, afterWrite,
+    recordIds, build, assistant: ctx.grant.clientName, tool, summary, now: ctx.now(), afterWrite,
   });
   if (!changeId) return result("That is already how it's set; nothing changed.", { changed: false });
   ctx.count("changes");
@@ -164,6 +164,21 @@ async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite })
   return result(`${summary}. Saved as change ${changeId}. ${delivery} It can be reversed with undo.`, {
     changed: true, changeId, records: Object.keys(records), sentTo: sent.sent.map(deviceName),
   });
+}
+
+/**
+ * When a change was written, in ms. Normally its activity entry's writtenAt; if the server stopped
+ * before recording it, the values' own update time (while they still hold what the change wrote).
+ */
+async function changeWriteTime(ctx, activity) {
+  const recorded = toMillis(activity.writtenAt);
+  if (recorded !== null) return recorded;
+  const ids = Object.keys(activity.records ?? {}).filter(isRecordId);
+  const docs = await Promise.all(ids.map((id) => refs.values(ctx.db, ctx.uid).doc(id).get()));
+  const times = docs.filter((doc, index) => doc.exists && doc.data().payload === activity.records[ids[index]].after)
+    .map((doc) => toMillis(doc.updateTime)).filter((time) => time !== null);
+  if (!times.length) throw new ToolError("That change has since been replaced by a newer one.");
+  return Math.max(...times);
 }
 
 const parseStored = (payload) => {
@@ -751,8 +766,8 @@ const TOOLS = [
         recordIds,
         tool: "undo",
         summary: `Undid: ${original.summary}`,
-        build: async (current, transaction) => {
-          const fresh = await transaction.get(activityRef);
+        build: async (current, read) => {
+          const fresh = await read(activityRef);
           if (!fresh.exists) throw new ToolError("No change with that changeId in the last 30 days.");
           if (fresh.data().undoneAt) throw new ToolError("That change was already undone.");
           const changed = recordIds.filter((id) => current[id] !== original.records[id].after);
@@ -764,7 +779,8 @@ const TOOLS = [
             return [id, id.startsWith("c_") ? { selected: null, overrides: null } : null];
           }));
         },
-        afterWrite: (transaction, time) => transaction.update(activityRef, { undoneAt: time }),
+        // Guarded like the values, so two concurrent undos cannot both succeed.
+        afterWrite: (batch, snapshotOf) => batch.update(activityRef, { undoneAt: new Date(ctx.now()) }, { lastUpdateTime: snapshotOf(activityRef).updateTime }),
       });
       if (out.data.changed) ctx.count("undos");
       return out;
@@ -784,7 +800,7 @@ const TOOLS = [
     async handler(ctx, args) {
       const activity = await refs.activity(ctx.db, ctx.uid).doc(args.changeId).get();
       if (!activity.exists) throw new ToolError("No change with that changeId in the last 30 days.");
-      const writtenAt = toMillis(activity.data().writtenAt);
+      const writtenAt = await changeWriteTime(ctx, activity.data());
       const deadline = ctx.now() + (args.waitSeconds ?? 10) * 1000;
       let snapshots = [];
       await sleepUntil(ctx, deadline, async () => {
