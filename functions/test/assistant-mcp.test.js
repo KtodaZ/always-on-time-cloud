@@ -10,6 +10,7 @@ const test = require("node:test");
 
 const { FakeFirestore } = require("../testing/fake-firestore");
 const { createMcpHandler, loadSdk } = require("../assistant-mcp");
+const { LEGACY_HOSTS } = require("../assistant-oauth");
 const { createRecordingMessaging } = require("../assistant-push");
 const { calendarKey, occurrenceKey, seriesKey } = require("../assistant-records");
 const { DESTINATIONS } = require("../assistant-snapshot");
@@ -54,7 +55,7 @@ function snapshotPayload({ appliedThrough = T0 - HOUR } = {}) {
   });
 }
 
-function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabilities = ["travel", "spokenAlarms", "pause"], payload = snapshotPayload } = {}) {
+function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabilities = ["travel", "spokenAlarms", "pause"], payload = snapshotPayload, legacyHosts } = {}) {
   const db = new FakeFirestore();
   const clock = { time: T0 };
   db.now = () => clock.time;
@@ -95,6 +96,7 @@ function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabil
     },
     usage: createUsage({ db, increment: (n) => ({ __increment: n }), now: () => clock.time }),
     accountEmails: async () => ["alex@example.com"],
+    legacyHosts,
     sdk: loadSdk(),
   });
   db.documents.set("accounts/alice", { active: true, schemaVersion: 1 });
@@ -149,11 +151,34 @@ test("requests without a valid token get 401 with the protected resource metadat
   await withServer(handler, async ({ rpc }) => {
     const missing = await rpc(null, "tools/list");
     assert.equal(missing.status, 401);
-    assert.match(missing.headers.get("www-authenticate"), /^Bearer resource_metadata="https:\/\/always-on-time-zombit-2026\.web\.app\/\.well-known\/oauth-protected-resource\/mcp"/);
+    assert.match(missing.headers.get("www-authenticate"), /^Bearer resource_metadata="https:\/\/alwaysontime\.zombit\.io\/\.well-known\/oauth-protected-resource\/mcp"/);
     const bad = await rpc("aot_at_forged", "tools/list");
     assert.equal(bad.status, 401);
     assert.match(bad.headers.get("www-authenticate"), /error="invalid_token"/);
   });
+});
+
+test("MCP requests on a legacy host are told the connector moved instead of being redirected", async () => {
+  const { handler, token, logs } = setup({ legacyHosts: LEGACY_HOSTS });
+  await withServer(handler, async ({ url, rpc }) => {
+    const legacy = (headers = {}) => fetch(url, { method: "POST", redirect: "manual", headers: {
+      "content-type": "application/json", accept: "application/json, text/event-stream", "x-forwarded-host": "always-on-time-zombit-2026.web.app", ...headers,
+    }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+    for (const response of [await legacy(), await legacy({ authorization: `Bearer ${token}` })]) {
+      assert.equal(response.status, 410);
+      assert.equal(response.headers.get("location"), null);
+      assert.equal(response.headers.get("access-control-allow-origin"), "*");
+      const body = await response.json();
+      assert.equal(body.jsonrpc, "2.0");
+      assert.match(body.error.message, /moved to https:\/\/alwaysontime\.zombit\.io\/mcp\./);
+    }
+    // The custom domain (and a request without the header) works as usual.
+    const listed = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream",
+      authorization: `Bearer ${token}`, "x-forwarded-host": "alwaysontime.zombit.io" }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
+    assert.equal(listed.status, 200);
+    assert.equal((await rpc(token, "tools/list")).status, 200);
+  });
+  assert.deepEqual(logs.filter((entry) => entry.assistantEvent === "host.moved").map(({ path, status }) => [path, status]), [["/mcp", 410], ["/mcp", 410]]);
 });
 
 test("initialize carries the setup-first instructions and every tool is listed with annotations", async () => {
@@ -191,7 +216,7 @@ test("status before a phone connects explains how to finish connecting", async (
   await withServer(handler, async ({ call }) => {
     const status = await call(token, "get_status");
     assert.match(status.text, /No phone has finished connecting/);
-    assert.equal(status.structuredContent.links.assistants, "https://always-on-time-zombit-2026.web.app/open/assistants");
+    assert.equal(status.structuredContent.links.assistants, "https://alwaysontime.zombit.io/open/assistants");
     const test = await call(token, "test_connection");
     assert.equal(test.structuredContent.outcome, "noDevices");
     const list = await call(token, "list_upcoming_alarms");
@@ -256,11 +281,11 @@ test("travel alarms mention Plus for live traffic, and the Plus link is counted"
   const { db, handler, token } = setup();
   await withServer(handler, async ({ call }) => {
     const explained = await call(token, "explain_alarm", { event: DENTIST });
-    assert.match(explained.text, /live traffic updates need Always On Time Plus: https:\/\/always-on-time-zombit-2026\.web\.app\/open\/plus\?source=assistant/);
+    assert.match(explained.text, /live traffic updates need Always On Time Plus: https:\/\/alwaysontime\.zombit\.io\/open\/plus\?source=assistant/);
     const link = await call(token, "open_in_app", { destination: "plus" });
-    assert.equal(link.structuredContent.link, "https://always-on-time-zombit-2026.web.app/open/plus?source=assistant");
+    assert.equal(link.structuredContent.link, "https://alwaysontime.zombit.io/open/plus?source=assistant");
     const event = await call(token, "open_in_app", { destination: "event", key: DENTIST.slice(0, 12) });
-    assert.equal(event.structuredContent.link, `https://always-on-time-zombit-2026.web.app/open/event/${DENTIST}`);
+    assert.equal(event.structuredContent.link, `https://alwaysontime.zombit.io/open/event/${DENTIST}`);
   });
   assert.equal(db.documents.get("assistantUsage/2026-10-16").plusGate, 2);
 });

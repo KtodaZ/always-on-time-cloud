@@ -1,7 +1,8 @@
 "use strict";
 
 // Firebase wiring for the assistant connector (docs/ASSISTANT_CONNECTOR.md). Hosting rewrites
-// /mcp, /oauth/** and /.well-known/oauth-* on https://always-on-time-zombit-2026.web.app here.
+// /mcp, /oauth/** and /.well-known/oauth-* on https://alwaysontime.zombit.io here. Hosting serves the
+// same paths on the project's default domains, whose requests are pointed at the custom domain.
 
 const { getAuth } = require("firebase-admin/auth");
 const { FieldValue, getFirestore } = require("firebase-admin/firestore");
@@ -17,7 +18,7 @@ const { createMcpHandler, loadSdk } = require("./assistant-mcp");
 const { ToolError } = require("./assistant-snapshot");
 const { createToolContext } = require("./assistant-tool-context");
 const { TOOLS } = require("./assistant-tools");
-const { PRODUCTION_ORIGIN, createOAuth } = require("./assistant-oauth");
+const { LEGACY_HOSTS, PRODUCTION_ORIGIN, createOAuth } = require("./assistant-oauth");
 const { createOAuthHandler } = require("./assistant-oauth-http");
 const { createRecordingMessaging } = require("./assistant-push");
 const { createUsage, weeklySummary } = require("./assistant-usage");
@@ -29,6 +30,8 @@ const feedbackWebhookUrl = defineSecret("FEEDBACK_DISCORD_WEBHOOK_URL");
 const emulated = process.env.FUNCTIONS_EMULATOR === "true";
 // Local testing through the Hosting emulator can point the issuer at it; production never reads this.
 const origin = emulated && process.env.ASSISTANT_ORIGIN ? process.env.ASSISTANT_ORIGIN : PRODUCTION_ORIGIN;
+// The emulators serve on localhost only, so nothing there needs to move.
+const legacyHosts = emulated ? [] : LEGACY_HOSTS;
 
 let shared;
 function services() {
@@ -66,7 +69,7 @@ exports.assistantMcp = onRequest(
     if (!mcpHandler) {
       const { db, messaging, usage } = services();
       mcpHandler = createMcpHandler({
-        db, messaging, usage, logger, origin, accountEmails, sdk: loadSdk(),
+        db, messaging, usage, logger, origin, legacyHosts, accountEmails, sdk: loadSdk(),
       });
     }
     return mcpHandler(req, res);
@@ -78,7 +81,7 @@ exports.assistantOauth = onRequest(
   (req, res) => {
     if (!oauthHandler) {
       const { db, oauth, usage } = services();
-      oauthHandler = createOAuthHandler({ oauth, db, logger, usage });
+      oauthHandler = createOAuthHandler({ oauth, db, logger, usage, legacyHosts });
     }
     return oauthHandler(req, res);
   },

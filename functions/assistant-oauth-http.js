@@ -1,9 +1,10 @@
 "use strict";
 
 // HTTP routes for the assistant connector's OAuth server and discovery documents. Firebase Hosting
-// rewrites /oauth/** and /.well-known/oauth-* on the public origin to this handler.
+// rewrites /oauth/** and /.well-known/oauth-* on the public origin to this handler. The same paths on
+// a legacy host (`legacyHosts`) get a 308 to the public origin, which keeps the method and body.
 
-const { OAuthError, authorizationServerMetadata, protectedResourceMetadata } = require("./assistant-oauth");
+const { OAuthError, authorizationServerMetadata, movedUrl, protectedResourceMetadata } = require("./assistant-oauth");
 const { ClientError, registerClient } = require("./assistant-oauth-clients");
 const { LIMITS, clientKeys, consume, createInstanceLimiters } = require("./assistant-limits");
 const { errorFields, logEvent } = require("./assistant-log");
@@ -78,7 +79,9 @@ function basicAuth(req) {
   return { clientId: decode(decoded.slice(0, separator)), clientSecret: decode(decoded.slice(separator + 1)) };
 }
 
-function createOAuthHandler({ oauth, db, now = Date.now, logger, usage = async () => {}, limiters = createInstanceLimiters() }) {
+function createOAuthHandler({
+  oauth, db, now = Date.now, logger, usage = async () => {}, limiters = createInstanceLimiters(), legacyHosts = [],
+}) {
   const origin = oauth.urls.origin;
   /**
    * True when the request is over a limit: the caller's network hop and `globalCap` (in memory),
@@ -154,7 +157,13 @@ function createOAuthHandler({ oauth, db, now = Date.now, logger, usage = async (
 
   return async (req, res) => {
     const path = pathOf(req).replace(/\/+$/, "") || "/";
+    // Preflights are answered here too, so a browser client can then follow the redirect.
     if (req.method === "OPTIONS") return send(res, 204, undefined, CORS);
+    const moved = movedUrl(req, origin, legacyHosts);
+    if (moved) {
+      logEvent(logger, "info", "host.moved", { path, status: 308 });
+      return send(res, 308, undefined, { ...CORS, Location: moved });
+    }
     const route = routes[`${req.method} ${path}`];
     if (!route) {
       const known = Object.keys(routes).some((key) => key.endsWith(` ${path}`));

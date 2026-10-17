@@ -105,7 +105,11 @@ export function classifyAuditEntry(entry) {
     const viaCi = (auth.serviceAccountDelegationInfo ?? []).some((d) => d.principalSubject?.startsWith(CI_SUBJECT_PREFIX));
     return viaCi ? null : "deploy";
   }
-  if (service === "firebasehosting.googleapis.com" && !/\.(Get|List)\w*$/.test(method)) return "deploy";
+  if (service === "firebasehosting.googleapis.com") {
+    // Connecting a custom domain changes where the site answers, not what it serves: listed, not failed.
+    if (/\.(Create|Update|Delete|Undelete)(Custom)?Domain$/.test(method)) return "config";
+    if (!/\.(Get|List)\w*$/.test(method)) return "deploy";
+  }
   return DEPLOY_METHODS.some((pattern) => pattern.test(method)) ? "deploy" : "config";
 }
 

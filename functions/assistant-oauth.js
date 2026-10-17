@@ -25,7 +25,10 @@ const { clientIdForLog, errorFields, logEvent } = require("./assistant-log");
 const { createInstanceLimiters } = require("./assistant-limits");
 const { sendToDevices } = require("./assistant-push");
 
-const PRODUCTION_ORIGIN = "https://always-on-time-zombit-2026.web.app";
+const PRODUCTION_ORIGIN = "https://alwaysontime.zombit.io";
+// Firebase Hosting also serves the site on its default domains. Assistant requests that reach one of
+// them are sent to PRODUCTION_ORIGIN instead (movedUrl), so there is one issuer and one MCP URL.
+const LEGACY_HOSTS = ["always-on-time-zombit-2026.web.app", "always-on-time-zombit-2026.firebaseapp.com"];
 const SCOPES = ["alarms.read", "alarms.write"];
 const REQUEST_TTL_MS = 10 * 60 * 1000;
 const CODE_TTL_MS = 10 * 60 * 1000;
@@ -59,6 +62,21 @@ function urls(origin = PRODUCTION_ORIGIN) {
     resourceMetadata: `${origin}/.well-known/oauth-protected-resource/mcp`,
     consent: `${origin}/connect/`,
   };
+}
+
+/**
+ * The same URL on `origin` when the request came through Hosting on one of `legacyHosts` (Hosting
+ * passes the visitor's host in X-Forwarded-Host), otherwise null. Only listed hosts move, so a
+ * missing or unexpected header leaves the request alone rather than risking a redirect loop.
+ */
+function movedUrl(req, origin, legacyHosts = []) {
+  if (!legacyHosts.length) return null;
+  const header = req.headers?.["x-forwarded-host"];
+  const host = String((Array.isArray(header) ? header[0] : header) ?? "").split(",")[0].trim().toLowerCase().replace(/:443$/, "");
+  if (!legacyHosts.includes(host)) return null;
+  const path = req.originalUrl ?? req.url ?? "/";
+  // Appended as text, never resolved: a path like //example.com must stay on this origin.
+  return `${origin}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 function protectedResourceMetadata(origin) {
@@ -592,6 +610,7 @@ module.exports = {
   ACCESS_TTL_MS,
   CODE_TTL_MS,
   LAST_USED_RESOLUTION_MS,
+  LEGACY_HOSTS,
   OAuthError,
   PRODUCTION_ORIGIN,
   REFRESH_REUSE_GRACE_MS,
@@ -601,6 +620,7 @@ module.exports = {
   authorizationServerMetadata,
   createOAuth,
   deleteAllGrants,
+  movedUrl,
   parseScopes,
   protectedResourceMetadata,
   urls,

@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 
 export const PROJECT = "always-on-time-zombit-2026";
 export const HOSTING_SITE = PROJECT;
+// The site's default domain: it serves the same release as the custom domain (alwaysontime.zombit.io)
+// and works without the custom domain's DNS.
 export const HOSTING_ORIGIN = `https://${HOSTING_SITE}.web.app`;
 export const ALL_TARGETS = "functions,firestore,storage,hosting";
 

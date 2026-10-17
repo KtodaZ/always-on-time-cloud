@@ -7,7 +7,7 @@
 const { clientKeys, createInstanceLimiters } = require("./assistant-limits");
 const { COLLECTIONS } = require("./assistant-data");
 const { errorFields, logEvent } = require("./assistant-log");
-const { LAST_USED_RESOLUTION_MS, SCOPES, urls, verifyAccessToken } = require("./assistant-oauth");
+const { LAST_USED_RESOLUTION_MS, SCOPES, movedUrl, urls, verifyAccessToken } = require("./assistant-oauth");
 const { ToolError } = require("./assistant-snapshot");
 const { createToolContext } = require("./assistant-tool-context");
 const { INSTRUCTIONS, TOOLS, noPhone } = require("./assistant-tools");
@@ -38,7 +38,7 @@ const bearer = (req) => {
 
 /**
  * Builds the MCP request handler. `deps`: db, messaging,
- * usage(counts), accountEmails(uid), logger, now, sleep, origin, sdk ({McpServer,
+ * usage(counts), accountEmails(uid), logger, now, sleep, origin, legacyHosts, sdk ({McpServer,
  * StreamableHTTPServerTransport}; loaded lazily so other functions don't pay for it).
  */
 function createMcpHandler(deps) {
@@ -152,6 +152,16 @@ function createMcpHandler(deps) {
       for (const [name, value] of Object.entries(CORS)) res.setHeader(name, value);
       res.end();
       return;
+    }
+    // Not a redirect: MCP clients drop the Authorization header when a redirect changes the host,
+    // and a token or resource for the old URL can't be used on this one, so the assistant has to
+    // be set up again with the new URL. The JSON-RPC error says so.
+    if (movedUrl(req, u.origin, deps.legacyHosts)) {
+      logEvent(logger, "info", "host.moved", { path: "/mcp", status: 410 });
+      return sendJson(res, 410, { jsonrpc: "2.0", error: {
+        code: -32000,
+        message: `Always On Time's connector moved to ${u.mcp}. Remove this connector from your assistant and add it again with that URL.`,
+      }, id: null });
     }
     const token = bearer(req);
     // Callers without a valid token are limited in memory, and once over the limit they are

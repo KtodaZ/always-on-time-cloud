@@ -7,7 +7,8 @@ const test = require("node:test");
 
 const { FakeFirestore } = require("../testing/fake-firestore");
 const {
-  OAuthError, REFRESH_REUSE_GRACE_MS, REUSE_GRACE_MS, authorizationServerMetadata, createOAuth, protectedResourceMetadata, verifyAccessToken,
+  LEGACY_HOSTS, OAuthError, PRODUCTION_ORIGIN, REFRESH_REUSE_GRACE_MS, REUSE_GRACE_MS, authorizationServerMetadata, createOAuth, movedUrl,
+  protectedResourceMetadata, verifyAccessToken,
 } = require("../assistant-oauth");
 const {
   ClientError, fetchClientMetadata, getClient, isPublicAddress, isValidRedirectUri, parseClientIdUrl, redirectMatches,
@@ -16,7 +17,7 @@ const {
 const { createOAuthHandler } = require("../assistant-oauth-http");
 const { createRecordingMessaging } = require("../assistant-push");
 
-const ORIGIN = "https://always-on-time-zombit-2026.web.app";
+const ORIGIN = "https://alwaysontime.zombit.io";
 const MCP = `${ORIGIN}/mcp`;
 const CLAUDE_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata";
 const CLAUDE_REDIRECT = "https://claude.ai/api/mcp/auth_callback";
@@ -583,4 +584,45 @@ test("the token endpoint is limited per caller and a direct caller can't escape 
     for (let i = 0; i < 160; i += 1) forged.push((await token({ "fastly-client-ip": `203.0.113.${i}`, "x-forwarded-for": "1.2.3.4, 192.0.2.50" })).status);
     assert.equal(forged.filter((status) => status === 429).length, 10);
   });
+});
+
+test("the custom domain is the only public origin; the default Hosting domains are legacy", () => {
+  assert.equal(PRODUCTION_ORIGIN, ORIGIN);
+  assert.deepEqual(LEGACY_HOSTS, ["always-on-time-zombit-2026.web.app", "always-on-time-zombit-2026.firebaseapp.com"]);
+  const req = (host, url = "/oauth/authorize?client_id=x") => ({ url, headers: host === undefined ? {} : { "x-forwarded-host": host } });
+  assert.equal(movedUrl(req("always-on-time-zombit-2026.web.app"), ORIGIN, LEGACY_HOSTS), `${ORIGIN}/oauth/authorize?client_id=x`);
+  assert.equal(movedUrl(req("Always-On-Time-Zombit-2026.firebaseapp.com:443"), ORIGIN, LEGACY_HOSTS), `${ORIGIN}/oauth/authorize?client_id=x`);
+  assert.equal(movedUrl(req("always-on-time-zombit-2026.web.app, proxy.example"), ORIGIN, LEGACY_HOSTS), `${ORIGIN}/oauth/authorize?client_id=x`);
+  // A path is appended, never resolved, so it can't leave the origin.
+  assert.equal(movedUrl(req("always-on-time-zombit-2026.web.app", "//evil.example/x"), ORIGIN, LEGACY_HOSTS), `${ORIGIN}//evil.example/x`);
+  assert.equal(movedUrl({ originalUrl: "/oauth/token", url: "/token", headers: { "x-forwarded-host": LEGACY_HOSTS[0] } }, ORIGIN, LEGACY_HOSTS), `${ORIGIN}/oauth/token`);
+  // The canonical host, a missing header (a direct function URL) or any other host stays put.
+  for (const host of ["alwaysontime.zombit.io", undefined, "", "127.0.0.1:5012", "example.com"]) assert.equal(movedUrl(req(host), ORIGIN, LEGACY_HOSTS), null, host);
+  // Without legacy hosts (the emulators), nothing moves.
+  assert.equal(movedUrl(req(LEGACY_HOSTS[0]), ORIGIN), null);
+});
+
+test("OAuth and discovery requests on a legacy host get a 308 to the custom domain", async () => {
+  const { db, oauth, logs } = setup();
+  const logger = Object.fromEntries(["info", "warn", "error"].map((level) => [level, (message, fields) => logs.push({ level, message, ...fields })]));
+  const handler = createOAuthHandler({ oauth, db, logger, now: () => T0, legacyHosts: LEGACY_HOSTS });
+  await withServer(handler, async (base) => {
+    const legacy = { "x-forwarded-host": "always-on-time-zombit-2026.web.app" };
+    const discovery = await fetch(`${base}/.well-known/oauth-authorization-server`, { headers: legacy, redirect: "manual" });
+    assert.equal(discovery.status, 308);
+    assert.equal(discovery.headers.get("location"), `${ORIGIN}/.well-known/oauth-authorization-server`);
+    assert.equal(discovery.headers.get("access-control-allow-origin"), "*");
+    const token = await fetch(`${base}/oauth/token?x=1`, { method: "POST", headers: { ...legacy, "content-type": "application/x-www-form-urlencoded" },
+      body: "grant_type=refresh_token", redirect: "manual" });
+    assert.deepEqual([token.status, token.headers.get("location")], [308, `${ORIGIN}/oauth/token?x=1`]);
+    // Preflights still succeed so browser clients can follow the redirect.
+    assert.equal((await fetch(`${base}/oauth/token`, { method: "OPTIONS", headers: legacy })).status, 204);
+    // Nothing was registered or rate counted for the moved requests.
+    assert.equal([...db.documents.keys()].filter((key) => !key.startsWith("accounts/")).length, 0);
+    // The canonical host is served as usual.
+    const served = await fetch(`${base}/.well-known/oauth-authorization-server`, { headers: { "x-forwarded-host": "alwaysontime.zombit.io" } });
+    assert.equal((await served.json()).issuer, ORIGIN);
+  });
+  const moved = logs.filter((entry) => entry.assistantEvent === "host.moved");
+  assert.deepEqual(moved.map(({ path, status }) => [path, status]), [["/.well-known/oauth-authorization-server", 308], ["/oauth/token", 308]]);
 });

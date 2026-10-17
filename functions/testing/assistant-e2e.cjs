@@ -15,7 +15,7 @@ const json = { 'Content-Type': 'application/json' };
 (async () => {
   // Discovery and App Links files are served through Hosting.
   const resource = await fetch(`${site}/.well-known/oauth-protected-resource/mcp`).then(r => r.json());
-  assert.equal(resource.resource, 'https://always-on-time-zombit-2026.web.app/mcp');
+  assert.equal(resource.resource, 'https://alwaysontime.zombit.io/mcp');
   assert.equal((await fetch(`${site}/.well-known/oauth-authorization-server`).then(r => r.json())).code_challenge_methods_supported[0], 'S256');
   const links = await fetch(`${site}/.well-known/assetlinks.json`);
   assert.match(links.headers.get('content-type'), /application\/json/);
@@ -23,6 +23,12 @@ const json = { 'Content-Type': 'application/json' };
   const open = await fetch(`${site}/open/event/e_${'a'.repeat(64)}`);
   assert.equal(open.status, 200);
   assert.match(await open.text(), /Open Always On Time/);
+  // The home page and privacy policy live on zombit.io; the account pages stay here.
+  for (const [path, location] of [['/', 'https://zombit.io/always-on-time/'], ['/privacy-policy.html', 'https://zombit.io/always-on-time/privacy/']]) {
+    const moved = await fetch(`${site}${path}`, { redirect: 'manual' });
+    assert.deepEqual([moved.status, moved.headers.get('location')], [301, location]);
+  }
+  assert.match(await fetch(`${site}/delete-account/`).then(r => r.text()), /https:\/\/zombit\.io\/always-on-time\/privacy\//);
   const consentPage = await fetch(`${site}/connect/`);
   assert.match(consentPage.headers.get('content-security-policy'), /script-src 'self' https:\/\/www\.gstatic\.com/);
   assert.match(consentPage.headers.get('content-security-policy'), /frame-ancestors 'none'/);

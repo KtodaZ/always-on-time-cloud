@@ -12,7 +12,7 @@ Code: [`functions/assistant-*.js`](../functions/assistant-functions.js), consent
 
 ## Endpoints
 
-All on `https://always-on-time-zombit-2026.web.app` (Hosting rewrites to the functions):
+All on `https://alwaysontime.zombit.io` (Hosting rewrites to the functions):
 
 | Path | Function | Purpose |
 | --- | --- | --- |
@@ -27,6 +27,14 @@ All on `https://always-on-time-zombit-2026.web.app` (Hosting rewrites to the fun
 | `/connect/` | Hosting | Consent page: Google sign-in, what the assistant can see and change, Approve/Cancel |
 | `/open/**` | Hosting | Fallback for App Links when the app is not installed |
 | `/.well-known/assetlinks.json` | Hosting | Android App Links verification |
+
+Hosting also serves these paths on the project's default domains
+(`always-on-time-zombit-2026.web.app` and `.firebaseapp.com`, recognized by `X-Forwarded-Host`).
+There the OAuth and discovery paths answer `308` to the same path and query on the custom domain,
+which keeps the method and body. `/mcp` answers `410` with a JSON-RPC error naming the new URL
+instead of redirecting: clients drop the bearer token when a redirect changes host, and a token or
+resource indicator for the old URL is not valid here, so the assistant has to add the connector
+again. The emulators skip this.
 
 The app calls `listAssistantConnections`, `revokeAssistantConnection` and `undoAssistantChange`
 (the activity log's Undo, with the same checks as the `undo` tool) (callable functions;

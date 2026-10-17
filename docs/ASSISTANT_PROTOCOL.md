@@ -217,8 +217,9 @@ snapshot per 10 seconds; extra requests coalesce.
 
 ## App Links
 
-`https://always-on-time-zombit-2026.web.app/open/{destination}` with the app's verified
-`assetlinks.json`. Destinations: `event/{eventKey}`, `calendars`, `calendar/{calendarKey}`,
+`https://alwaysontime.zombit.io/open/{destination}` with the app's verified
+`assetlinks.json`, which Hosting serves on every domain, so links on
+`always-on-time-zombit-2026.web.app` keep verifying too. Destinations: `event/{eventKey}`, `calendars`, `calendar/{calendarKey}`,
 `settings/alarms`, `settings/sounds`, `settings/spoken`, `permissions`, `battery`, `travel`,
 `account`, `assistants`, `plus?source=assistant`. Links only open screens; they never change
 settings and never contain titles.

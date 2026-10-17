@@ -26,6 +26,17 @@ test("deploys by a person outside CI are failures", () => {
     methodName: "google.firebase.hosting.v1beta1.FirebaseHosting.CreateRelease", authenticationInfo: { principalEmail: person } } }), "deploy");
 });
 
+test("custom domain changes are listed, not failed", () => {
+  const hosting = (methodName) => classifyAuditEntry({ protoPayload: { serviceName: "firebasehosting.googleapis.com", methodName,
+    authenticationInfo: { principalEmail: person } } });
+  for (const method of ["CreateCustomDomain", "UpdateCustomDomain", "DeleteCustomDomain", "CreateDomain", "UpdateDomain"]) {
+    assert.equal(hosting(`google.firebase.hosting.v1beta1.FirebaseHosting.${method}`), "config", method);
+  }
+  for (const method of ["CreateVersion", "UpdateVersion", "CreateChannel", "CreateSite", "UpdateSiteConfig"]) {
+    assert.equal(hosting(`google.firebase.hosting.v1beta1.FirebaseHosting.${method}`), "deploy", method);
+  }
+});
+
 test("the deploy account is expected only when CI uses it for this repository", () => {
   const method = "google.cloud.functions.v2.FunctionService.UpdateFunction";
   assert.equal(classifyAuditEntry({ protoPayload: { methodName: method, authenticationInfo: { principalEmail: DEPLOY_ACCOUNT, ...ciDelegation } } }), null);
