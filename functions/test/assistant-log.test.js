@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { clientIdForLog, deliveryFields, errorFields, logEvent } = require("../assistant-log");
+const { FIELDS, clientIdForLog, deliveryFields, errorFields, logEvent } = require("../assistant-log");
 const { createRecordingMessaging, sendToDevices } = require("../assistant-push");
 const { FakeFirestore } = require("../testing/fake-firestore");
 
@@ -22,6 +22,24 @@ test("only allowlisted fields are written, so titles and payloads are dropped", 
   assert.deepEqual(logs, [{
     level: "info", message: "Assistant tool.call set_event_alarms ok", assistantEvent: "tool.call", tool: "set_event_alarms", outcome: "ok", changeId: "ch_abc",
   }]);
+});
+
+test("accounts are named by logId: a uid passed by mistake is dropped", () => {
+  const { logs, logger } = capture();
+  assert.ok(!FIELDS.includes("uid"));
+  logEvent(logger, "info", "callable.undo", { uid: "alice", logId: "log_abc", outcome: "ok" });
+  assert.deepEqual(logs, [{ level: "info", message: "Assistant callable.undo ok", assistantEvent: "callable.undo", logId: "log_abc", outcome: "ok" }]);
+});
+
+test("error messages lose account paths and email addresses", () => {
+  const error = Object.assign(new Error(
+    "5 NOT_FOUND: No document to update: projects/p/databases/(default)/documents/accounts/Xy9aBc12/values/p_x (alex.r+cal@example.co.uk)",
+  ), { code: 5 });
+  assert.deepEqual(errorFields(error), {
+    errorName: "Error",
+    errorCode: "5",
+    errorMessage: "5 NOT_FOUND: No document to update: projects/p/databases/(default)/documents/accounts/{uid}/values/p_x ({email})",
+  });
 });
 
 test("a broken logger never throws", () => {
@@ -58,7 +76,7 @@ test("pushes report each device's result, and invalid tokens are removed and log
     responses: messages.map((message) => (message.token === "t1" ? { success: true }
       : { success: false, error: { code: message.token === "t2" ? "messaging/registration-token-not-registered" : "messaging/internal-error" } })),
   });
-  const sent = await sendToDevices({ db, messaging, logger }, "alice", "sync", { changeId: "ch_x" });
+  const sent = await sendToDevices({ db, messaging, logger, logId: "log_alice" }, "alice", "sync", { changeId: "ch_x" });
   const fields = deliveryFields("sync", sent);
   assert.equal(fields.type, "sync");
   assert.deepEqual(Object.fromEntries(fields.devices.map((device) => [device.deviceId, device.result])), {
@@ -69,7 +87,9 @@ test("pushes report each device's result, and invalid tokens are removed and log
     ["push.failed", "d-busy", "messaging/internal-error"],
     ["push.invalid_token_removed", "d-gone", "messaging/registration-token-not-registered"],
   ]);
+  assert.ok(logs.every((entry) => entry.logId === "log_alice"));
   assert.ok(!JSON.stringify(logs).includes("t2"));
+  assert.ok(!JSON.stringify(logs).includes('"alice"'));
 });
 
 test("a device that registered a new token since the send is kept", async () => {

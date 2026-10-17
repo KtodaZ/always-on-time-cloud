@@ -453,7 +453,7 @@ test("tokens only reach their own account, and read-only connections cannot chan
 });
 
 test("every tool call logs one line with its ids, and never titles, arguments or payloads", async () => {
-  const { handler, token, logs, messaging } = setup();
+  const { db, handler, token, logs, messaging } = setup();
   const toolLines = () => logs.filter((entry) => entry.assistantEvent === "tool.call");
   await withServer(handler, async ({ call, rpc }) => {
     await call(token, "find_events", { query: "Team standup" });
@@ -470,8 +470,12 @@ test("every tool call logs one line with its ids, and never titles, arguments or
     assert.deepEqual(lines.map((line) => line.tool), [
       "find_events", "set_event_alarms", "confirm_change", "undo", "test_connection", "refresh", "set_series_alarms",
     ]);
+    // g1 predates logIds: its first request gives the account one and saves it on the grant.
+    const { logId } = db.documents.get("accounts/alice/assistant/log");
+    assert.match(logId, /^log_/);
+    assert.equal(db.documents.get("oauthGrants/g1").logId, logId);
     for (const line of lines) {
-      assert.equal(line.uid, "alice");
+      assert.equal(line.logId, logId);
       assert.equal(line.grantId, "g1");
       assert.equal(line.client, "Claude");
       assert.equal(typeof line.durationMs, "number");
@@ -498,9 +502,39 @@ test("every tool call logs one line with its ids, and never titles, arguments or
     assert.deepEqual(logs.find((entry) => entry.assistantEvent === "oauth.token_rejected").reason, "unknown");
   });
   const text = JSON.stringify(logs);
-  for (const secret of ["Team standup", "Dentist", "Pixel 9", "leadTimes", "aot_at_", "fcm-token", "alex@example.com", "doesn't repeat"]) {
+  assert.ok(logs.every((entry) => !("uid" in entry)));
+  for (const secret of ["alice", "Team standup", "Dentist", "Pixel 9", "leadTimes", "aot_at_", "fcm-token", "alex@example.com", "doesn't repeat"]) {
     assert.ok(!text.includes(secret), `log contains ${secret}`);
   }
+});
+
+test("a grant with a logId logs it without any extra read, and a failed lookup never blocks the call", async () => {
+  const { db, handler, token, logs } = setup();
+  db.documents.set("oauthGrants/g1", { ...db.documents.get("oauthGrants/g1"), logId: "log_existing" });
+  db.documents.set("oauthGrants/g2", { ...db.documents.get("oauthGrants/g2") });
+  const runTransaction = db.runTransaction.bind(db);
+  let transactions = 0;
+  db.runTransaction = async (callback) => {
+    transactions += 1;
+    return runTransaction(callback);
+  };
+  await withServer(handler, async ({ call }) => {
+    await call(token, "get_status", {});
+    assert.equal(transactions, 0);
+    assert.equal(logs.find((entry) => entry.assistantEvent === "tool.call").logId, "log_existing");
+    // Bob's connection predates logIds and the lookup fails: the call still works, logged without one.
+    db.runTransaction = async () => {
+      throw new Error("14 UNAVAILABLE: accounts/bob/assistant/log");
+    };
+    const result = await call("aot_at_bob", "get_status", {});
+    assert.ok(result.structuredContent);
+    const line = logs.filter((entry) => entry.assistantEvent === "tool.call").at(-1);
+    assert.equal(line.logId, null);
+    assert.equal(line.grantId, "g2");
+    const failed = logs.find((entry) => entry.assistantEvent === "grant.log_id_failed");
+    assert.equal(failed.errorMessage, "14 UNAVAILABLE: accounts/{uid}/assistant/log");
+  });
+  assert.ok(!JSON.stringify(logs).includes("bob"));
 });
 
 test("titles and calendar names are cleaned and quoted, and snapshot age uses builtAt", async () => {

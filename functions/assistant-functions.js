@@ -12,7 +12,7 @@ const { defineSecret } = require("firebase-functions/params");
 const { HttpsError, onCall, onRequest } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 
-const { isChangeId } = require("./assistant-data");
+const { isChangeId, readLogId, refs } = require("./assistant-data");
 const { errorFields, logEvent } = require("./assistant-log");
 const { createMcpHandler, loadSdk } = require("./assistant-mcp");
 const { ToolError } = require("./assistant-snapshot");
@@ -87,38 +87,59 @@ exports.assistantOauth = onRequest(
   },
 );
 
-/** Callable from the app: same requirement as account sync, a Google-linked active account. */
+/**
+ * Callable from the app: same requirement as account sync, a Google-linked active account. Returns
+ * the uid and the account's logId (null before its first assistant connection), read alongside the
+ * account document, for the log line.
+ */
 async function requireActiveAccount(request) {
   const auth = request.auth;
   if (!auth || !auth.token?.firebase?.identities?.["google.com"]?.length) {
     throw new HttpsError("unauthenticated", "Sign in with Google first.");
   }
-  const account = await getFirestore().collection("accounts").doc(auth.uid).get();
+  const db = getFirestore();
+  const [account, logId] = await Promise.all([refs.account(db, auth.uid).get(), readLogId(db, auth.uid)]);
   if (!account.exists || account.data().active !== true) throw new HttpsError("failed-precondition", "Account sync is not set up.");
-  return auth.uid;
+  return { uid: auth.uid, logId };
 }
 
-exports.listAssistantConnections = onCall({ region: REGION, maxInstances: 5 }, async (request) => {
-  const uid = await requireActiveAccount(request);
+/**
+ * Runs a callable. An unexpected error is logged here (its message scrubbed of account ids) and
+ * reaches the app as a plain internal error, so the Functions runtime doesn't log it raw.
+ */
+function connectorCallable(event, handler) {
+  return onCall({ region: REGION, maxInstances: 5 }, async (request) => {
+    try {
+      return await handler(request);
+    } catch (error) {
+      if (error instanceof HttpsError) throw error;
+      logEvent(logger, "error", event, { outcome: "unexpected_error", ...errorFields(error) });
+      throw new HttpsError("internal", "Something went wrong on the Always On Time server. Try again in a moment.");
+    }
+  });
+}
+
+exports.listAssistantConnections = connectorCallable("callable.list_connections", async (request) => {
+  const { uid, logId } = await requireActiveAccount(request);
   const connections = await services().oauth.listConnections(uid);
-  logEvent(logger, "info", "callable.list_connections", { uid, count: connections.length });
+  logEvent(logger, "info", "callable.list_connections", { logId, count: connections.length });
   return { connections };
 });
 
-exports.revokeAssistantConnection = onCall({ region: REGION, maxInstances: 5 }, async (request) => {
-  const uid = await requireActiveAccount(request);
+exports.revokeAssistantConnection = connectorCallable("callable.revoke_connection", async (request) => {
+  const { uid, logId } = await requireActiveAccount(request);
   const grantId = request.data?.grantId;
   if (typeof grantId !== "string" || grantId.length === 0 || grantId.length > 100) {
     throw new HttpsError("invalid-argument", "grantId is required.");
   }
   const revoked = await services().oauth.revokeGrant(grantId, { reason: "app", uid });
-  logEvent(logger, "info", "callable.revoke_connection", { uid, grantId, revoked });
+  logEvent(logger, "info", "callable.revoke_connection", { logId, grantId, revoked });
   return { revoked };
 });
 
 /** Undo from the app's activity log; the same checks as the assistant's undo tool. */
-exports.undoAssistantChange = onCall({ region: REGION, maxInstances: 5 }, async (request) => {
-  const uid = await requireActiveAccount(request);
+exports.undoAssistantChange = connectorCallable("callable.undo", async (request) => {
+  const { uid, logId } = await requireActiveAccount(request);
   const changeId = request.data?.changeId;
   if (!isChangeId(changeId)) throw new HttpsError("invalid-argument", "changeId is required.");
   const { db, messaging, usage } = services();
@@ -126,14 +147,16 @@ exports.undoAssistantChange = onCall({ region: REGION, maxInstances: 5 }, async 
   const ctx = createToolContext({
     db,
     uid,
+    // grantId keys this account's push allowance (stored hashed); it is never logged.
     grant: { grantId: `app|${uid}`, clientName: "Always On Time app", assistant: "app", scopes: ["alarms.read", "alarms.write"] },
+    logId,
     origin,
     now: () => Date.now(),
     messaging,
     logger,
   });
   const done = (outcome, extra = {}) => logEvent(logger, outcome === "unexpected_error" ? "error" : "info", "callable.undo", {
-    uid, outcome, durationMs: Date.now() - started, ...ctx.trace, ...extra,
+    logId, outcome, durationMs: Date.now() - started, ...ctx.trace, ...extra,
   });
   try {
     // Failures after the commit (reaching the phones) are already folded into the message.
@@ -147,7 +170,7 @@ exports.undoAssistantChange = onCall({ region: REGION, maxInstances: 5 }, async 
       throw new HttpsError("failed-precondition", error.message);
     }
     done("unexpected_error", errorFields(error));
-    throw error;
+    throw new HttpsError("internal", "Something went wrong on the Always On Time server. Try again in a moment.");
   }
 });
 

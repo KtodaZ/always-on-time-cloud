@@ -16,7 +16,7 @@
 const { createHash, randomBytes, randomUUID } = require("node:crypto");
 
 const {
-  COLLECTIONS, deleteCollection, deleteConnectorData, readDevices, refs, toMillis,
+  COLLECTIONS, deleteCollection, deleteConnectorData, ensureLogId, readDevices, refs, toMillis,
 } = require("./assistant-data");
 const {
   ClientError, authenticateClient, getClient, redirectMatches, touchClient,
@@ -274,7 +274,8 @@ function createOAuth(deps) {
     }
     const user = await signedInUser(idToken);
     if (!user.accountReady) {
-      log("info", "oauth.consent", { uid: user.uid, outcome: "account_not_ready" });
+      // No logId: one is only created for an active account.
+      log("info", "oauth.consent", { outcome: "account_not_ready" });
       throw new OAuthError("account_not_ready", "Install Always On Time and sign in with this Google account in the app first.", 409);
     }
     const code = newSecret("aot_code_");
@@ -284,6 +285,7 @@ function createOAuth(deps) {
       const doc = await transaction.get(ref);
       if (!doc.exists || toMillis(doc.data().expiresAt) <= time) return null;
       const data = doc.data();
+      const logId = await ensureLogId(transaction, db, user.uid, time);
       transaction.delete(ref);
       transaction.set(collection("codes").doc(sha256(code)), {
         uid: user.uid,
@@ -297,13 +299,13 @@ function createOAuth(deps) {
         usedAt: null,
         grantId: null,
       });
-      return data;
+      return { ...data, logId };
     });
     if (!pending) {
-      log("info", "oauth.consent", { uid: user.uid, outcome: "expired" });
+      log("info", "oauth.consent", { outcome: "expired" });
       throw new OAuthError("expired", "This connection request expired. Start connecting again from your assistant.", 404);
     }
-    log("info", "oauth.consent", { uid: user.uid, clientId: clientIdForLog(pending.clientId), scopes: pending.scopes, outcome: "approved" });
+    log("info", "oauth.consent", { logId: pending.logId, clientId: clientIdForLog(pending.clientId), scopes: pending.scopes, outcome: "approved" });
     return { redirect: withParams(pending.redirectUri, { code, state: pending.state, iss: u.issuer }) };
   }
 
@@ -364,10 +366,15 @@ function createOAuth(deps) {
       const existing = await transaction.get(collection("grants").where("uid", "==", data.uid));
       const replaced = existing.docs.filter((grantDoc) => grantDoc.data().clientId === client.clientId).map((grantDoc) => grantDoc.id);
       const connections = existing.size - replaced.length + 1;
+      // Null once the account is deleted: the connection must not bring its documents back.
+      const logId = await ensureLogId(transaction, db, data.uid, time);
+      if (!logId) return { error: "the account was deleted or is not set up" };
       const stateRef = refs.state(db, data.uid);
       const grant = {
         grantId,
         uid: data.uid,
+        // Copied from accounts/{uid}/assistant/log so request logs need no extra read.
+        logId,
         clientId: client.clientId,
         clientName: client.clientName,
         assistant: client.assistant ?? "other",
@@ -393,7 +400,7 @@ function createOAuth(deps) {
       throw new OAuthError("invalid_grant", outcome.error);
     }
     log("info", "oauth.code_exchange", {
-      uid: outcome.grant.uid,
+      logId: outcome.grant.logId,
       grantId: outcome.grant.grantId,
       clientId: clientIdForLog(client.clientId),
       client: client.clientName,
@@ -405,7 +412,7 @@ function createOAuth(deps) {
     for (const id of outcome.replaced) await deleteTokens(id);
     await touch(client, time);
     await usage({ [`connectionsNew.${outcome.grant.assistant}`]: 1 });
-    if (outcome.connectionsChanged) await notifyState(outcome.grant.uid);
+    if (outcome.connectionsChanged) await notifyState(outcome.grant.uid, null, outcome.grant.logId);
     return outcome.tokens;
   }
 
@@ -441,7 +448,7 @@ function createOAuth(deps) {
       if (outcome.revoke) await revokeGrant(outcome.revoke, { reason: "refresh_reuse" });
       throw new OAuthError("invalid_grant", outcome.error);
     }
-    log("info", "oauth.refresh", { uid: outcome.grant.uid, grantId: outcome.grant.grantId, client: outcome.grant.clientName, outcome: "ok" });
+    log("info", "oauth.refresh", { logId: outcome.grant.logId, grantId: outcome.grant.grantId, client: outcome.grant.clientName, outcome: "ok" });
     await touch(client, time);
     return outcome.tokens;
   }
@@ -467,8 +474,9 @@ function createOAuth(deps) {
       log("info", "oauth.revoke", { clientId: clientIdForLog(client.clientId), outcome: "ignored", reason: "unknown_token" });
       return;
     }
-    const { kind, grantId, uid } = doc.data();
-    log("info", "oauth.revoke", { uid, grantId, clientId: clientIdForLog(client.clientId), kind, outcome: "ok" });
+    const { kind, grantId } = doc.data();
+    // The grantId ties this line to the connection's other lines (connection.revoked has the logId).
+    log("info", "oauth.revoke", { grantId, clientId: clientIdForLog(client.clientId), kind, outcome: "ok" });
     if (kind === "refresh") await revokeGrant(grantId, { reason: "client" });
     else await doc.ref.delete();
   }
@@ -480,11 +488,11 @@ function createOAuth(deps) {
   }
 
   /** Tells the account's phones to re-read assistant/state. Never fails the caller. */
-  async function notifyState(uid, devices = null) {
+  async function notifyState(uid, devices = null, logId = null) {
     try {
-      await sendToDevices({ db, messaging, logger }, uid, "state", {}, devices);
+      await sendToDevices({ db, messaging, logger, logId }, uid, "state", {}, devices);
     } catch (error) {
-      log("warn", "push.state_failed", { uid, errorName: error?.name, errorCode: error?.code });
+      log("warn", "push.state_failed", { logId, errorName: error?.name, errorCode: error?.code });
     }
   }
 
@@ -503,19 +511,21 @@ function createOAuth(deps) {
       if (expectedUid !== undefined && grant.uid !== expectedUid) return null;
       const all = await transaction.get(collection("grants").where("uid", "==", grant.uid));
       const remaining = all.docs.filter((grantDoc) => grantDoc.id !== grantId).length;
+      // Connections made before logIds existed don't carry one; the account may still have one.
+      const logId = grant.logId ?? (await transaction.get(refs.log(db, grant.uid))).data()?.logId ?? null;
       transaction.delete(grantRef);
       transaction.set(refs.state(db, grant.uid), { connected: remaining > 0, connections: remaining, updatedAt: new Date(time) });
-      return { grant, remaining };
+      return { grant, remaining, logId };
     });
     if (!outcome) return false;
     await deleteTokens(grantId);
     const devices = await readDevices(db, outcome.grant.uid);
-    await notifyState(outcome.grant.uid, devices);
+    await notifyState(outcome.grant.uid, devices, outcome.logId);
     // Another assistant may connect while this cleans up; its data is then left alone.
     if (outcome.remaining === 0) await deleteConnectorData(db, outcome.grant.uid, { onlyIfDisconnected: true });
     await usage({ [`disconnects.${outcome.grant.assistant ?? "other"}`]: 1 });
     log("info", "connection.revoked", {
-      uid: outcome.grant.uid, grantId, client: outcome.grant.clientName, reason, remaining: outcome.remaining,
+      logId: outcome.logId, grantId, client: outcome.grant.clientName, reason, remaining: outcome.remaining,
     });
     return true;
   }
@@ -564,8 +574,8 @@ function createOAuth(deps) {
 }
 
 /**
- * Resolves a bearer token for the MCP endpoint: {uid, grantId, clientId, clientName, assistant,
- * scopes, ...} for a live access token whose connection still exists, otherwise null.
+ * Resolves a bearer token for the MCP endpoint: {uid, logId, grantId, clientId, clientName,
+ * assistant, scopes, ...} for a live access token whose connection still exists, otherwise null.
  * `onReject(reason)` hears why a token was refused (for the debugging log; never the token).
  */
 async function verifyAccessToken(db, token, { now = Date.now(), onReject = () => {} } = {}) {
@@ -584,6 +594,8 @@ async function verifyAccessToken(db, token, { now = Date.now(), onReject = () =>
   const grant = grantDoc.data();
   return {
     uid: data.uid,
+    // Null for connections made before logIds existed (the MCP handler adds one: grantLogId).
+    logId: typeof grant.logId === "string" ? grant.logId : null,
     grantId: data.grantId,
     clientId: grant.clientId,
     clientName: grant.clientName,
@@ -594,6 +606,24 @@ async function verifyAccessToken(db, token, { now = Date.now(), onReject = () =>
     lastActiveDay: grant.lastActiveDay ?? null,
     lastActiveWeek: grant.lastActiveWeek ?? null,
   };
+}
+
+/**
+ * The logId for a connection made before logIds existed: the account's (created if needed), also
+ * saved on the grant so later requests have it. Null if the connection or account is gone. Throws
+ * on Firestore errors; the caller logs without it.
+ */
+async function grantLogId(db, grant, now = Date.now()) {
+  return db.runTransaction(async (transaction) => {
+    const grantRef = db.collection(COLLECTIONS.grants).doc(grant.grantId);
+    const grantDoc = await transaction.get(grantRef);
+    if (!grantDoc.exists || grantDoc.data().uid !== grant.uid) return null;
+    if (typeof grantDoc.data().logId === "string") return grantDoc.data().logId;
+    // While the grant exists, account deletion hasn't reached assistant/log, so it removes this too.
+    const logId = await ensureLogId(transaction, db, grant.uid, now);
+    if (logId) transaction.update(grantRef, { logId });
+    return logId;
+  });
 }
 
 /** Deletes every connection of an account and its tokens (account deletion); no pushes. */
@@ -620,6 +650,7 @@ module.exports = {
   authorizationServerMetadata,
   createOAuth,
   deleteAllGrants,
+  grantLogId,
   movedUrl,
   parseScopes,
   protectedResourceMetadata,

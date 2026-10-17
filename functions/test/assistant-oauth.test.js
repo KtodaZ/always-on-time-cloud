@@ -111,7 +111,7 @@ test("a full connection issues opaque tokens, stores only hashes and marks the a
 });
 
 test("the OAuth flow logs each step with ids and reasons, never tokens, codes or redirect URIs", async () => {
-  const { oauth, logs, clock } = setup();
+  const { db, oauth, logs, clock } = setup();
   const tokens = await connect(oauth);
   await oauth.token({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: CLAUDE_ID });
   clock.advance(REFRESH_REUSE_GRACE_MS + 1);
@@ -122,14 +122,48 @@ test("the OAuth flow logs each step with ids and reasons, never tokens, codes or
     "oauth.refresh:ok", "oauth.refresh:rejected", "connection.revoked:refresh_reuse",
   ]);
   const exchange = logs.find((entry) => entry.assistantEvent === "oauth.code_exchange");
-  assert.equal(exchange.uid, "alice");
+  // The account appears only as its logId, the one stored in assistant/log and on the grant.
+  const { logId } = db.documents.get("accounts/alice/assistant/log");
+  assert.match(logId, /^log_[A-Za-z0-9_-]{16}$/);
+  for (const event of ["oauth.consent", "oauth.code_exchange", "oauth.refresh", "connection.revoked"]) {
+    assert.equal(logs.find((entry) => entry.assistantEvent === event).logId, logId, event);
+  }
   assert.match(exchange.grantId, /^[0-9a-f-]{36}$/);
   assert.equal(exchange.clientId, CLAUDE_ID);
   assert.equal(logs.find((entry) => entry.assistantEvent === "connection.revoked").grantId, exchange.grantId);
   const text = JSON.stringify(logs);
-  for (const secret of ["aot_at_", "aot_rt_", "aot_code_", VERIFIER, CHALLENGE, CLAUDE_REDIRECT, "alice@example.com"]) {
+  assert.ok(logs.every((entry) => !("uid" in entry)));
+  for (const secret of ["alice", "aot_at_", "aot_rt_", "aot_code_", VERIFIER, CHALLENGE, CLAUDE_REDIRECT]) {
     assert.ok(!text.includes(secret), `log contains ${secret}`);
   }
+});
+
+test("an account keeps one logId across connections, and grants carry it", async () => {
+  const { db, oauth, clock, logs } = setup();
+  const first = await connect(oauth);
+  const { logId } = db.documents.get("accounts/alice/assistant/log");
+  assert.equal((await verifyAccessToken(db, first.access_token, { now: clock.now() })).logId, logId);
+  // A connection made before logIds existed: revoking it still logs the account's logId.
+  db.documents.set("oauthGrants/legacy", { uid: "alice", clientId: "c", clientName: "Old", assistant: "other", scopes: [], lastUsedAt: new Date(T0) });
+  const second = await connect(oauth);
+  assert.equal((await verifyAccessToken(db, second.access_token, { now: clock.now() })).logId, logId, "a reconnect reuses the logId");
+  assert.equal(await oauth.revokeGrant("legacy"), true);
+  const revoked = logs.find((entry) => entry.assistantEvent === "connection.revoked" && entry.grantId === "legacy");
+  assert.equal(revoked.logId, logId);
+  assert.equal(db.documents.get("accounts/alice/assistant/log").logId, logId);
+});
+
+test("an authorization code for an account deleted since consent creates nothing", async () => {
+  const { db, oauth, logs } = setup();
+  const code = await approveCode(oauth);
+  // Account deletion: tombstone first, then the assistant documents go.
+  db.documents.set("accounts/alice", { active: false, schemaVersion: 1 });
+  db.documents.delete("accounts/alice/assistant/log");
+  await assert.rejects(oauth.token({
+    grant_type: "authorization_code", code, code_verifier: VERIFIER, client_id: CLAUDE_ID, redirect_uri: CLAUDE_REDIRECT, resource: MCP,
+  }), { error: "invalid_grant" });
+  assert.deepEqual(Object.keys(db.dump()).filter((path) => path.startsWith("accounts/alice/") || path.startsWith("oauthGrants/")), []);
+  assert.equal(logs.find((entry) => entry.assistantEvent === "oauth.code_exchange").outcome, "rejected");
 });
 
 test("rejected access tokens are logged with a reason only", async () => {
@@ -198,7 +232,10 @@ test("refresh tokens rotate, and replaying an old one after the grace period rev
   assert.equal(await verifyAccessToken(db, second.access_token, { now: clock.now() }), null);
   await assert.rejects(oauth.token({ grant_type: "refresh_token", refresh_token: second.refresh_token, client_id: CLAUDE_ID }), { error: "invalid_grant" });
   assert.deepEqual(db.documents.get("accounts/alice/assistant/state").connected, false);
-  assert.deepEqual(Object.keys(db.dump()).filter((path) => path.startsWith("accounts/alice/assistant") && !path.endsWith("/state")), []);
+  // The logId stays until the account is deleted, so a reconnect logs under the same one.
+  assert.deepEqual(Object.keys(db.dump()).filter((path) => path.startsWith("accounts/alice/assistant")).sort(), [
+    "accounts/alice/assistant/log", "accounts/alice/assistant/state",
+  ]);
   assert.deepEqual(Object.keys(db.dump()).filter((path) => path.startsWith("oauthGrants/") || path.startsWith("oauthTokens/")), []);
   assert.deepEqual(messaging.sent.map((message) => [message.token, message.data.type, message.android.priority]), [["fcm-1", "state", "high"]]);
 });
