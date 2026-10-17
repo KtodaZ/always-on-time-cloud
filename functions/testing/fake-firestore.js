@@ -8,8 +8,20 @@
 // Documents carry an update time (a Date from `db.now()`); batches commit atomically at one time,
 // honour `lastUpdateTime` preconditions and return write results, as Firestore does.
 
+const { FieldValue } = require("firebase-admin/firestore");
+
+const SERVER_TIMESTAMP = FieldValue.serverTimestamp();
+const STAMP = "__serverTimestamp";
+
+// Top-level FieldValue.serverTimestamp() fields become a marker that `write` replaces with the
+// commit time, so they match the document's update time as in Firestore.
 function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
+  if (value === undefined) return undefined;
+  if (value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date)) {
+    value = Object.fromEntries(Object.entries(value).map(([key, field]) =>
+      [key, field instanceof FieldValue && field.isEqual(SERVER_TIMESTAMP) ? { [STAMP]: true } : field]));
+  }
+  return structuredClone(value);
 }
 
 class DocumentSnapshot {
@@ -233,8 +245,12 @@ class FakeFirestore {
   }
 
   write(path, value) {
+    const time = this.frozenTime ?? this.commitTime();
+    for (const [key, field] of Object.entries(value ?? {})) {
+      if (field && typeof field === "object" && field[STAMP] === true) value[key] = new Date(time);
+    }
     this.documents.set(path, value);
-    this.updateTimes.set(path, this.frozenTime ?? this.commitTime());
+    this.updateTimes.set(path, time);
     this.writes += 1;
   }
 

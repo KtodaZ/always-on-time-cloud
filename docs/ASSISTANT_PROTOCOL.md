@@ -9,8 +9,10 @@ deletes everything under "Connector data" below.
 
 ## Firestore layout
 
-Existing account sync (unchanged): `accounts/{uid}` (`active`, `schemaVersion`),
-`accounts/{uid}/values/{recordId}` (`payload` string) and `accounts/{uid}/history/{id}`.
+Existing account sync: `accounts/{uid}` (`active`, `schemaVersion`),
+`accounts/{uid}/values/{recordId}` (`payload` string) and `accounts/{uid}/history/{id}`. Values the
+connector writes also carry `updatedAt`, a server timestamp equal to the commit time (the Android
+SDK doesn't expose `updateTime`). Phones write `payload` only, which drops it.
 
 Connector data:
 
@@ -73,8 +75,8 @@ publish request that caused it) and `payload` (JSON string ≤ 800,000 character
 }
 ```
 
-- `valuesAppliedThrough`: the greatest Firestore `updateTime` (ms) among `values` documents the
-  phone has applied. A connector change is confirmed when this is ≥ the change's write time.
+- `valuesAppliedThrough`: the greatest `updatedAt` (ms) among `values` documents the phone has
+  applied, never lowered. A connector change is confirmed when this is ≥ the change's write time.
 - `calendars`: every calendar on the phone, watched or not. `key` is null for calendars without a
   portable identity (local-only); such calendars are listed but cannot be changed remotely.
 - `events`: watched calendars, after the app's filters, from now until `windowEnd` (30 days).

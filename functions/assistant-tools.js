@@ -422,7 +422,8 @@ const TOOLS = [
       }
       const ids = [event.eventKey, event.seriesKey, event.calendarKey].filter(isRecordId);
       const docs = await Promise.all(ids.map((id) => refs.values(ctx.db, ctx.uid).doc(id).get()));
-      const pending = docs.some((doc) => doc.exists && (toMillis(doc.updateTime) ?? 0) > snapshot.valuesAppliedThrough);
+      // Only connector writes carry updatedAt; values a phone wrote are already on that phone.
+      const pending = docs.some((doc) => doc.exists && (toMillis(doc.data().updatedAt) ?? 0) > snapshot.valuesAppliedThrough);
       const devices = await readDevices(ctx.db, ctx.uid);
       const calendar = calendarName(snapshot, event.calendarKey);
       const lines = [basis(snapshot, now), `${event.title ?? "Untitled"}: ${formatTime(event.start, snapshot.timeZone)}${calendar ? ` on ${calendar}` : ""}${event.recurring ? " (repeats)" : ""}.`];

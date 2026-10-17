@@ -5,6 +5,8 @@
 
 const { randomBytes } = require("node:crypto");
 
+const { FieldValue } = require("firebase-admin/firestore");
+
 const { encodePayload, validatePayload } = require("./assistant-records");
 
 /** A stored payload string to write back verbatim (validated again), e.g. when undoing. */
@@ -121,7 +123,7 @@ const MAX_ATTEMPTS = 5;
  *
  * Every write is guarded by the update time it was read at (or must create the document), so a
  * concurrent change makes the commit fail and the change is rebuilt. `writtenAt` is then set to the
- * commit's write time, which is exactly the values' update time that phones report back.
+ * commit's write time, which equals the values' `updatedAt` that phones report back.
  */
 async function recordChange(db, uid, { recordIds, build, assistant, tool, summary, now, afterWrite }) {
   const values = refs.values(db, uid);
@@ -162,8 +164,11 @@ async function recordChange(db, uid, { recordIds, build, assistant, tool, summar
     });
     for (const [recordId, { after }] of Object.entries(records)) {
       const doc = snapshots.get(values.doc(recordId).path);
-      if (doc.exists) batch.update(doc.ref, { payload: after }, { lastUpdateTime: doc.updateTime });
-      else batch.create(doc.ref, { payload: after });
+      // `updatedAt` is the commit time too: Android's Firestore SDK doesn't expose updateTime, so
+      // phones report this field back as valuesAppliedThrough. Phone writes replace it.
+      const value = { payload: after, updatedAt: FieldValue.serverTimestamp() };
+      if (doc.exists) batch.update(doc.ref, value, { lastUpdateTime: doc.updateTime });
+      else batch.create(doc.ref, value);
     }
     if (afterWrite) afterWrite(batch, (ref) => snapshots.get(ref.path));
     let results;

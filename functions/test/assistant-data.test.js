@@ -25,6 +25,7 @@ test("a change rebuilds from fresh data when the record changes underneath it", 
   assert.deepEqual(result.records, { p_alarm_volume: { before: "60", after: "80" } });
   const activity = db.documents.get(`accounts/alice/assistantActivity/${result.changeId}`);
   assert.equal(activity.writtenAt.getTime(), db.updateTimes.get("accounts/alice/values/p_alarm_volume"));
+  assert.equal(db.documents.get("accounts/alice/values/p_alarm_volume").updatedAt.getTime(), activity.writtenAt.getTime());
   assert.equal(Object.keys(db.dump()).filter((path) => path.includes("assistantActivity")).length, 1, "the failed attempt left nothing behind");
 });
 
