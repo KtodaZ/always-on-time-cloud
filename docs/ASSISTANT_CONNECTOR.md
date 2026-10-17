@@ -28,7 +28,8 @@ All on `https://always-on-time-zombit-2026.web.app` (Hosting rewrites to the fun
 | `/open/**` | Hosting | Fallback for App Links when the app is not installed |
 | `/.well-known/assetlinks.json` | Hosting | Android App Links verification |
 
-The app calls `listAssistantConnections` and `revokeAssistantConnection` (callable functions;
+The app calls `listAssistantConnections`, `revokeAssistantConnection` and `undoAssistantChange`
+(the activity log's Undo, with the same checks as the `undo` tool) (callable functions;
 Google sign-in and an active synced account required). `pruneAssistantConnections` runs daily and
 `sendAssistantUsageSummary` posts anonymous weekly totals to the developer's Discord channel.
 

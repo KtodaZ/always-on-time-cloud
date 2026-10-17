@@ -11,7 +11,10 @@ const { defineSecret } = require("firebase-functions/params");
 const { HttpsError, onCall, onRequest } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 
+const { LIMITS, consume } = require("./assistant-limits");
 const { createMcpHandler, loadSdk } = require("./assistant-mcp");
+const { ToolError } = require("./assistant-snapshot");
+const { TOOLS } = require("./assistant-tools");
 const { PRODUCTION_ORIGIN, createOAuth } = require("./assistant-oauth");
 const { createOAuthHandler } = require("./assistant-oauth-http");
 const { createRecordingMessaging } = require("./assistant-push");
@@ -102,6 +105,37 @@ exports.revokeAssistantConnection = onCall({ region: REGION, maxInstances: 5 }, 
     throw new HttpsError("invalid-argument", "grantId is required.");
   }
   return { revoked: await services().oauth.revokeGrant(grantId, { reason: "app", uid }) };
+});
+
+/** Undo from the app's activity log; the same checks as the assistant's undo tool. */
+exports.undoAssistantChange = onCall({ region: REGION, maxInstances: 5 }, async (request) => {
+  const uid = await requireActiveAccount(request);
+  const changeId = request.data?.changeId;
+  if (typeof changeId !== "string" || !/^ch_[A-Za-z0-9_-]{16}$/.test(changeId)) {
+    throw new HttpsError("invalid-argument", "changeId is required.");
+  }
+  const { db, messaging, usage } = services();
+  const counts = {};
+  const ctx = {
+    db,
+    uid,
+    grant: { grantId: `app|${uid}`, clientName: "Always On Time app", assistant: "app", scopes: ["alarms.read", "alarms.write"] },
+    origin,
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    messaging,
+    logger,
+    pushAllowed: () => consume(db, `push|app|${uid}`, LIMITS.push, Date.now()),
+    count: (name, amount = 1) => { counts[name] = (counts[name] ?? 0) + amount; },
+  };
+  try {
+    const out = await TOOLS.find((tool) => tool.name === "undo").handler(ctx, { changeId });
+    if (Object.keys(counts).length) await usage(counts).catch(() => {});
+    return { undone: out.data?.changed === true, changeId: out.data?.changeId ?? null, message: out.text };
+  } catch (error) {
+    if (error instanceof ToolError) throw new HttpsError("failed-precondition", error.message);
+    throw error;
+  }
 });
 
 exports.pruneAssistantConnections = onSchedule(

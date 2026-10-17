@@ -21,6 +21,7 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
     "revokeAssistantConnection",
     "scheduleIosPushes",
     "sendAssistantUsageSummary",
+    "undoAssistantChange",
   ]);
 
   const feedback = functions.publishFeedbackNotification.__endpoint;
@@ -62,7 +63,7 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
     assert.deepEqual(endpoint.httpsTrigger, { invoker: ["public"] }, name);
     assert.equal(endpoint.secretEnvironmentVariables, undefined, name);
   }
-  for (const name of ["listAssistantConnections", "revokeAssistantConnection"]) {
+  for (const name of ["listAssistantConnections", "revokeAssistantConnection", "undoAssistantChange"]) {
     assert.ok(functions[name].__endpoint.callableTrigger, name);
     assert.equal(functions[name].__endpoint.secretEnvironmentVariables, undefined, name);
   }
