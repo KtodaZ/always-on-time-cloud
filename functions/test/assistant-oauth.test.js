@@ -7,7 +7,7 @@ const test = require("node:test");
 
 const { FakeFirestore } = require("../testing/fake-firestore");
 const {
-  OAuthError, REFRESH_REUSE_GRACE_MS, authorizationServerMetadata, createOAuth, protectedResourceMetadata, verifyAccessToken,
+  OAuthError, REFRESH_REUSE_GRACE_MS, REUSE_GRACE_MS, authorizationServerMetadata, createOAuth, protectedResourceMetadata, verifyAccessToken,
 } = require("../assistant-oauth");
 const {
   ClientError, fetchClientMetadata, getClient, isPublicAddress, isValidRedirectUri, parseClientIdUrl, redirectMatches,
@@ -155,13 +155,18 @@ test("PKCE, redirect URI, client and resource must all match the authorization",
   assert.ok((await oauth.token({ ...base, code_verifier: VERIFIER })).access_token);
 });
 
-test("an authorization code works once; reusing it revokes the connection it created", async () => {
-  const { db, oauth } = setup();
+test("an authorization code works once; a quick retry is refused, later reuse revokes the connection", async () => {
+  const { db, oauth, clock } = setup();
   const code = await approveCode(oauth);
   const request = { grant_type: "authorization_code", code, code_verifier: VERIFIER, client_id: CLAUDE_ID, redirect_uri: CLAUDE_REDIRECT };
   const tokens = await oauth.token(request);
-  await assert.rejects(oauth.token(request), { error: "invalid_grant", message: /already used/ });
-  assert.equal(await verifyAccessToken(db, tokens.access_token, { now: T0 }), null);
+  // Within 30 seconds: most likely a client retrying a lost response.
+  clock.advance(REUSE_GRACE_MS - 1000);
+  await assert.rejects(oauth.token(request), { error: "invalid_grant", message: /already used$/ });
+  assert.ok(await verifyAccessToken(db, tokens.access_token, { now: clock.now() }));
+  clock.advance(2000);
+  await assert.rejects(oauth.token(request), { error: "invalid_grant", message: /revoked/ });
+  assert.equal(await verifyAccessToken(db, tokens.access_token, { now: clock.now() }), null);
   assert.equal(db.documents.get("accounts/alice/assistant/state").connected, false);
 });
 
@@ -175,7 +180,7 @@ test("codes expire after ten minutes", async () => {
 test("refresh tokens rotate, and replaying an old one after the grace period revokes everything", async () => {
   const { db, oauth, clock, messaging } = setup();
   const first = await connect(oauth);
-  db.documents.set("accounts/alice/assistantDevices/d1", { platform: "android", fcmToken: "fcm-1", deviceName: "Pixel 9" });
+  db.documents.set("accounts/alice/assistantDevices/d1", { platform: "android", fcmToken: "fcm-1", deviceName: "Pixel 9", updatedAt: new Date(T0) });
   db.documents.set("accounts/alice/assistantSnapshots/d1", { payload: "{}" });
   db.documents.set("accounts/alice/assistantActivity/ch_1", { summary: "x" });
   clock.advance(60 * 60 * 1000);
@@ -218,10 +223,17 @@ test("reconnecting the same assistant replaces its connection; another assistant
   const request = { grant_type: "authorization_code", code, code_verifier: VERIFIER, client_id: chatgpt.client_id, redirect_uri: "https://chatgpt.com/connector_platform_oauth_redirect" };
   await assert.rejects(oauth.token({ ...request, client_secret: "wrong" }), { error: "invalid_client" });
   const tokens = await oauth.token({ ...request, client_secret: chatgpt.client_secret });
-  assert.equal((await verifyAccessToken(db, tokens.access_token, { now: T0 })).assistant, "chatgpt");
+  // A registered client calling itself ChatGPT is not ChatGPT: only metadata hosts are trusted.
+  const impostor = await verifyAccessToken(db, tokens.access_token, { now: T0 });
+  assert.deepEqual([impostor.assistant, impostor.clientName], ["other", "Unverified app"]);
   assert.equal(db.documents.get("accounts/alice/assistant/state").connections, 2);
   const listed = await oauth.listConnections("alice");
-  assert.deepEqual(listed.map((c) => c.assistant).sort(), ["chatgpt", "claude"]);
+  assert.deepEqual(listed.map((c) => c.assistant).sort(), ["claude", "other"]);
+  const claude = listed.find((c) => c.assistant === "claude");
+  assert.deepEqual(Object.keys(claude).sort(), ["assistant", "clientHost", "clientName", "createdAt", "grantId", "lastUsedAt", "scopes", "setupConfirmedAt", "verified"]);
+  assert.deepEqual([claude.clientName, claude.verified, claude.clientHost], ["Claude", true, "claude.ai"]);
+  const other = listed.find((c) => c.assistant === "other");
+  assert.deepEqual([other.clientName, other.verified, other.clientHost], ["Unverified app", false, "chatgpt.com"]);
   // Revoking one keeps the account connected; the app can only revoke its own connections.
   assert.equal(await oauth.revokeGrant(listed[0].grantId, { uid: "mallory" }), false);
   assert.equal(await oauth.revokeGrant(listed[0].grantId, { uid: "alice" }), true);
@@ -258,7 +270,7 @@ test("the consent page learns who is asking and whether the account is ready; ca
   const { db, oauth } = setup();
   const { redirect } = await oauth.authorize({ response_type: "code", client_id: CLAUDE_ID, redirect_uri: CLAUDE_REDIRECT, code_challenge: CHALLENGE, code_challenge_method: "S256", state: "x" });
   const request = requestIdFrom(redirect);
-  assert.deepEqual(await oauth.consentInfo({ request }), { clientName: "Claude", verifiedHost: "claude.ai", redirectHost: "claude.ai", scopes: ["alarms.read", "alarms.write"] });
+  assert.deepEqual(await oauth.consentInfo({ request }), { clientName: "Claude", verified: true, clientHost: "claude.ai", scopes: ["alarms.read", "alarms.write"] });
   assert.equal((await oauth.consentInfo({ request, idToken: "id:alice" })).account, "ready");
   assert.equal((await oauth.consentInfo({ request, idToken: "id:bob" })).account, "not_ready");
   await assert.rejects(oauth.consentInfo({ request, idToken: "id:anon" }), { error: "login_required" });
@@ -346,14 +358,14 @@ test("metadata documents must name themselves and list valid redirects; they are
     fetches.push(url);
     return { client_id: CLAUDE_ID, client_name: "Claude <script>", redirect_uris: [CLAUDE_REDIRECT] };
   };
-  const client = await getClient(db, CLAUDE_ID, { now, fetchMetadata });
-  assert.equal(client.clientName, "Claude script");
-  await getClient(db, CLAUDE_ID, { now: now + 60_000, fetchMetadata });
+  const client = await getClient(db, CLAUDE_ID, { now, fetchMetadata, fetch: true });
+  assert.deepEqual([client.clientName, client.declaredName, client.verified], ["Claude", "Claude script", true]);
+  await getClient(db, CLAUDE_ID, { now: now + 60_000, fetchMetadata, fetch: true });
   assert.equal(fetches.length, 1, "fresh documents come from the cache");
   // An unreachable document falls back to a cached copy for a while.
   const failing = async () => { throw new ClientError("invalid_client", "down"); };
-  assert.equal((await getClient(db, CLAUDE_ID, { now: now + 2 * 86400000, fetchMetadata: failing })).clientName, "Claude script");
-  await assert.rejects(getClient(db, CLAUDE_ID, { now: now + 8 * 86400000, fetchMetadata: failing }), ClientError);
+  assert.equal((await getClient(db, CLAUDE_ID, { now: now + 2 * 86400000, fetchMetadata: failing, fetch: true })).clientName, "Claude");
+  await assert.rejects(getClient(db, CLAUDE_ID, { now: now + 8 * 86400000, fetchMetadata: failing, fetch: true }), ClientError);
 });
 
 test("redirect URIs: https anywhere, http only on loopback where any port matches", () => {
@@ -437,7 +449,7 @@ test("HTTP routes serve discovery, register, authorize, token and revoke with OA
     assert.equal(unknown.headers.get("x-frame-options"), "DENY");
 
     const info = await (await fetch(`${base}/oauth/consent`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request, idToken: "id:alice" }) })).json();
-    assert.deepEqual([info.clientName, info.redirectHost, info.account], ["Inspector", "localhost:6274", "ready"]);
+    assert.deepEqual([info.clientName, info.verified, info.clientHost, info.account], ["Unverified app", false, "localhost:6274", "ready"]);
     const approved = await (await fetch(`${base}/oauth/approve`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request, idToken: "id:alice", decision: "approve" }) })).json();
     const code = new URL(approved.redirect).searchParams.get("code");
 
@@ -474,4 +486,101 @@ test("per-IP limits stop registration floods", async () => {
 test("OAuthError keeps the OAuth error code and HTTP status", () => {
   const error = new OAuthError("invalid_grant", "nope");
   assert.deepEqual([error.error, error.status, error.message], ["invalid_grant", 400, "nope"]);
+});
+
+// ---- Verification, redirects and abuse limits ---------------------------------------------------
+
+test("only allowlisted metadata hosts get a brand; anything else is an unverified app with its host shown", async () => {
+  const evilId = "https://evil.example/claude-metadata";
+  const evilRedirect = "https://evil.example/callback";
+  const { db, oauth } = setup({ metadata: { client_id: evilId, client_name: "Claude‮", redirect_uris: [evilRedirect] } });
+  const { redirect } = await oauth.authorize({ response_type: "code", client_id: evilId, redirect_uri: evilRedirect, code_challenge: CHALLENGE, code_challenge_method: "S256" });
+  const info = await oauth.consentInfo({ request: requestIdFrom(redirect) });
+  assert.deepEqual([info.clientName, info.verified, info.clientHost], ["Unverified app", false, "evil.example"]);
+  assert.equal(db.documents.get(`oauthClients/${createHash("sha256").update(evilId).digest("hex")}`).assistant, "other");
+});
+
+test("unverified clients never get an error or cancel redirect; they see a page instead", async () => {
+  const { db, oauth } = setup();
+  const client = await registerClient(db, { redirect_uris: ["https://evil.example/cb"], token_endpoint_auth_method: "none" }, { now: T0 });
+  const base = { response_type: "code", client_id: client.client_id, redirect_uri: "https://evil.example/cb", code_challenge: CHALLENGE, code_challenge_method: "S256", state: "s" };
+  const refused = await oauth.authorize({ ...base, response_type: "token" });
+  assert.equal(refused.redirect, undefined);
+  assert.equal(refused.page.status, 400);
+  const { redirect } = await oauth.authorize(base);
+  assert.deepEqual(await oauth.decide({ request: requestIdFrom(redirect), decision: "deny" }), { cancelled: true });
+  // A verified assistant still gets the standard error redirect.
+  const verified = await oauth.authorize({ ...base, client_id: CLAUDE_ID, redirect_uri: CLAUDE_REDIRECT, response_type: "token" });
+  assert.equal(new URL(verified.redirect).searchParams.get("error"), "unsupported_response_type");
+});
+
+test("the token and revocation endpoints never fetch client metadata", async () => {
+  const { oauth, fetches } = setup();
+  const otherId = "https://claude.ai/oauth/never-seen";
+  await assert.rejects(oauth.token({ grant_type: "refresh_token", refresh_token: "aot_rt_x", client_id: otherId }), { error: "invalid_client" });
+  await assert.rejects(oauth.revoke({ token: "aot_rt_x", client_id: otherId }), { error: "invalid_client" });
+  assert.deepEqual(fetches, []);
+  // A stored client works there without a refetch, however old its copy.
+  const tokens = await connect(oauth);
+  assert.equal(fetches.length, 1);
+  assert.ok((await oauth.token({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: CLAUDE_ID })).access_token);
+  assert.equal(fetches.length, 1);
+});
+
+test("failed metadata fetches are remembered for ten minutes, and fetches are capped per host", async () => {
+  const db = new FakeFirestore();
+  const id = "https://down.example/meta";
+  let calls = 0;
+  const failing = async () => { calls += 1; throw new ClientError("invalid_client", "down"); };
+  await assert.rejects(getClient(db, id, { now: T0, fetchMetadata: failing, fetch: true }), ClientError);
+  await assert.rejects(getClient(db, id, { now: T0 + 60_000, fetchMetadata: failing, fetch: true }), /recently/);
+  assert.equal(calls, 1);
+  await assert.rejects(getClient(db, id, { now: T0 + 11 * 60_000, fetchMetadata: failing, fetch: true }), ClientError);
+  assert.equal(calls, 2);
+  const { createInstanceLimiters } = require("../assistant-limits");
+  const limiters = createInstanceLimiters();
+  let served = 0;
+  const ok = async (url) => { served += 1; return { client_id: url, redirect_uris: ["https://many.example/cb"] }; };
+  for (let i = 0; i < 25; i += 1) {
+    await getClient(db, `https://many.example/c${i}`, { now: T0, fetchMetadata: ok, fetch: true, limiters }).catch(() => {});
+  }
+  assert.equal(served, 20);
+});
+
+test("a revocation leaves connector data alone if an assistant connected again meanwhile", async () => {
+  const { db, oauth } = setup();
+  const tokens = await connect(oauth);
+  db.documents.set("accounts/alice/assistantSnapshots/d1", { payload: "{}" });
+  // Another connection lands between the revocation's transaction and its cleanup.
+  const original = db.collection.bind(db);
+  let raced = false;
+  db.collection = (name) => {
+    if (name === "oauthTokens" && !raced && db.documents.get("accounts/alice/assistant/state")?.connected === false) {
+      raced = true;
+      db.documents.set("accounts/alice/assistant/state", { connected: true, connections: 1 });
+    }
+    return original(name);
+  };
+  await oauth.revoke({ token: tokens.refresh_token, client_id: CLAUDE_ID });
+  assert.ok(raced);
+  assert.ok(db.documents.has("accounts/alice/assistantSnapshots/d1"));
+});
+
+test("the token endpoint is limited per caller and a direct caller can't escape its hop", async () => {
+  const { db, oauth } = setup();
+  const { createInstanceLimiters, createMemoryLimiter } = require("../assistant-limits");
+  const limiters = { ...createInstanceLimiters(), hop: createMemoryLimiter({ limit: 150, windowMs: 10 * 60 * 1000 }) };
+  const handler = createOAuthHandler({ oauth, db, now: () => T0, limiters });
+  await withServer(handler, async (base) => {
+    const token = (headers) => fetch(`${base}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
+      body: new URLSearchParams({ grant_type: "refresh_token", client_id: "aot_client_x", refresh_token: "x" }).toString() });
+    const statuses = [];
+    for (let i = 0; i < 121; i += 1) statuses.push((await token({ "x-forwarded-for": "198.51.100.7" })).status);
+    assert.equal(statuses.filter((status) => status === 429).length, 1);
+    // Forging Fastly-Client-IP spreads requests over per-caller buckets, but the unforgeable hop
+    // (the last X-Forwarded-For entry) still caps them.
+    const forged = [];
+    for (let i = 0; i < 160; i += 1) forged.push((await token({ "fastly-client-ip": `203.0.113.${i}`, "x-forwarded-for": "1.2.3.4, 192.0.2.50" })).status);
+    assert.equal(forged.filter((status) => status === 429).length, 10);
+  });
 });

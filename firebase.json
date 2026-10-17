@@ -49,7 +49,7 @@
           },
           {
             "key": "Content-Security-Policy",
-            "value": "frame-ancestors 'none'"
+            "value": "default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com http://127.0.0.1:9199; frame-src https://always-on-time-zombit-2026.firebaseapp.com http://127.0.0.1:9199; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
           }
         ]
       }

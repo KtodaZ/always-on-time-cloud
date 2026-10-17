@@ -1,6 +1,8 @@
 // Consent page for connecting an AI assistant (docs/ASSISTANT_CONNECTOR.md). The user signs in with
 // the Google account they use in the app; approving sends the Firebase ID token and the pending
 // request id to /oauth/approve, which returns the assistant's redirect with a one-time code.
+// Only Claude and ChatGPT (verified by their client metadata host) are named; any other app shows
+// as "Unverified app" with the site its codes go to, and cancelling it shows a page, not a redirect.
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
 import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut, connectAuthEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
 
@@ -33,7 +35,12 @@ async function decide(decision, user) {
   show(decision === 'approve' ? 'Connecting…' : 'Cancelling…');
   try {
     const idToken = user ? await user.getIdToken() : undefined;
-    const { redirect } = await post('/oauth/approve', { request, idToken, decision });
+    const { redirect, cancelled } = await post('/oauth/approve', { request, idToken, decision });
+    if (cancelled || !redirect) {
+      stop('Cancelled. Nothing was connected. You can close this page.');
+      show('');
+      return;
+    }
     show(decision === 'approve' ? 'Approved. Returning to your assistant…' : 'Cancelled. Returning to your assistant…');
     location.assign(redirect);
   } catch (error) {
@@ -59,8 +66,10 @@ async function start() {
     return;
   }
   element('heading').textContent = `Connect ${info.clientName}`;
-  element('client').textContent = info.clientName + (info.verifiedHost && info.verifiedHost !== info.redirectHost ? ` (${info.verifiedHost})` : '');
-  element('redirect-host').textContent = info.redirectHost;
+  element('client').textContent = info.clientName;
+  element('redirect-host').textContent = info.clientHost;
+  element('unverified').hidden = info.verified;
+  element('unverified-host').textContent = info.clientHost;
   element('intro').textContent = 'Sign in to review and approve this connection.';
   element('details').hidden = false;
   element('cancel').hidden = false;

@@ -4,11 +4,12 @@
 // bearer tokens. Each request builds a server bound to the token's account, so a tool can only
 // ever read or write the signed-in user's data.
 
-const { LIMITS, createMemoryLimiter, consume } = require("./assistant-limits");
+const { clientKeys, createInstanceLimiters } = require("./assistant-limits");
 const { COLLECTIONS } = require("./assistant-data");
 const { errorFields, logEvent } = require("./assistant-log");
 const { LAST_USED_RESOLUTION_MS, SCOPES, urls, verifyAccessToken } = require("./assistant-oauth");
 const { ToolError } = require("./assistant-snapshot");
+const { createToolContext } = require("./assistant-tool-context");
 const { INSTRUCTIONS, TOOLS, noPhone } = require("./assistant-tools");
 const { day, week } = require("./assistant-usage");
 
@@ -35,8 +36,6 @@ const bearer = (req) => {
   return typeof header === "string" && /^Bearer\s+/i.test(header) ? header.replace(/^Bearer\s+/i, "").trim() : null;
 };
 
-const memoryLimiter = createMemoryLimiter(LIMITS.toolCalls);
-
 /**
  * Builds the MCP request handler. `deps`: db, messaging,
  * usage(counts), accountEmails(uid), logger, now, sleep, origin, sdk ({McpServer,
@@ -46,6 +45,7 @@ function createMcpHandler(deps) {
   const { db, logger, now = Date.now, usage = async () => {} } = deps;
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const u = urls(deps.origin);
+  const limiters = deps.limiters ?? createInstanceLimiters();
   const challenge = (extra = "") => `Bearer resource_metadata="${u.resourceMetadata}", scope="${SCOPES.join(" ")}"${extra}`;
 
   /** Records last use at most hourly, and counts the connection once per day and week. */
@@ -64,7 +64,11 @@ function createMcpHandler(deps) {
       update.lastActiveWeek = thisWeek;
       counts[`weeklyActive.${grant.assistant}`] = 1;
     }
-    if (Object.keys(update).length) await db.collection(COLLECTIONS.grants).doc(grant.grantId).update(update).catch(() => {});
+    if (Object.keys(update).length) {
+      await db.collection(COLLECTIONS.grants).doc(grant.grantId).update(update).catch((error) => {
+        logEvent(logger, "warn", "grant.touch_failed", { uid: grant.uid, grantId: grant.grantId, ...errorFields(error) });
+      });
+    }
     if (Object.keys(counts).length) await usage(counts);
   }
 
@@ -74,39 +78,22 @@ function createMcpHandler(deps) {
       { name: "always-on-time", title: "Always On Time", version: SERVER_VERSION },
       { instructions: INSTRUCTIONS },
     );
-    const ctx = {
-      db,
-      uid: grant.uid,
-      grant,
-      origin: u.origin,
-      now,
-      sleep,
-      messaging: deps.messaging,
-      logger,
-      accountEmails: () => deps.accountEmails(grant.uid),
-      pushAllowed: () => consume(db, `push|${grant.grantId}`, LIMITS.push, now()),
-      confirmSetup: async () => {
-        grant.setupConfirmedAt = now();
-        await db.collection(COLLECTIONS.grants).doc(grant.grantId).update({ setupConfirmedAt: new Date(grant.setupConfirmedAt) });
-      },
-    };
     for (const tool of TOOLS) {
       server.registerTool(tool.name, {
         title: tool.title,
         description: tool.description,
         inputSchema: tool.inputSchema,
         annotations: { title: tool.title, ...tool.annotations },
-      }, async (args) => runTool(tool, { ...ctx, counts: {}, trace: {} }, args ?? {}));
+      }, async (args) => runTool(tool, createToolContext({
+        db, uid: grant.uid, grant, origin: u.origin, now, sleep, messaging: deps.messaging, logger, accountEmails: deps.accountEmails,
+      }), args ?? {}));
     }
     return server;
   }
 
   async function runTool(tool, ctx, args) {
     const started = now();
-    // Counters for this call, written as one usage update when it finishes.
-    ctx.count = (name, amount = 1) => {
-      ctx.counts[name] = (ctx.counts[name] ?? 0) + amount;
-    };
+    // ctx.counts are written as one usage update when the call finishes.
     ctx.count(`tools.${tool.name}`);
     let response;
     let outcome = "ok";
@@ -118,7 +105,7 @@ function createMcpHandler(deps) {
           ? "This connection can only read. Reconnect the assistant and allow changes to make changes."
           : "This connection isn't allowed to read alarms.");
       }
-      if (!memoryLimiter(ctx.grant.grantId, started)) {
+      if (!limiters.toolCalls(ctx.grant.grantId, started)) {
         ctx.count("rateLimited");
         throw new ToolError("Too many requests in a short time. Wait a few minutes and try again.");
       }
@@ -167,9 +154,20 @@ function createMcpHandler(deps) {
       return;
     }
     const token = bearer(req);
+    // Callers without a valid token are limited in memory, and once over the limit they are
+    // refused before their token costs a database read.
+    const { client } = clientKeys(req);
+    const time = now();
+    const tooMany = () => {
+      logEvent(logger, "warn", "oauth.token_rejected", { reason: "rate_limited" });
+      return sendJson(res, 429, { error: "too_many_requests", error_description: "Too many unauthenticated requests; try again later." }, { "Retry-After": "60" });
+    };
+    if (limiters.unauthorized.exceeded(client, time) || limiters.unauthorizedGlobal.exceeded("all", time)) return tooMany();
     let rejected = token ? null : "missing";
-    const grant = token ? await verifyAccessToken(db, token, { now: now(), onReject: (reason) => { rejected = reason; } }) : null;
+    const grant = token ? await verifyAccessToken(db, token, { now: time, onReject: (reason) => { rejected = reason; } }) : null;
     if (!grant) {
+      const counted = [limiters.unauthorized(client, time), limiters.unauthorizedGlobal("all", time)];
+      if (!counted.every(Boolean)) return tooMany();
       logEvent(logger, "info", "oauth.token_rejected", { reason: rejected ?? "invalid" });
       return sendJson(res, 401, { error: "invalid_token", error_description: "Sign in to Always On Time to use this connector." }, {
         "WWW-Authenticate": challenge(token ? ", error=\"invalid_token\"" : ""),

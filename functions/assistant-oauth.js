@@ -5,7 +5,10 @@
 //
 // - Authorization codes, access tokens and refresh tokens are 256-bit random strings, stored only
 //   as SHA-256 hashes. Codes last 10 minutes and work once; access tokens last an hour; refresh
-//   tokens rotate on every use, and presenting a used one again revokes the whole connection.
+//   tokens rotate on every use. Presenting a used code or refresh token again within 30 seconds
+//   is refused (a client retrying a lost response); later, it revokes the whole connection.
+// - Clients from unverified hosts never get an error redirect: problems show an error page, so
+//   this server can't be used to bounce users to an arbitrary site.
 // - A grant (oauthGrants/{grantId}) is one assistant connection. The account's
 //   assistant/state document counts them; the last revocation deletes the connector data
 //   (docs/ASSISTANT_PROTOCOL.md "Connection lifecycle").
@@ -18,7 +21,8 @@ const {
 const {
   ClientError, authenticateClient, getClient, redirectMatches, touchClient,
 } = require("./assistant-oauth-clients");
-const { clientIdForLog, logEvent } = require("./assistant-log");
+const { clientIdForLog, errorFields, logEvent } = require("./assistant-log");
+const { createInstanceLimiters } = require("./assistant-limits");
 const { sendToDevices } = require("./assistant-push");
 
 const PRODUCTION_ORIGIN = "https://always-on-time-zombit-2026.web.app";
@@ -28,9 +32,10 @@ const CODE_TTL_MS = 10 * 60 * 1000;
 const ACCESS_TTL_MS = 60 * 60 * 1000;
 const REFRESH_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const GRANT_IDLE_MS = 90 * 24 * 60 * 60 * 1000;
-// A used refresh token presented again within this window is most likely a client retrying a
-// request whose response it lost: refuse it, but do not revoke the connection.
-const REFRESH_REUSE_GRACE_MS = 30 * 1000;
+// A used code or refresh token presented again within this window is most likely a client retrying
+// a request whose response it lost: refuse it, but do not revoke the connection.
+const REUSE_GRACE_MS = 30 * 1000;
+const REFRESH_REUSE_GRACE_MS = REUSE_GRACE_MS;
 const LAST_USED_RESOLUTION_MS = 60 * 60 * 1000;
 
 class OAuthError extends Error {
@@ -124,10 +129,15 @@ function createOAuth(deps) {
   const origin = deps.origin ?? PRODUCTION_ORIGIN;
   const u = urls(origin);
   const collection = (name) => db.collection(COLLECTIONS[name]);
+  const limiters = deps.limiters ?? createInstanceLimiters();
   const log = (level, event, fields) => logEvent(logger, level, event, fields);
-  const lookupClient = async (clientId) => {
+  const touch = (client, time) => touchClient(db, client, time).catch((error) => {
+    log("warn", "oauth.client_touch_failed", { clientId: clientIdForLog(client.clientId), ...errorFields(error) });
+  });
+  /** A client by client_id; only the authorization endpoint (`fetch`) may fetch a metadata document. */
+  const lookupClient = async (clientId, { fetch = false } = {}) => {
     try {
-      return await getClient(db, clientId, { now: now(), fetchMetadata, logger });
+      return await getClient(db, clientId, { now: now(), fetchMetadata, logger, fetch, limiters });
     } catch (error) {
       if (error instanceof ClientError) throw new OAuthError("invalid_client", error.message, 401);
       throw error;
@@ -144,7 +154,7 @@ function createOAuth(deps) {
     const value = (name) => (typeof query[name] === "string" ? query[name] : undefined);
     let client;
     try {
-      client = await lookupClient(value("client_id"));
+      client = await lookupClient(value("client_id"), { fetch: true });
     } catch (error) {
       log("info", "oauth.authorize", { clientId: clientIdForLog(value("client_id")), outcome: "unknown_client" });
       return { page: { status: 400, message: "This assistant could not be identified. Start connecting again from your assistant." } };
@@ -161,6 +171,8 @@ function createOAuth(deps) {
     const state = value("state");
     const fail = (error, description) => {
       log("info", "oauth.authorize", { clientId: clientIdForLog(client.clientId), outcome: error });
+      // Only verified assistants get errors at their redirect URI; anyone can register an unverified one.
+      if (!client.verified) return { page: { status: 400, message: `This connection request isn’t valid (${description}). Start connecting again from your assistant.` } };
       return { redirect: withParams(redirectUri, { error, error_description: description, state, iss: u.issuer }) };
     };
     if (value("response_type") !== "code") return fail("unsupported_response_type", "response_type must be code");
@@ -180,6 +192,7 @@ function createOAuth(deps) {
       clientId: client.clientId,
       redirectUri,
       redirectUriProvided: Boolean(requested),
+      verified: client.verified === true,
       state: state ?? null,
       codeChallenge: challenge,
       scopes: parseScopes(value("scope")),
@@ -218,8 +231,8 @@ function createOAuth(deps) {
     const client = await lookupClient(pending.clientId);
     const info = {
       clientName: client.clientName,
-      verifiedHost: client.verifiedHost ?? null,
-      redirectHost: hostOf(pending.redirectUri),
+      verified: client.verified === true,
+      clientHost: hostOf(pending.redirectUri),
       scopes: pending.scopes,
     };
     if (!idToken) return info;
@@ -227,7 +240,10 @@ function createOAuth(deps) {
     return { ...info, email: user.email, account: user.accountReady ? "ready" : "not_ready" };
   }
 
-  /** Approve or cancel from the consent page. Returns {redirect} for the browser. */
+  /**
+   * Approve or cancel from the consent page. Returns {redirect} for the browser, or for a
+   * cancelled unverified client {cancelled: true} (the page says so instead of redirecting).
+   */
   async function decide({ request: requestId, idToken, decision }) {
     if (decision !== "approve" && decision !== "deny") throw new OAuthError("invalid_request", "decision must be approve or deny");
     if (decision === "deny") {
@@ -235,6 +251,7 @@ function createOAuth(deps) {
       if (!pending) throw new OAuthError("expired", "This connection request expired.", 404);
       await pending.ref.delete();
       log("info", "oauth.consent", { clientId: clientIdForLog(pending.clientId), outcome: "denied" });
+      if (!pending.verified) return { cancelled: true };
       return { redirect: withParams(pending.redirectUri, { error: "access_denied", error_description: "The user cancelled.", state: pending.state, iss: u.issuer }) };
     }
     const user = await signedInUser(idToken);
@@ -291,7 +308,7 @@ function createOAuth(deps) {
     };
   }
 
-  /** Authenticates the client at the token or revocation endpoint. */
+  /** Authenticates the client at the token or revocation endpoint (stored clients only, never a fetch). */
   async function tokenClient(body, basic) {
     const clientId = basic?.clientId ?? body.client_id;
     const client = await lookupClient(clientId);
@@ -313,7 +330,12 @@ function createOAuth(deps) {
       const doc = await transaction.get(codeRef);
       if (!doc.exists) return { error: "invalid authorization code" };
       const data = doc.data();
-      if (data.usedAt) return { error: "authorization code was already used", revoke: data.grantId };
+      const usedAt = toMillis(data.usedAt);
+      if (usedAt !== null) {
+        return time - usedAt < REUSE_GRACE_MS
+          ? { error: "authorization code was already used" }
+          : { error: "authorization code was already used; the connection was revoked", revoke: data.grantId };
+      }
       if (toMillis(data.expiresAt) <= time) return { error: "authorization code expired" };
       if (data.clientId !== client.clientId) return { error: "authorization code was issued to another client" };
       if (data.redirectUriProvided || body.redirect_uri !== undefined) {
@@ -331,8 +353,9 @@ function createOAuth(deps) {
         clientId: client.clientId,
         clientName: client.clientName,
         assistant: client.assistant ?? "other",
-        verifiedHost: client.verifiedHost ?? null,
-        redirectHost: hostOf(data.redirectUri),
+        verified: client.verified === true,
+        // Where the connection's codes went: how the user tells an unverified app apart.
+        clientHost: hostOf(data.redirectUri),
         scopes: data.scopes,
         createdAt: new Date(time),
         lastUsedAt: new Date(time),
@@ -362,7 +385,7 @@ function createOAuth(deps) {
       outcome: "ok",
     });
     for (const id of outcome.replaced) await deleteTokens(id);
-    await touchClient(db, client, time).catch(() => {});
+    await touch(client, time);
     await usage({ [`connectionsNew.${outcome.grant.assistant}`]: 1 });
     if (outcome.connectionsChanged) await notifyState(outcome.grant.uid);
     return outcome.tokens;
@@ -401,7 +424,7 @@ function createOAuth(deps) {
       throw new OAuthError("invalid_grant", outcome.error);
     }
     log("info", "oauth.refresh", { uid: outcome.grant.uid, grantId: outcome.grant.grantId, client: outcome.grant.clientName, outcome: "ok" });
-    await touchClient(db, client, time).catch(() => {});
+    await touch(client, time);
     return outcome.tokens;
   }
 
@@ -470,7 +493,8 @@ function createOAuth(deps) {
     await deleteTokens(grantId);
     const devices = await readDevices(db, outcome.grant.uid);
     await notifyState(outcome.grant.uid, devices);
-    if (outcome.remaining === 0) await deleteConnectorData(db, outcome.grant.uid);
+    // Another assistant may connect while this cleans up; its data is then left alone.
+    if (outcome.remaining === 0) await deleteConnectorData(db, outcome.grant.uid, { onlyIfDisconnected: true });
     await usage({ [`disconnects.${outcome.grant.assistant ?? "other"}`]: 1 });
     log("info", "connection.revoked", {
       uid: outcome.grant.uid, grantId, client: outcome.grant.clientName, reason, remaining: outcome.remaining,
@@ -486,8 +510,8 @@ function createOAuth(deps) {
         grantId: doc.id,
         clientName: grant.clientName,
         assistant: grant.assistant,
-        verifiedHost: grant.verifiedHost ?? null,
-        redirectHost: grant.redirectHost ?? null,
+        verified: grant.verified === true,
+        clientHost: grant.clientHost ?? null,
         scopes: grant.scopes,
         createdAt: toMillis(grant.createdAt),
         lastUsedAt: toMillis(grant.lastUsedAt),
@@ -572,6 +596,7 @@ module.exports = {
   PRODUCTION_ORIGIN,
   REFRESH_REUSE_GRACE_MS,
   REFRESH_TTL_MS,
+  REUSE_GRACE_MS,
   SCOPES,
   authorizationServerMetadata,
   createOAuth,

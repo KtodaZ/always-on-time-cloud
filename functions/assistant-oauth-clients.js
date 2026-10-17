@@ -4,7 +4,12 @@
 // https URL serving the client's metadata) and Dynamic Client Registration (RFC 7591) as fallback.
 // Fetching a metadata document is a server-side request to a URL a stranger chose, so it only
 // goes to public addresses over https, pinned to the address that was checked, with no redirects
-// and small size and time limits.
+// and small size and time limits. Only /oauth/authorize fetches; failures are remembered for ten
+// minutes and fetches are capped per host and overall.
+//
+// A client's own name is self-asserted, so it is never shown. Clients whose metadata document is
+// served from a host in BRANDED_CLIENT_HOSTS get that brand; every other client is an
+// "Unverified app", identified to the user by its redirect host.
 
 const dns = require("node:dns");
 const https = require("node:https");
@@ -12,14 +17,27 @@ const net = require("node:net");
 const { createHash, randomBytes, timingSafeEqual } = require("node:crypto");
 
 const { COLLECTIONS, toMillis } = require("./assistant-data");
-const { clientIdForLog, logEvent } = require("./assistant-log");
+const { clientIdForLog, errorFields, logEvent } = require("./assistant-log");
+const { sha256Hex } = require("./assistant-records");
+const { cleanText } = require("./assistant-snapshot");
 
 const CIMD_MAX_BYTES = 5 * 1024;
 const CIMD_TIMEOUT_MS = 5000;
 const CIMD_FRESH_MS = 24 * 60 * 60 * 1000;
 const CIMD_STALE_OK_MS = 7 * 24 * 60 * 60 * 1000;
 const CLIENT_IDLE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const METADATA_FAILURE_CACHE_MS = 10 * 60 * 1000;
 const MAX_REDIRECT_URIS = 10;
+
+// Hosts whose Client ID Metadata Documents name a known assistant (exact host of the client_id URL):
+// claude.ai serves Claude's (https://claude.ai/oauth/...; Claude Code's is
+// claude.ai/oauth/claude-code-client-metadata) and chatgpt.com serves ChatGPT's
+// (https://chatgpt.com/oauth/client.json or /oauth/{callback_id}/client.json).
+const BRANDED_CLIENT_HOSTS = {
+  "claude.ai": { name: "Claude", assistant: "claude" },
+  "chatgpt.com": { name: "ChatGPT", assistant: "chatgpt" },
+};
+const UNVERIFIED_NAME = "Unverified app";
 const MAX_URL_LENGTH = 2048;
 
 class ClientError extends Error {
@@ -167,7 +185,18 @@ function redirectMatches(registered, requested) {
     a.pathname === b.pathname && a.search === b.search;
 }
 
-const cleanName = (value) => (typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f<>]/g, "").trim().slice(0, 100) : "");
+/** A self-declared client name, for logs and the registration response only: one clean line, no markup. */
+const cleanName = (value) => cleanText(typeof value === "string" ? value.replace(/[<>]/g, "") : "", 100);
+
+/** The brand for a metadata-document client served from an allowlisted host, else null. */
+function brandOf(kind, clientId) {
+  if (kind !== "cimd") return null;
+  try {
+    return BRANDED_CLIENT_HOSTS[new URL(clientId).hostname] ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /** Validates client metadata (from a document or a registration request) into the stored form. */
 function validateClientMetadata(metadata, { kind, clientId }) {
@@ -205,35 +234,20 @@ function validateClientMetadata(metadata, { kind, clientId }) {
       clientUri = null;
     }
   }
-  const verifiedHost = kind === "cimd" ? new URL(clientId).hostname : null;
+  const brand = brandOf(kind, clientId);
   return {
     kind,
     clientId,
-    clientName: cleanName(metadata.client_name) || verifiedHost || new URL(redirectUris[0]).hostname,
+    // What the user sees: the brand for an allowlisted metadata host, otherwise "Unverified app".
+    clientName: brand ? brand.name : UNVERIFIED_NAME,
+    declaredName: cleanName(metadata.client_name) || null,
+    verified: Boolean(brand),
+    assistant: brand ? brand.assistant : "other",
     redirectUris,
     grantTypes,
     tokenEndpointAuthMethod: authMethod,
     clientUri,
-    verifiedHost,
   };
-}
-
-const hostMatches = (host, domains) => domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
-
-/** Which assistant a client is, for anonymous usage counts: claude, chatgpt or other. */
-function assistantKind(client) {
-  const hosts = [client.verifiedHost, ...client.redirectUris.map((uri) => {
-    try {
-      return new URL(uri).hostname;
-    } catch {
-      return "";
-    }
-  })].filter(Boolean);
-  if (hosts.some((host) => hostMatches(host, ["claude.ai", "claude.com", "anthropic.com"]))) return "claude";
-  if (hosts.some((host) => hostMatches(host, ["chatgpt.com", "openai.com"]))) return "chatgpt";
-  if (/claude/i.test(client.clientName)) return "claude";
-  if (/chatgpt|openai/i.test(client.clientName)) return "chatgpt";
-  return "other";
 }
 
 /** Stores a Dynamic Client Registration request. Returns the RFC 7591 response body. */
@@ -244,7 +258,6 @@ async function registerClient(db, body, { now }) {
   if (client.tokenEndpointAuthMethod !== "none") clientSecret = `aot_secret_${randomBytes(32).toString("base64url")}`;
   await db.collection(COLLECTIONS.clients).doc(clientDocId(clientId)).set({
     ...client,
-    assistant: assistantKind(client),
     clientSecretHash: clientSecret ? sha256(clientSecret) : null,
     createdAt: new Date(now),
     expiresAt: new Date(now + CLIENT_IDLE_TTL_MS),
@@ -253,7 +266,7 @@ async function registerClient(db, body, { now }) {
     client_id: clientId,
     client_id_issued_at: Math.floor(now / 1000),
     ...(clientSecret ? { client_secret: clientSecret, client_secret_expires_at: 0 } : {}),
-    client_name: client.clientName,
+    ...(client.declaredName ? { client_name: client.declaredName } : {}),
     redirect_uris: client.redirectUris,
     grant_types: client.grantTypes,
     response_types: ["code"],
@@ -261,11 +274,16 @@ async function registerClient(db, body, { now }) {
   };
 }
 
+const failureRef = (db, clientId) => db.collection(COLLECTIONS.limits).doc(sha256Hex(`metadata_failed|${clientId}`));
+
 /**
  * Looks up a client by client_id: a registered (DCR) client from Firestore, or a metadata document
- * client fetched (and cached for a day) from its URL. Throws ClientError("invalid_client").
+ * client, cached for a day. Only `fetch: true` (the authorization endpoint) may fetch a document;
+ * the token and revocation endpoints use stored clients only. A failed fetch is remembered for ten
+ * minutes, and `limiters` (metadataFetchHost, metadataFetchGlobal) cap fetches. While a document
+ * can't be fetched, a cached copy up to a week old keeps working. Throws ClientError("invalid_client").
  */
-async function getClient(db, clientId, { now, fetchMetadata = fetchClientMetadata, logger }) {
+async function getClient(db, clientId, { now, fetchMetadata = fetchClientMetadata, logger, fetch = false, limiters } = {}) {
   if (typeof clientId !== "string" || clientId.length === 0 || clientId.length > MAX_URL_LENGTH) {
     throw new ClientError("invalid_client", "client_id is missing");
   }
@@ -276,24 +294,46 @@ async function getClient(db, clientId, { now, fetchMetadata = fetchClientMetadat
     if (!stored || stored.clientId !== clientId || stored.kind !== "dcr") throw new ClientError("invalid_client", "unknown client_id");
     return stored;
   }
+  if (stored && (stored.clientId !== clientId || stored.kind !== "cimd")) throw new ClientError("invalid_client", "unknown client_id");
   const fetchedAt = toMillis(stored?.fetchedAt);
-  if (stored && fetchedAt !== null && now - fetchedAt < CIMD_FRESH_MS) return stored;
+  if (stored && (!fetch || (fetchedAt !== null && now - fetchedAt < CIMD_FRESH_MS))) return stored;
+  if (!fetch) throw new ClientError("invalid_client", "unknown client_id; start connecting again");
+
+  const log = (level, outcome, reason) => logEvent(logger, level, "oauth.client_metadata", { clientId: clientIdForLog(clientId), kind: "cimd", outcome, reason });
+  /** A cached copy while the document is unavailable, else the error. */
+  const unavailable = (reason, error) => {
+    if (stored && fetchedAt !== null && now - fetchedAt < CIMD_STALE_OK_MS) {
+      log("warn", "stale_cache", reason);
+      return stored;
+    }
+    log("warn", "rejected", reason);
+    throw error instanceof ClientError ? error : new ClientError("invalid_client", reason);
+  };
+  const failure = await failureRef(db, clientId).get();
+  if (failure.exists && toMillis(failure.data().expiresAt) > now) {
+    return unavailable("client metadata document failed recently; try again in a few minutes");
+  }
+  let host = "";
+  try {
+    host = new URL(clientId).hostname;
+  } catch {
+    host = "";
+  }
+  if (limiters && (!limiters.metadataFetchHost(host, now) || !limiters.metadataFetchGlobal("all", now))) {
+    return unavailable("too many client metadata fetches; try again later");
+  }
   let client;
   try {
     client = validateClientMetadata(await fetchMetadata(clientId), { kind: "cimd", clientId });
   } catch (error) {
     const reason = error instanceof ClientError ? error.message : "client metadata document could not be used";
-    // A client whose document is briefly unreachable keeps working from the cached copy.
-    if (stored && fetchedAt !== null && now - fetchedAt < CIMD_STALE_OK_MS) {
-      logEvent(logger, "warn", "oauth.client_metadata", { clientId: clientIdForLog(clientId), kind: "cimd", outcome: "stale_cache", reason });
-      return stored;
-    }
-    logEvent(logger, "warn", "oauth.client_metadata", { clientId: clientIdForLog(clientId), kind: "cimd", outcome: "rejected", reason });
-    throw error instanceof ClientError ? error : new ClientError("invalid_client", reason);
+    await failureRef(db, clientId).set({ expiresAt: new Date(now + METADATA_FAILURE_CACHE_MS) }).catch((writeError) => {
+      logEvent(logger, "warn", "oauth.client_metadata", { clientId: clientIdForLog(clientId), outcome: "failure_cache_write_failed", ...errorFields(writeError) });
+    });
+    return unavailable(reason, error);
   }
   const record = {
     ...client,
-    assistant: assistantKind(client),
     clientSecretHash: null,
     createdAt: stored?.createdAt ?? new Date(now),
     fetchedAt: new Date(now),
@@ -323,9 +363,11 @@ function authenticateClient(client, secret) {
 }
 
 module.exports = {
+  BRANDED_CLIENT_HOSTS,
   CIMD_MAX_BYTES,
   ClientError,
-  assistantKind,
+  METADATA_FAILURE_CACHE_MS,
+  UNVERIFIED_NAME,
   authenticateClient,
   clientDocId,
   fetchClientMetadata,

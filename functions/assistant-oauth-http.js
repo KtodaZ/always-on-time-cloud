@@ -5,7 +5,7 @@
 
 const { OAuthError, authorizationServerMetadata, protectedResourceMetadata } = require("./assistant-oauth");
 const { ClientError, registerClient } = require("./assistant-oauth-clients");
-const { LIMITS, clientIp, consume } = require("./assistant-limits");
+const { LIMITS, clientKeys, consume, createInstanceLimiters } = require("./assistant-limits");
 const { errorFields, logEvent } = require("./assistant-log");
 
 const MAX_BODY_CHARS = 16 * 1024;
@@ -78,9 +78,24 @@ function basicAuth(req) {
   return { clientId: decode(decoded.slice(0, separator)), clientSecret: decode(decoded.slice(separator + 1)) };
 }
 
-function createOAuthHandler({ oauth, db, now = Date.now, logger, usage = async () => {} }) {
+function createOAuthHandler({ oauth, db, now = Date.now, logger, usage = async () => {}, limiters = createInstanceLimiters() }) {
   const origin = oauth.urls.origin;
-  const limited = async (name, key) => !(await consume(db, `${name}|${key}`, LIMITS[name], now()));
+  /**
+   * True when the request is over a limit: the caller's network hop and `globalCap` (in memory),
+   * then the per-caller `name` limit (Firestore). See clientKeys for what the keys can and can't prove.
+   */
+  const limited = async (req, name, globalCap) => {
+    const time = now();
+    const { client, hop } = clientKeys(req);
+    if (!limiters.hop(hop, time)) return true;
+    if (globalCap && !limiters[globalCap]("all", time)) return true;
+    return !(await consume(db, `${name}|${client}`, LIMITS[name], time));
+  };
+  const tooMany = async (res, route) => {
+    await usage({ rateLimited: 1 });
+    logEvent(logger, "warn", "oauth.error", { path: route, status: 429, errorCode: "too_many_requests" });
+    return send(res, 429, { error: "too_many_requests", error_description: "Too many attempts. Wait a few minutes and try again." }, { ...CORS, "Retry-After": "600" });
+  };
 
   const routes = {
     "GET /.well-known/oauth-protected-resource": (req, res) => send(res, 200, protectedResourceMetadata(origin), CORS),
@@ -88,7 +103,7 @@ function createOAuthHandler({ oauth, db, now = Date.now, logger, usage = async (
     "GET /.well-known/oauth-authorization-server": (req, res) => send(res, 200, authorizationServerMetadata(origin), CORS),
 
     "POST /oauth/register": async (req, res) => {
-      if (await limited("register", clientIp(req)) || await limited("registerGlobal", "all")) {
+      if (await limited(req, "register") || !(await consume(db, "registerGlobal|all", LIMITS.registerGlobal, now()))) {
         await usage({ rateLimited: 1 });
         logEvent(logger, "warn", "oauth.register", { kind: "dcr", outcome: "rate_limited" });
         return send(res, 429, { error: "too_many_requests", error_description: "Too many registrations; try again later." }, CORS);
@@ -109,25 +124,29 @@ function createOAuthHandler({ oauth, db, now = Date.now, logger, usage = async (
     },
 
     "GET /oauth/authorize": async (req, res) => {
-      if (await limited("authorize", clientIp(req))) return errorPage(res, 429, "Too many attempts. Wait a few minutes and try again.");
+      if (await limited(req, "authorize", "authorizeGlobal")) return errorPage(res, 429, "Too many attempts. Wait a few minutes and try again.");
       const result = await oauth.authorize(queryOf(req));
       if (result.page) return errorPage(res, result.page.status, result.page.message);
       return send(res, 302, undefined, { Location: result.redirect });
     },
 
     "POST /oauth/consent": async (req, res) => {
-      if (await limited("consent", clientIp(req))) return send(res, 429, { error: "too_many_requests", error_description: "Too many attempts. Wait a few minutes." });
+      if (await limited(req, "consent", "consentGlobal")) return tooMany(res, "/oauth/consent");
       return send(res, 200, await oauth.consentInfo(bodyOf(req)));
     },
 
     "POST /oauth/approve": async (req, res) => {
-      if (await limited("approve", clientIp(req))) return send(res, 429, { error: "too_many_requests", error_description: "Too many attempts. Wait a few minutes." });
+      if (await limited(req, "approve", "consentGlobal")) return tooMany(res, "/oauth/approve");
       return send(res, 200, await oauth.decide(bodyOf(req)));
     },
 
-    "POST /oauth/token": async (req, res) => send(res, 200, await oauth.token(bodyOf(req), basicAuth(req)), { ...CORS, Pragma: "no-cache" }),
+    "POST /oauth/token": async (req, res) => {
+      if (await limited(req, "token", "tokenGlobal")) return tooMany(res, "/oauth/token");
+      return send(res, 200, await oauth.token(bodyOf(req), basicAuth(req)), { ...CORS, Pragma: "no-cache" });
+    },
 
     "POST /oauth/revoke": async (req, res) => {
+      if (await limited(req, "token", "tokenGlobal")) return tooMany(res, "/oauth/revoke");
       await oauth.revoke(bodyOf(req), basicAuth(req));
       return send(res, 200, {}, CORS);
     },
