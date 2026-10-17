@@ -11,6 +11,7 @@ initializeApp();
 Object.assign(exports, require("./ios-push-functions"));
 Object.assign(exports, require("./account-sync-functions"));
 Object.assign(exports, require("./travel-route-functions"));
+Object.assign(exports, require("./assistant-functions"));
 
 // A Discord webhook URL can post to the developer's private channel but not read it. It is still a
 // secret so nobody else can post alerts.
