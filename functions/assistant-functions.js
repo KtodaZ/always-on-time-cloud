@@ -11,10 +11,11 @@ const { defineSecret } = require("firebase-functions/params");
 const { HttpsError, onCall, onRequest } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 
-const { LIMITS, consume } = require("./assistant-limits");
+const { isChangeId } = require("./assistant-data");
 const { errorFields, logEvent } = require("./assistant-log");
 const { createMcpHandler, loadSdk } = require("./assistant-mcp");
 const { ToolError } = require("./assistant-snapshot");
+const { createToolContext } = require("./assistant-tool-context");
 const { TOOLS } = require("./assistant-tools");
 const { PRODUCTION_ORIGIN, createOAuth } = require("./assistant-oauth");
 const { createOAuthHandler } = require("./assistant-oauth-http");
@@ -49,7 +50,7 @@ function services() {
   return shared;
 }
 
-/** Google account emails of a user, for turning Google calendar ids into record keys. */
+/** Google account emails of a user, for turning Google calendar ids into record keys (failures are logged by the caller). */
 async function accountEmails(uid) {
   const user = await getAuth().getUser(uid);
   return [user.email, ...user.providerData.filter((provider) => provider.providerId === "google.com").map((provider) => provider.email)]
@@ -116,32 +117,25 @@ exports.revokeAssistantConnection = onCall({ region: REGION, maxInstances: 5 }, 
 exports.undoAssistantChange = onCall({ region: REGION, maxInstances: 5 }, async (request) => {
   const uid = await requireActiveAccount(request);
   const changeId = request.data?.changeId;
-  if (typeof changeId !== "string" || !/^ch_[A-Za-z0-9_-]{16}$/.test(changeId)) {
-    throw new HttpsError("invalid-argument", "changeId is required.");
-  }
+  if (!isChangeId(changeId)) throw new HttpsError("invalid-argument", "changeId is required.");
   const { db, messaging, usage } = services();
-  const counts = {};
   const started = Date.now();
-  const trace = {};
-  const ctx = {
+  const ctx = createToolContext({
     db,
     uid,
     grant: { grantId: `app|${uid}`, clientName: "Always On Time app", assistant: "app", scopes: ["alarms.read", "alarms.write"] },
     origin,
     now: () => Date.now(),
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     messaging,
     logger,
-    pushAllowed: () => consume(db, `push|app|${uid}`, LIMITS.push, Date.now()),
-    count: (name, amount = 1) => { counts[name] = (counts[name] ?? 0) + amount; },
-    trace,
-  };
+  });
   const done = (outcome, extra = {}) => logEvent(logger, outcome === "unexpected_error" ? "error" : "info", "callable.undo", {
-    uid, outcome, durationMs: Date.now() - started, ...trace, ...extra,
+    uid, outcome, durationMs: Date.now() - started, ...ctx.trace, ...extra,
   });
   try {
+    // Failures after the commit (reaching the phones) are already folded into the message.
     const out = await TOOLS.find((tool) => tool.name === "undo").handler(ctx, { changeId });
-    if (Object.keys(counts).length) await usage(counts).catch(() => {});
+    await usage(ctx.counts);
     done("ok");
     return { undone: out.data?.changed === true, changeId: out.data?.changeId ?? null, message: out.text };
   } catch (error) {

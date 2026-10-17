@@ -48,10 +48,11 @@ test("client ids lose any query string", () => {
 test("pushes report each device's result, and invalid tokens are removed and logged", async () => {
   const db = new FakeFirestore();
   const { logs, logger } = capture();
-  db.documents.set("accounts/alice/assistantDevices/d-ok", { fcmToken: "t1" });
-  db.documents.set("accounts/alice/assistantDevices/d-gone", { fcmToken: "t2" });
-  db.documents.set("accounts/alice/assistantDevices/d-busy", { fcmToken: "t3" });
-  db.documents.set("accounts/alice/assistantDevices/d-ios", { platform: "ios" });
+  const updatedAt = new Date();
+  db.documents.set("accounts/alice/assistantDevices/d-ok", { fcmToken: "t1", updatedAt });
+  db.documents.set("accounts/alice/assistantDevices/d-gone", { fcmToken: "t2", updatedAt });
+  db.documents.set("accounts/alice/assistantDevices/d-busy", { fcmToken: "t3", updatedAt });
+  db.documents.set("accounts/alice/assistantDevices/d-ios", { platform: "ios", updatedAt });
   const messaging = createRecordingMessaging();
   messaging.sendEach = async (messages) => ({
     responses: messages.map((message) => (message.token === "t1" ? { success: true }
@@ -69,4 +70,20 @@ test("pushes report each device's result, and invalid tokens are removed and log
     ["push.invalid_token_removed", "d-gone", "messaging/registration-token-not-registered"],
   ]);
   assert.ok(!JSON.stringify(logs).includes("t2"));
+});
+
+test("a device that registered a new token since the send is kept", async () => {
+  const db = new FakeFirestore();
+  const { logger } = capture();
+  db.documents.set("accounts/alice/assistantDevices/d1", { fcmToken: "old", updatedAt: new Date() });
+  const messaging = {
+    async sendEach(messages) {
+      // The phone refreshes its token while the send is in flight.
+      db.documents.set("accounts/alice/assistantDevices/d1", { fcmToken: "new", updatedAt: new Date() });
+      return { responses: messages.map(() => ({ success: false, error: { code: "messaging/registration-token-not-registered" } })) };
+    },
+  };
+  const sent = await sendToDevices({ db, messaging, logger }, "alice", "sync", {});
+  assert.deepEqual(sent.removed, []);
+  assert.equal(db.documents.get("accounts/alice/assistantDevices/d1").fcmToken, "new");
 });

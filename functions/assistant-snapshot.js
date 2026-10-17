@@ -2,6 +2,9 @@
 
 // Reading the phone's published snapshot for the assistant tools: times in the phone's time zone,
 // event and calendar lookup (by key, short key, name, or Google Calendar ids), and App Links.
+//
+// Titles, calendar names and device labels are third-party text (anyone can send an invitation),
+// so normalizeSnapshot cleans them before any tool shows them, and text output quotes titles.
 
 const {
   RecordError, googleCalendarCandidates, googleEventKeys, isCalendarKey, isEventKey, isSeriesKey,
@@ -17,6 +20,25 @@ class ToolError extends Error {
     this.data = data;
   }
 }
+
+// ---- Third-party text ------------------------------------------------------------------------------
+
+const MAX_TEXT = 200;
+// Format characters (bidi controls, zero-width characters) are removed; control characters and
+// line or paragraph separators become spaces.
+const FORMAT_CHARS = /\p{Cf}/gu;
+const BREAKING_CHARS = /[\p{Cc}\p{Zl}\p{Zp}]/gu;
+
+/** One line of plain text: no control, format or bidi characters, collapsed whitespace, at most `max` characters. */
+function cleanText(value, max = MAX_TEXT) {
+  if (typeof value !== "string") return "";
+  const text = value.replace(FORMAT_CHARS, "").replace(BREAKING_CHARS, " ").replace(/\s+/g, " ").trim();
+  const chars = Array.from(text);
+  return chars.length > max ? chars.slice(0, max).join("").trimEnd() : text;
+}
+
+/** A title as it appears in tool text: JSON-quoted, so it reads as data, never as part of the sentence. */
+const quoted = (text) => JSON.stringify(text || "Untitled");
 
 // ---- Time --------------------------------------------------------------------------------------
 
@@ -122,39 +144,106 @@ function appLink(origin, destination, key) {
 
 const shortKey = (key) => (typeof key === "string" ? key.slice(0, 2 + SHORT_KEY_HEX) : null);
 
-/** Normalizes a snapshot payload so tools can rely on its shape. */
+// The snapshot vocabulary (docs/ASSISTANT_PROTOCOL.md "Snapshot"); anything else becomes null.
+const ALARM_KINDS = ["lead", "travel"];
+const ALARM_SOURCES = ["app", "calendar", "series", "event", "travel"];
+const ALARM_STATUSES = ["on", "off", "paused", "past"];
+const RSVP_VALUES = ["ACCEPTED", "TENTATIVE", "DECLINED", "INVITED", "NONE", "ORGANIZER"];
+const RSVP_FILTERS = ["accepted_only", "accepted_or_tentative", "not_declined", "all_events"];
+const STALE_MS = 6 * 60 * 60 * 1000;
+
+const oneOf = (values, value) => (values.includes(value) ? value : null);
+const keyOr = (test, value) => (test(value) ? value : null);
+const finite = (value) => (Number.isFinite(value) ? value : null);
+const intList = (value) => (Array.isArray(value) ? value.filter(Number.isInteger) : null);
+const optionalBool = (value) => (typeof value === "boolean" ? value : null);
+
+function normalizeAlarm(alarm) {
+  return {
+    at: alarm.at,
+    kind: oneOf(ALARM_KINDS, alarm.kind) ?? "lead",
+    minutes: Number.isInteger(alarm.minutes) ? alarm.minutes : 0,
+    source: oneOf(ALARM_SOURCES, alarm.source),
+    status: oneOf(ALARM_STATUSES, alarm.status) ?? "on",
+  };
+}
+
+function normalizeEvent(event) {
+  return {
+    eventKey: keyOr(isEventKey, event.eventKey),
+    seriesKey: keyOr(isSeriesKey, event.seriesKey),
+    calendarKey: keyOr(isCalendarKey, event.calendarKey),
+    title: cleanText(event.title),
+    start: event.start,
+    end: finite(event.end),
+    allDay: Boolean(event.allDay),
+    recurring: Boolean(event.recurring),
+    rsvp: oneOf(RSVP_VALUES, event.rsvp),
+    alarms: (Array.isArray(event.alarms) ? event.alarms : []).filter((alarm) => alarm && Number.isFinite(alarm.at)).map(normalizeAlarm),
+  };
+}
+
+function normalizeCalendar(calendar) {
+  // Phones send the storage value (not_declined); older builds sent the enum name (NOT_DECLINED).
+  const rsvpFilter = typeof calendar.rsvpFilter === "string" ? oneOf(RSVP_FILTERS, calendar.rsvpFilter.toLowerCase()) : null;
+  return {
+    key: keyOr(isCalendarKey, calendar.key),
+    name: cleanText(calendar.name),
+    accountType: cleanText(calendar.accountType, 100) || null,
+    watched: Boolean(calendar.watched),
+    leadTimes: intList(calendar.leadTimes),
+    enabled: optionalBool(calendar.enabled),
+    rsvpFilter,
+    includeAllDay: optionalBool(calendar.includeAllDay),
+  };
+}
+
+/**
+ * Normalizes a snapshot payload so tools can rely on its shape and only ever see clean text.
+ * `builtAt` is when the phone built it (older phones don't send it; then the publish time).
+ */
 function normalizeSnapshot(snapshot) {
   const payload = snapshot.payload ?? {};
   const timeZone = validTimeZone(typeof payload.timeZone === "string" ? payload.timeZone : "UTC");
-  const calendars = (Array.isArray(payload.calendars) ? payload.calendars : []).filter((item) => item && typeof item === "object");
+  const calendars = (Array.isArray(payload.calendars) ? payload.calendars : []).filter((item) => item && typeof item === "object").map(normalizeCalendar);
   const events = (Array.isArray(payload.events) ? payload.events : [])
     .filter((item) => item && typeof item === "object" && Number.isFinite(item.start))
-    .map((event) => ({ ...event, alarms: (Array.isArray(event.alarms) ? event.alarms : []).filter((alarm) => alarm && Number.isFinite(alarm.at)) }))
+    .map(normalizeEvent)
     .sort((a, b) => a.start - b.start);
+  const builtAt = Number.isFinite(payload.builtAt) ? Math.min(payload.builtAt, snapshot.publishedAt) : snapshot.publishedAt;
+  const pausedUntil = payload.paused && typeof payload.paused === "object" && Number.isSafeInteger(payload.paused.until) ? payload.paused.until : 0;
   return {
     deviceId: snapshot.deviceId,
-    device: typeof payload.device === "string" && payload.device ? payload.device.slice(0, 100) : "your phone",
+    device: cleanText(payload.device, 100) || "your phone",
     publishedAt: snapshot.publishedAt,
+    builtAt,
     requestId: snapshot.requestId,
     timeZone,
     valuesAppliedThrough: Number.isFinite(payload.valuesAppliedThrough) ? payload.valuesAppliedThrough : 0,
-    windowEnd: Number.isFinite(payload.windowEnd) ? payload.windowEnd : null,
-    paused: payload.paused && typeof payload.paused === "object" ? payload.paused : { until: 0 },
+    windowEnd: finite(payload.windowEnd),
+    paused: { until: pausedUntil },
     calendars,
     events,
   };
 }
 
-/** "As of 2:04 PM from Pixel 9" (with the date when it is not today). */
+/** "As of 2:04 PM from Pixel 9" (with the date when it is not today), from when the phone built it. */
 function basis(snapshot, now) {
-  const sameDay = formatDay(snapshot.publishedAt, snapshot.timeZone) === formatDay(now, snapshot.timeZone);
-  const when = formatTime(snapshot.publishedAt, snapshot.timeZone, { timeOnly: sameDay });
-  const stale = now - snapshot.publishedAt > 6 * 60 * 60 * 1000 ? ` (${relativeAge(snapshot.publishedAt, now)}; call refresh for a newer copy)` : "";
+  const sameDay = formatDay(snapshot.builtAt, snapshot.timeZone) === formatDay(now, snapshot.timeZone);
+  const when = formatTime(snapshot.builtAt, snapshot.timeZone, { timeOnly: sameDay });
+  const stale = now - snapshot.builtAt > STALE_MS ? ` (${relativeAge(snapshot.builtAt, now)}; call refresh for a newer copy)` : "";
   return `As of ${when} from ${snapshot.device}${stale}.`;
 }
 
+/** Where a tool's answer came from, for structured content. */
+const basedOn = (snapshot) => ({
+  device: snapshot.device,
+  builtAt: isoLocal(snapshot.builtAt, snapshot.timeZone),
+  publishedAt: isoLocal(snapshot.publishedAt, snapshot.timeZone),
+});
+
 function calendarName(snapshot, key) {
-  return snapshot.calendars.find((calendar) => calendar.key && calendar.key === key)?.name ?? null;
+  return snapshot.calendars.find((calendar) => calendar.key && calendar.key === key)?.name || null;
 }
 
 /** Finds snapshot entries whose key equals `ref` or starts with it (≥ 8 hex characters, unique). */
@@ -187,7 +276,7 @@ function resolveCalendar(snapshot, ref, { accountEmails = [] } = {}) {
     if (!byName[0].key) throw localOnly(byName[0]);
     return { calendar: byName[0], key: byName[0].key };
   }
-  if (byName.length > 1) throw new ToolError(`More than one calendar is named "${text}". Use its key from list_calendars.`);
+  if (byName.length > 1) throw new ToolError(`More than one calendar is named ${quoted(text)}. Use its key from list_calendars.`);
   if (text.includes("@")) {
     const candidates = googleCalendarCandidates(text, accountEmails);
     const found = candidates.find((candidate) => calendars.some((item) => item.key === candidate.key));
@@ -195,11 +284,11 @@ function resolveCalendar(snapshot, ref, { accountEmails = [] } = {}) {
     if (!snapshot && candidates.length) return { calendar: null, key: candidates[0].key };
     throw new ToolError("That Google calendar isn't on the phone. The phone may sync it under another account, or not at all; call list_calendars to see what the phone has.");
   }
-  throw new ToolError(`No calendar named "${text}" on the phone. Call list_calendars to see them.`);
+  throw new ToolError(`No calendar named ${quoted(cleanText(text))} on the phone. Call list_calendars to see them.`);
 }
 
 function localOnly(calendar) {
-  return new ToolError(`"${calendar.name}" is a local calendar on the phone without a portable identity, so it can only be changed in the app.`);
+  return new ToolError(`${quoted(calendar.name)} is a local calendar on the phone without a portable identity, so it can only be changed in the app.`);
 }
 
 /** Inputs that can name an event or series. */
@@ -268,11 +357,17 @@ function searchEvents(events, query) {
 }
 
 module.exports = {
+  ALARM_KINDS,
+  ALARM_SOURCES,
+  ALARM_STATUSES,
   DESTINATIONS,
+  RSVP_VALUES,
   ToolError,
   appLink,
+  basedOn,
   basis,
   calendarName,
+  cleanText,
   formatDay,
   formatTime,
   isoLocal,
@@ -280,6 +375,7 @@ module.exports = {
   normalizeSnapshot,
   offsetMinutes,
   parseTime,
+  quoted,
   relativeAge,
   resolveCalendar,
   resolveEvent,

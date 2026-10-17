@@ -7,14 +7,7 @@ const { randomBytes } = require("node:crypto");
 
 const { FieldValue } = require("firebase-admin/firestore");
 
-const { encodePayload, validatePayload } = require("./assistant-records");
-
-/** A stored payload string to write back verbatim (validated again), e.g. when undoing. */
-class RawPayload {
-  constructor(payload) {
-    this.payload = payload;
-  }
-}
+const { encodePayload, samePayload } = require("./assistant-records");
 
 const COLLECTIONS = {
   clients: "oauthClients",
@@ -26,7 +19,22 @@ const COLLECTIONS = {
   limits: "assistantRateLimits",
 };
 
-const ACTIVITY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+// How long activity entries (and so undo) last, how far ahead phones share events, and how much
+// alarm history the account keeps (the app's ACCOUNT_HISTORY_DAYS).
+const UNDO_DAYS = 30;
+const ACTIVITY_TTL_MS = UNDO_DAYS * DAY_MS;
+const SNAPSHOT_WINDOW_DAYS = 30;
+const HISTORY_DAYS = 14;
+// Bounds on what one call reads or messages, whatever a misbehaving client writes.
+const MAX_SNAPSHOTS = 5;
+const MAX_DEVICES = 10;
+
+// changeIds are "ch_" + 12 random bytes in base64url (16 characters, no padding).
+const CHANGE_ID_PREFIX = "ch_";
+const CHANGE_ID_BYTES = 12;
+const CHANGE_ID_PATTERN = new RegExp(`^${CHANGE_ID_PREFIX}[A-Za-z0-9_-]{${Math.ceil((CHANGE_ID_BYTES * 4) / 3)}}$`);
+const isChangeId = (value) => typeof value === "string" && CHANGE_ID_PATTERN.test(value);
 
 const account = (db, uid) => {
   if (typeof uid !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(uid)) throw new Error("invalid uid");
@@ -54,14 +62,15 @@ function toMillis(value) {
 
 const randomId = (prefix, bytes = 16) => `${prefix}${randomBytes(bytes).toString("base64url")}`;
 
+/** The account's most recently updated phones (at most MAX_DEVICES; the rules require updatedAt). */
 async function readDevices(db, uid) {
-  const page = await refs.devices(db, uid).get();
+  const page = await refs.devices(db, uid).orderBy("updatedAt", "desc").limit(MAX_DEVICES).get();
   return page.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 }
 
-/** Every phone's latest snapshot, newest first. A payload that does not parse is reported, not thrown. */
+/** The latest snapshots (at most MAX_SNAPSHOTS), newest first. A payload that does not parse is reported, not thrown. */
 async function readSnapshots(db, uid) {
-  const page = await refs.snapshots(db, uid).get();
+  const page = await refs.snapshots(db, uid).orderBy("publishedAt", "desc").limit(MAX_SNAPSHOTS).get();
   const snapshots = page.docs.map((doc) => {
     const data = doc.data();
     let payload = null;
@@ -100,11 +109,21 @@ async function deleteCollection(db, collection) {
   }
 }
 
-/** Removes what an assistant connection created in an account (snapshots, devices, activity). */
-async function deleteConnectorData(db, uid) {
-  await deleteCollection(db, refs.snapshots(db, uid));
-  await deleteCollection(db, refs.devices(db, uid));
-  await deleteCollection(db, refs.activity(db, uid));
+/**
+ * Removes what an assistant connection created in an account (snapshots, devices, activity). With
+ * `onlyIfDisconnected`, it stops as soon as assistant/state says connected again (an assistant
+ * connected while a revocation was cleaning up), re-checking before each collection, and returns
+ * false.
+ */
+async function deleteConnectorData(db, uid, { onlyIfDisconnected = false } = {}) {
+  for (const collection of [refs.snapshots(db, uid), refs.devices(db, uid), refs.activity(db, uid)]) {
+    if (onlyIfDisconnected) {
+      const state = await refs.state(db, uid).get();
+      if (state.exists && state.data().connected === true) return false;
+    }
+    await deleteCollection(db, collection);
+  }
+  return true;
 }
 
 // Firestore error codes for a failed write precondition: the document changed or appeared since
@@ -115,17 +134,19 @@ const MAX_ATTEMPTS = 5;
 /**
  * Writes account values for an assistant change and its activity entry in one atomic commit.
  *
- * `build(current, read)` receives the current payloads of `recordIds` and returns the new value for
- * each record to change (any JSON value, `null` clears, or a RawPayload). It may read more
- * documents with `read(ref)` and throw to abort. Records whose payload would not change are
- * skipped; if nothing changes, nothing is written and `changeId` is null. `afterWrite(batch, read)`
- * may add writes to the same commit.
+ * `build(current, read)` receives the current payloads of `recordIds` (null when missing) and
+ * returns the new value for each record to change (any JSON value; `null` clears). It may read
+ * more documents with `read(ref)` and throw to abort. Values are validated and written in the
+ * canonical encoding (assistant-records.js). Records whose value would not change in meaning are
+ * skipped; if nothing changes, nothing is written and `changeId` is null. `alert(records, current)`
+ * names the activity's alert, if any. `afterWrite(batch, read)` may add writes to the same commit.
+ * Records read but not returned by `build` are left alone.
  *
  * Every write is guarded by the update time it was read at (or must create the document), so a
  * concurrent change makes the commit fail and the change is rebuilt. The activity's `writtenAt` and
- * the values' `updatedAt` are the same server timestamp, which phones report back.
+ * the values' `updatedAt` are the same server timestamp (the commit time), which phones report back.
  */
-async function recordChange(db, uid, { recordIds, build, assistant, tool, summary, now, afterWrite }) {
+async function recordChange(db, uid, { recordIds, build, assistant, tool, summary, now, afterWrite, alert }) {
   const values = refs.values(db, uid);
   for (let attempt = 1; ; attempt += 1) {
     const snapshots = new Map();
@@ -140,26 +161,23 @@ async function recordChange(db, uid, { recordIds, build, assistant, tool, summar
     const records = {};
     for (const [recordId, value] of Object.entries(next)) {
       if (!recordIds.includes(recordId)) throw new Error(`unexpected record ${recordId}`);
-      let payload;
-      if (value instanceof RawPayload) {
-        validatePayload(recordId, value.payload);
-        payload = value.payload;
-      } else payload = encodePayload(recordId, value);
-      if (payload === current[recordId]) continue;
+      const payload = encodePayload(recordId, value);
+      if (samePayload(recordId, current[recordId], payload)) continue;
       records[recordId] = { before: current[recordId], after: payload };
     }
-    if (Object.keys(records).length === 0) return { changeId: null, records };
+    if (Object.keys(records).length === 0) return { changeId: null, records, alert: null };
 
-    const changeId = randomId("ch_", 12);
+    const changeId = randomId(CHANGE_ID_PREFIX, CHANGE_ID_BYTES);
     const activityRef = refs.activity(db, uid).doc(changeId);
+    const changeAlert = alert ? alert(records, current) : null;
     const batch = db.batch();
-    // The activity entry is first, so its write time is the commit time shared by every write.
     batch.create(activityRef, {
       assistant: String(assistant ?? "Assistant").slice(0, 60),
       tool,
       summary: String(summary).slice(0, 500),
       records,
-      // Every server timestamp in one commit resolves to the same value, so this equals the
+      ...(changeAlert ? { alert: changeAlert } : {}),
+      // Every server timestamp in one commit resolves to the commit time, so this equals the
       // values' updatedAt below, which phones report back.
       writtenAt: FieldValue.serverTimestamp(),
       expiresAt: new Date(now + ACTIVITY_TTL_MS),
@@ -173,24 +191,31 @@ async function recordChange(db, uid, { recordIds, build, assistant, tool, summar
       else batch.create(doc.ref, value);
     }
     if (afterWrite) afterWrite(batch, (ref) => snapshots.get(ref.path));
-    let results;
     try {
-      results = await batch.commit();
+      await batch.commit();
     } catch (error) {
       if (CONFLICT_CODES.has(error?.code) && attempt < MAX_ATTEMPTS) continue;
       throw error;
     }
-    const written = await activityRef.get();
-    return { changeId, records, writtenAt: written.data().writtenAt ?? results[0].writeTime };
+    // The commit's writeTime isn't returned as writtenAt: it can differ from the server timestamps
+    // stored in it (the emulator's do by milliseconds). confirm_change reads the stored writtenAt.
+    return { changeId, records, alert: changeAlert };
   }
 }
 
 module.exports = {
   ACTIVITY_TTL_MS,
+  CHANGE_ID_PATTERN,
   COLLECTIONS,
-  RawPayload,
+  DAY_MS,
+  HISTORY_DAYS,
+  MAX_DEVICES,
+  MAX_SNAPSHOTS,
+  SNAPSHOT_WINDOW_DAYS,
+  UNDO_DAYS,
   deleteCollection,
   deleteConnectorData,
+  isChangeId,
   randomId,
   readDevices,
   readSnapshots,

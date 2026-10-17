@@ -31,7 +31,6 @@ test("connector writes, connections and cleanup work on real Firestore", { skip 
     const activity = (await refs.activity(db, uid).doc(first.changeId).get()).data();
     const value = await refs.values(db, uid).doc("p_alarm_volume").get();
     assert.equal(activity.writtenAt.isEqual(value.data().updatedAt), true);
-    assert.equal(first.writtenAt.isEqual(value.data().updatedAt), true);
     assert.equal((await refs.values(db, uid).doc("p_max_snoozes").get()).data().updatedAt.isEqual(activity.writtenAt), true);
     // The next change is guarded by those update times and wins a race with a phone by retrying.
     let attempts = 0;

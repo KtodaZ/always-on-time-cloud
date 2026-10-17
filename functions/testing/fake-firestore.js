@@ -137,11 +137,12 @@ function compare(actual, operator, expected) {
 }
 
 class Query {
-  constructor(db, path, { filters = [], order = null, maximum = null } = {}) {
+  constructor(db, path, { filters = [], order = null, direction = "asc", maximum = null } = {}) {
     this.db = db;
     this.path = path;
     this.filters = filters;
     this.order = order;
+    this.direction = direction;
     this.maximum = maximum;
   }
 
@@ -149,8 +150,8 @@ class Query {
     return new Query(this.db, this.path, { ...this, filters: [...this.filters, { field, operator, value }] });
   }
 
-  orderBy(field) {
-    return new Query(this.db, this.path, { ...this, order: field });
+  orderBy(field, direction = "asc") {
+    return new Query(this.db, this.path, { ...this, order: field, direction });
   }
 
   limit(maximum) {
@@ -172,7 +173,7 @@ class Query {
     }
     if (this.order) {
       matches = matches.filter(([, value]) => value[this.order] !== undefined && value[this.order] !== null);
-      matches.sort(([, left], [, right]) => left[this.order] - right[this.order]);
+      matches.sort(([, left], [, right]) => (left[this.order] - right[this.order]) * (this.direction === "desc" ? -1 : 1));
     }
     if (this.maximum !== null) matches = matches.slice(0, this.maximum);
     this.db.reads += Math.max(matches.length, 1);
