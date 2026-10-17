@@ -4,6 +4,7 @@
 // It enforces the rules that matter for correctness: transactions are serialized, every
 // transactional read must precede the first write, `update` fails on missing documents, and
 // range filters only match values of the same type (so null fields drop out, as in Firestore).
+// Merge writes apply increments written as `{ __increment: n }` (tests pass that as FieldValue).
 
 function clone(value) {
   return value === undefined ? undefined : structuredClone(value);
@@ -55,8 +56,10 @@ class DocumentReference {
     this.db.write(this.path, clone(value));
   }
 
-  async set(value) {
-    this.db.write(this.path, clone(value));
+  async set(value, options = {}) {
+    if (options.merge) {
+      this.db.write(this.path, mergeInto(clone(this.db.documents.get(this.path)) ?? {}, clone(value)));
+    } else this.db.write(this.path, clone(value));
   }
 
   async update(value) {
@@ -73,6 +76,16 @@ class DocumentReference {
     this.db.documents.delete(this.path);
     this.db.writes += 1;
   }
+}
+
+function mergeInto(target, source) {
+  for (const [key, value] of Object.entries(source)) {
+    if (value && typeof value === "object" && "__increment" in value) target[key] = (target[key] ?? 0) + value.__increment;
+    else if (value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date)) {
+      target[key] = mergeInto(target[key] && typeof target[key] === "object" ? target[key] : {}, value);
+    } else target[key] = value;
+  }
+  return target;
 }
 
 function compare(actual, operator, expected) {
@@ -149,7 +162,7 @@ class Transaction {
     return refOrQuery.get();
   }
 
-  set(ref, value) { this.pending.push(() => ref.set(value)); }
+  set(ref, value, options) { this.pending.push(() => ref.set(value, options)); }
   update(ref, value) { this.pending.push(() => ref.update(value)); }
   delete(ref) { this.pending.push(() => ref.delete()); }
 
@@ -191,6 +204,16 @@ class FakeFirestore {
 
   batch() {
     return new WriteBatch();
+  }
+
+  /** Deletes a collection's documents and everything nested below them. */
+  async recursiveDelete(ref) {
+    for (const path of [...this.documents.keys()]) {
+      if (path.startsWith(`${ref.path}/`)) {
+        this.documents.delete(path);
+        this.writes += 1;
+      }
+    }
   }
 
   /** Serializes transactions so concurrent claims behave like Firestore's optimistic retries. */
