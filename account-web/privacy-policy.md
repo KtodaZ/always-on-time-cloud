@@ -5,6 +5,16 @@
 Always On Time: Calendar Alarm is an Android and Wear OS alarm application provided by
 Zombit Studios LLC.
 
+## At a glance
+
+- Your calendar is processed on your phone to schedule alarms.
+- Crash reports are sent automatically. Everything else that leaves your phone is optional:
+  account sync, connecting an AI assistant, travel-time alarms, usage statistics, and feedback
+  you choose to send. Each is described below, and you can turn it off or delete it.
+- We never sell your information or use it for advertising.
+- The cloud code that handles your information is
+  [open source](https://github.com/KtodaZ/always-on-time-cloud).
+
 ## Information processed on your devices
 
 With your permission, the app reads selected calendar details, including event titles,
@@ -59,8 +69,8 @@ account. Sign-in does not give the app access to your Gmail or Google Calendar t
 web APIs; calendar access still uses the phone's calendar permission.
 
 While signed in, the app saves supported alarm and appearance preferences, selected-calendar
-choices, calendar and recurring-series alarm rules, and individual event overrides to Firebase
-Cloud Firestore. Calendar and event matching identifiers are hashed; they remain account data,
+choices, calendar and recurring-series alarm rules, individual event overrides, and whether
+alarms are paused to Firebase Cloud Firestore. Calendar and event matching identifiers are hashed; they remain account data,
 not anonymous data. These settings restore after reinstalling or changing phones and update
 other signed-in phones when those phones can connect. Offline edits are queued on the phone.
 For simultaneous edits to the same setting, the last accepted upload wins.
@@ -84,6 +94,41 @@ You may need to sign in again to confirm deletion. A minimal disabled account id
 retained to block writes from previously issued authentication tokens. This does not delete
 your Google account, Google calendars, local phone data, or separately submitted feedback and
 diagnostics. Contact us using the deletion instructions below for feedback or diagnostic records.
+
+## Connecting an AI assistant
+
+This is optional and needs account sync. To connect an assistant such as Claude or ChatGPT, you
+sign in with your Google account on the Always On Time connection page and approve the
+connection. Nothing below is collected until you do.
+
+- **Upcoming alarms copy.** Your phone saves a copy of its upcoming alarms for the next 30 days to
+  your account: event titles, start and end times, calendar names and whether each calendar is
+  watched, and each alarm's time, which setting it comes from, and whether it is on, off or
+  paused, plus the phone's model label and time zone. It never includes event descriptions,
+  attendees, locations, meeting links, travel origins or destinations, or sound choices. The
+  phone replaces the copy each time it updates it.
+- **Phone registration.** Your phone registers a Firebase Cloud Messaging token, its model label,
+  app version and supported features, so the connector can ask it to apply a change, refresh the
+  copy, or show a test notification.
+- **Connection records.** We store which assistant is connected, the address it returns to after
+  approval, when it connected and was last used, and its access tokens, stored only as one-way
+  hashes. Changes the assistant makes are logged with the previous values for 30 days so you can
+  undo them.
+
+A connected assistant can read the upcoming alarms copy, your synced alarm settings and 14 days of
+alarm history, and change your alarm settings. It cannot read or change your calendar, and
+signing in on the connection page does not give the assistant your Google account.
+
+**What the assistant reads is sent to the assistant's provider** (for example Anthropic or
+OpenAI). From then on, that provider's privacy policy and terms apply to it, not this policy.
+
+The connector also keeps anonymous daily totals, such as how many assistants are connected and
+how often each feature is used, with no account identifiers or content.
+
+Disconnect anytime in **Settings > Connected assistants** or in your assistant. Disconnecting the
+last assistant deletes the upcoming alarms copy, phone registrations and change log right away.
+Connections unused for 90 days are removed. Deleting your Always On Time account removes all of
+it.
 
 ## Wear OS companion
 
@@ -140,6 +185,26 @@ reported problems. Diagnostics are used only for app-health analytics, troublesh
 security, and reliability improvements. Service providers, including Google Firebase and the
 developer's hosting provider, process information on the developer's behalf. Information is
 transmitted using HTTPS.
+
+## Usage statistics
+
+The app has a **Share usage statistics** setting in Settings. It is on by default, except in the
+European Economic Area, the United Kingdom and Switzerland (or when the app cannot tell the
+region), where it stays off unless you turn it on during setup or in Settings. When it is on, the
+app uses Google Analytics for Firebase to send:
+
+- which app screens you open, using fixed screen names;
+- when you view the Always On Time Plus screen, start a purchase or buy Plus, and which part of the
+  app or which assistant link led you there;
+- whether Plus, travel alarms, account sync and spoken alarms are turned on; and
+- a random app-instance identifier generated by Google Analytics, the app version, Android version,
+  device category, language, and country-level location derived from your IP address.
+
+It never includes calendar or event details, event titles, calendar or account names, email
+addresses, places, or routes. The advertising ID, Android ID, Google signals, ads personalization,
+and city-level location and detailed device collection are turned off. Google acts as a service
+provider, and the developer has set Google Analytics to keep this data for 2 months. Turning the
+setting off stops collection right away and resets the analytics data stored on your device.
 
 ## Other network requests
 

@@ -4,6 +4,16 @@
 <p><strong>Effective date:</strong> October 16, 2026</p>
 <p>Always On Time: Calendar Alarm is an Android and Wear OS alarm application provided by
 Zombit Studios LLC.</p>
+<h2>At a glance</h2>
+<ul>
+<li>Your calendar is processed on your phone to schedule alarms.</li>
+<li>Crash reports are sent automatically. Everything else that leaves your phone is optional:
+account sync, connecting an AI assistant, travel-time alarms, usage statistics, and feedback
+you choose to send. Each is described below, and you can turn it off or delete it.</li>
+<li>We never sell your information or use it for advertising.</li>
+<li>The cloud code that handles your information is
+<a href="https://github.com/KtodaZ/always-on-time-cloud">open source</a>.</li>
+</ul>
 <h2>Information processed on your devices</h2>
 <p>With your permission, the app reads selected calendar details, including event titles,
 descriptions, times, and meeting links, to schedule alarms. Alarm preferences and history are
@@ -46,8 +56,8 @@ your Google profile, email address, and account identifier to identify your Alwa
 account. Sign-in does not give the app access to your Gmail or Google Calendar through Google&#x27;s
 web APIs; calendar access still uses the phone&#x27;s calendar permission.</p>
 <p>While signed in, the app saves supported alarm and appearance preferences, selected-calendar
-choices, calendar and recurring-series alarm rules, and individual event overrides to Firebase
-Cloud Firestore. Calendar and event matching identifiers are hashed; they remain account data,
+choices, calendar and recurring-series alarm rules, individual event overrides, and whether
+alarms are paused to Firebase Cloud Firestore. Calendar and event matching identifiers are hashed; they remain account data,
 not anonymous data. These settings restore after reinstalling or changing phones and update
 other signed-in phones when those phones can connect. Offline edits are queued on the phone.
 For simultaneous edits to the same setting, the last accepted upload wins.</p>
@@ -68,6 +78,36 @@ You may need to sign in again to confirm deletion. A minimal disabled account id
 retained to block writes from previously issued authentication tokens. This does not delete
 your Google account, Google calendars, local phone data, or separately submitted feedback and
 diagnostics. Contact us using the deletion instructions below for feedback or diagnostic records.</p>
+<h2 id="assistants">Connecting an AI assistant</h2>
+<p>This is optional and needs account sync. To connect an assistant such as Claude or ChatGPT, you
+sign in with your Google account on the Always On Time connection page and approve the
+connection. Nothing below is collected until you do.</p>
+<ul>
+<li><strong>Upcoming alarms copy.</strong> Your phone saves a copy of its upcoming alarms for the next 30 days to
+your account: event titles, start and end times, calendar names and whether each calendar is
+watched, and each alarm&#x27;s time, which setting it comes from, and whether it is on, off or
+paused, plus the phone&#x27;s model label and time zone. It never includes event descriptions,
+attendees, locations, meeting links, travel origins or destinations, or sound choices. The
+phone replaces the copy each time it updates it.</li>
+<li><strong>Phone registration.</strong> Your phone registers a Firebase Cloud Messaging token, its model label,
+app version and supported features, so the connector can ask it to apply a change, refresh the
+copy, or show a test notification.</li>
+<li><strong>Connection records.</strong> We store which assistant is connected, the address it returns to after
+approval, when it connected and was last used, and its access tokens, stored only as one-way
+hashes. Changes the assistant makes are logged with the previous values for 30 days so you can
+undo them.</li>
+</ul>
+<p>A connected assistant can read the upcoming alarms copy, your synced alarm settings and 14 days of
+alarm history, and change your alarm settings. It cannot read or change your calendar, and
+signing in on the connection page does not give the assistant your Google account.</p>
+<p><strong>What the assistant reads is sent to the assistant&#x27;s provider</strong> (for example Anthropic or
+OpenAI). From then on, that provider&#x27;s privacy policy and terms apply to it, not this policy.</p>
+<p>The connector also keeps anonymous daily totals, such as how many assistants are connected and
+how often each feature is used, with no account identifiers or content.</p>
+<p>Disconnect anytime in <strong>Settings &gt; Connected assistants</strong> or in your assistant. Disconnecting the
+last assistant deletes the upcoming alarms copy, phone registrations and change log right away.
+Connections unused for 90 days are removed. Deleting your Always On Time account removes all of
+it.</p>
 <h2>Wear OS companion</h2>
 <p>If you use the Wear OS companion, the alarm information needed to display and operate an
 alarm is transferred between your paired phone and watch through Google Play services&#x27;
@@ -110,6 +150,24 @@ reported problems. Diagnostics are used only for app-health analytics, troublesh
 security, and reliability improvements. Service providers, including Google Firebase and the
 developer&#x27;s hosting provider, process information on the developer&#x27;s behalf. Information is
 transmitted using HTTPS.</p>
+<h2 id="usage-statistics">Usage statistics</h2>
+<p>The app has a <strong>Share usage statistics</strong> setting in Settings. It is on by default, except in the
+European Economic Area, the United Kingdom and Switzerland (or when the app cannot tell the
+region), where it stays off unless you turn it on during setup or in Settings. When it is on, the
+app uses Google Analytics for Firebase to send:</p>
+<ul>
+<li>which app screens you open, using fixed screen names;</li>
+<li>when you view the Always On Time Plus screen, start a purchase or buy Plus, and which part of the
+app or which assistant link led you there;</li>
+<li>whether Plus, travel alarms, account sync and spoken alarms are turned on; and</li>
+<li>a random app-instance identifier generated by Google Analytics, the app version, Android version,
+device category, language, and country-level location derived from your IP address.</li>
+</ul>
+<p>It never includes calendar or event details, event titles, calendar or account names, email
+addresses, places, or routes. The advertising ID, Android ID, Google signals, ads personalization,
+and city-level location and detailed device collection are turned off. Google acts as a service
+provider, and the developer has set Google Analytics to keep this data for 2 months. Turning the
+setting off stops collection right away and resets the analytics data stored on your device.</p>
 <h2>Other network requests</h2>
 <p>The app may request public, manufacturer-specific battery guidance from DontKillMyApp.com.
 The request can reveal the device manufacturer and IP address, but it does not intentionally
