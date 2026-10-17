@@ -188,7 +188,7 @@ function resolveCalendar(snapshot, ref, { accountEmails = [] } = {}) {
     return { calendar: byName[0], key: byName[0].key };
   }
   if (byName.length > 1) throw new ToolError(`More than one calendar is named "${text}". Use its key from list_calendars.`);
-  if (text.includes("@") || text.endsWith("calendar.google.com")) {
+  if (text.includes("@")) {
     const candidates = googleCalendarCandidates(text, accountEmails);
     const found = candidates.find((candidate) => calendars.some((item) => item.key === candidate.key));
     if (found) return { calendar: calendars.find((item) => item.key === found.key), key: found.key };

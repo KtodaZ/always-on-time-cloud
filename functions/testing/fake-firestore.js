@@ -97,6 +97,7 @@ class DocumentReference {
 
 function mergeInto(target, source) {
   for (const [key, value] of Object.entries(source)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
     if (value && typeof value === "object" && "__increment" in value) target[key] = (target[key] ?? 0) + value.__increment;
     else if (value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date)) {
       target[key] = mergeInto(target[key] && typeof target[key] === "object" ? target[key] : {}, value);

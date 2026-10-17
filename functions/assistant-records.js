@@ -137,6 +137,9 @@ function originalStartMillis(value) {
  * that syncs the calendar: the signed-in account's email, or (for a primary calendar of another
  * account) the calendarId itself. Returns distinct {accountName, key} pairs, most likely first.
  */
+// Shared, group and imported calendars ("…@group.calendar.google.com") are not account emails.
+const GOOGLE_SHARED_CALENDAR_ID = /@([a-z0-9-]+\.)*calendar\.google\.com$/i;
+
 function googleCalendarCandidates(calendarId, accountEmails = []) {
   requireText(calendarId, "calendarId");
   const names = [];
@@ -147,7 +150,7 @@ function googleCalendarCandidates(calendarId, accountEmails = []) {
     add(email);
     add(email?.toLowerCase());
   }
-  if (!calendarId.endsWith("calendar.google.com")) {
+  if (!GOOGLE_SHARED_CALENDAR_ID.test(calendarId)) {
     add(calendarId);
     add(calendarId.toLowerCase());
   }
@@ -269,6 +272,7 @@ function encodePayload(recordId, value) {
 }
 
 module.exports = {
+  GOOGLE_SHARED_CALENDAR_ID,
   GOOGLE_ACCOUNT_TYPE,
   MAX_PAYLOAD_CHARS,
   MAX_TRAVEL_LEAD_TIMES,
