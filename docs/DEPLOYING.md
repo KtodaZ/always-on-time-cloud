@@ -65,14 +65,14 @@ It fails if:
    [`scripts/verify-live.mjs`](../scripts/verify-live.mjs) and always covers everything since.
 
 It also lists other changes made outside CI, such as secret rotation or enabling an API, without
-naming people. Any hosting change in the audit log counts as a deploy, but hosting releases have
-not been seen there, so hosting relies mainly on the signature check.
+naming people. Any hosting change in the audit log other than a custom domain change counts as a deploy,
+but hosting releases have not been seen there, so hosting relies mainly on the signature check.
 
-You can check a file yourself with the GitHub CLI. For example, the privacy policy:
+You can check a file yourself with the GitHub CLI. For example, the account deletion page:
 
 ```sh
-curl -sO https://always-on-time-zombit-2026.web.app/privacy-policy.html
-gh attestation verify privacy-policy.html --repo KtodaZ/always-on-time-cloud \
+curl -s https://alwaysontime.zombit.io/delete-account/ -o delete-account.html
+gh attestation verify delete-account.html --repo KtodaZ/always-on-time-cloud \
   --cert-identity https://github.com/KtodaZ/always-on-time-cloud/.github/workflows/deploy.yml@refs/heads/main \
   --cert-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -98,6 +98,24 @@ pool and providers, their IAM bindings, the gcf-sources bucket read access, and 
 machine; the first signed deploy replaced every function, rules file and hosting file. The
 maintainer also enabled the Cloud Billing API during that deploy, because the Firebase CLI reads the
 project's billing plan; that change is listed in the Verify report.
+
+## Hosting domains
+
+The public origin is `https://alwaysontime.zombit.io`, a custom domain on the project's Hosting
+site. Hosting serves the same release on the site's default domains,
+`always-on-time-zombit-2026.web.app` and `always-on-time-zombit-2026.firebaseapp.com`:
+
+- `/` and `/privacy-policy.html` redirect to the Zombit Studios website on every domain.
+- The assistant connector's OAuth and discovery paths redirect to the custom domain, and `/mcp`
+  answers with an error naming the new URL ([details](ASSISTANT_CONNECTOR.md#endpoints)).
+- The account pages, `/open/**` and `/.well-known/assetlinks.json` are served on every domain, so
+  App Links verify on both the custom and the default domain.
+
+The account pages sign in with a popup through Firebase Auth's `authDomain`
+(`always-on-time-zombit-2026.firebaseapp.com`), which works from any domain listed in Firebase
+Auth's authorized domains. The custom domain is connected in the Firebase console (Hosting > Add
+custom domain, plus the DNS records it shows); the Verify report lists that as a configuration
+change, not a deploy.
 
 ## Repository protections
 

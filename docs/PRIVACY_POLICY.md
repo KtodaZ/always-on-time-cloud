@@ -1,28 +1,15 @@
 # Privacy policy
 
-There is one published copy:
-<https://always-on-time-zombit-2026.web.app/privacy-policy.html>. Play Console and the app link to
-it. The Android app opens its `#travel-location` section from every location privacy note, so keep
-that anchor.
+The published policy is <https://zombit.io/always-on-time/privacy/>, on the Zombit Studios
+website, which maintains it. Play Console and the apps link to it.
 
-## Files
+The old address, `https://always-on-time-zombit-2026.web.app/privacy-policy.html`, redirects there
+([`firebase.json`](../firebase.json) `redirects`), and browsers keep a `#section` from the old link.
+Keep these section ids on the page: `#travel-location` (opened from every location privacy note in
+the Android app), `#assistants` and `#usage-statistics`.
 
-- [`account-web/privacy-policy.html`](../account-web/privacy-policy.html): the published page,
-  served by Firebase Hosting with the account deletion page.
-- [`account-web/privacy-policy.md`](../account-web/privacy-policy.md): the same text in Markdown,
-  for review in diffs. Keep the two word for word.
+## Keeping it in step with this code
 
-Play's Data safety answers live with the app's store listing and must agree with the policy.
-
-## Updating it
-
-1. Edit the HTML and the Markdown together, and set the effective date at the top of both to the
-   day it goes live.
-2. If the change is about data the app collects or shares, update the Data safety answers too.
-3. Merge to `main`, then run the [Deploy workflow](DEPLOYING.md) with the `hosting` target.
-4. Check the live page. The CDN can serve the old copy for a few minutes, so add a throwaway query
-   to bypass it:
-
-   ```sh
-   curl -s "https://always-on-time-zombit-2026.web.app/privacy-policy.html?v=$(date +%s)" | grep "Effective date"
-   ```
+A change here that alters what data is collected, stored or forwarded, or how long it is kept,
+needs the published policy updated to match before it ships, and Play's Data safety answers too if
+it concerns data the app collects or shares. Say in the pull request where the policy was updated.

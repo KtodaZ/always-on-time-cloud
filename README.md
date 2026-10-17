@@ -34,11 +34,11 @@ them; how they work, how to check a file yourself, and their limits:
 | Feedback | [`functions/index.js`](functions/index.js), [`feedback-notification.js`](functions/feedback-notification.js), [`storage.rules`](storage.rules) | Feedback text, contact email, optional screenshots and an optional redacted diagnostics file. The contact email is never included in the developer notification. |
 | iOS calendar refresh relay | [`functions/ios-push-*.js`](functions/ios-push-service.js), [protocol](docs/IOS_PUSH_PROTOCOL.md) | APNs token, hashed install secret, hashed alarm and subscription IDs with times. Never OAuth tokens, event titles, calendar IDs or meeting links. |
 | AI assistant connector (optional) | [`functions/assistant-*.js`](functions/assistant-functions.js), [`account-web/connect/`](account-web/connect/index.html), [docs](docs/ASSISTANT_CONNECTOR.md) | Only after the user connects Claude or ChatGPT: a snapshot of upcoming event titles, times, calendar names and alarms shared by the phone, a 30-day log of the assistant's changes, and hashed OAuth tokens. Deleted when the last assistant disconnects. |
-| Privacy policy and account pages | [`account-web/`](account-web/) | The published [privacy policy](https://always-on-time-zombit-2026.web.app/privacy-policy.html) and account deletion page. |
+| Account pages | [`account-web/`](account-web/) | The account deletion page, the assistant consent page and the App Link fallback, served at `https://alwaysontime.zombit.io`. The [privacy policy](https://zombit.io/always-on-time/privacy/) is published on the Zombit Studios website. |
 
 More detail: [assistant connector](docs/ASSISTANT_CONNECTOR.md) and its
 [protocol](docs/ASSISTANT_PROTOCOL.md), [feedback](docs/FEEDBACK.md), [travel routes](docs/TRAVEL_ROUTES.md),
-[iOS relay protocol](docs/IOS_PUSH_PROTOCOL.md), [privacy policy updates](docs/PRIVACY_POLICY.md),
+[iOS relay protocol](docs/IOS_PUSH_PROTOCOL.md), [privacy policy](docs/PRIVACY_POLICY.md),
 [deploying](docs/DEPLOYING.md).
 
 ## Tests

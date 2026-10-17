@@ -54,6 +54,28 @@
         ]
       }
     ],
+    "redirects": [
+      {
+        "source": "/",
+        "destination": "https://zombit.io/always-on-time/",
+        "type": 301
+      },
+      {
+        "source": "/index.html",
+        "destination": "https://zombit.io/always-on-time/",
+        "type": 301
+      },
+      {
+        "source": "/privacy-policy.html",
+        "destination": "https://zombit.io/always-on-time/privacy/",
+        "type": 301
+      },
+      {
+        "source": "/privacy-policy.md",
+        "destination": "https://zombit.io/always-on-time/privacy/",
+        "type": 301
+      }
+    ],
     "rewrites": [
       {
         "source": "/mcp",
