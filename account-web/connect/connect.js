@@ -21,7 +21,7 @@ function show(message) {
 }
 
 function stop(message) {
-  for (const id of ['details', 'sign-in', 'account', 'cancel']) element(id).hidden = true;
+  for (const id of ['details', 'sign-in', 'account', 'approve', 'cancel']) element(id).hidden = true;
   element('intro').textContent = message;
 }
 
