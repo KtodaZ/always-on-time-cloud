@@ -116,11 +116,15 @@ export function attestationCommit(attestation) {
   return { commit, run };
 }
 
-/** Hosting paths firebase.json deploys from account-web (it ignores dotfiles and node_modules). */
+/**
+ * Hosting paths firebase.json deploys from account-web. Its `ignore` skips dotfiles and dot
+ * directories except /.well-known (App Links), plus node_modules; scripts/test checks the two agree.
+ */
 export function expectedHostingPaths(repoPaths) {
   return repoPaths.filter((p) => p.startsWith("account-web/"))
     .map((p) => p.slice("account-web".length))
-    .filter((p) => !p.split("/").some((part) => part.startsWith(".") || part === "node_modules") && p !== "/firebase.json");
+    .filter((p) => !p.split("/").some((part) => (part.startsWith(".") && part !== ".well-known") || part === "node_modules") &&
+      p !== "/firebase.json");
 }
 
 function git(...args) {
