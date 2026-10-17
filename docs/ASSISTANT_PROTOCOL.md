@@ -2,7 +2,12 @@
 
 The contract between the phone app, the assistant connector (MCP server) and Firestore. The
 product design lives in the app repository; this file is what both sides must agree on. Android
-implements it first; iOS can follow without server changes.
+implements it first. iOS can use the same Firestore contract, but pushes are FCM-only today: iOS
+needs an APNs push path in [`functions/assistant-push.js`](../functions/assistant-push.js).
+
+[`assistant-protocol-vectors.json`](assistant-protocol-vectors.json) holds the shared test
+vectors (record keys, canonical payloads, preference allowlists). The server's tests and the app's
+tests both assert against it, so a contract change starts there.
 
 Nothing here exists for a user until they connect an assistant. Disconnecting the last assistant
 deletes everything under "Connector data" below.
@@ -39,12 +44,13 @@ ID). The owner is the signed-in Google account `uid` with an active account, as 
 | `deviceName` | string ≤ 100 | Model label, e.g. "Pixel 9" (same label as synced history) |
 | `appVersion` | string ≤ 40 | |
 | `fcmToken` | string ≤ 4096 | Android; absent on iOS until its relay is wired |
-| `capabilities` | list of strings ≤ 20 | Only `travel`, `spokenAlarms`, `plus`, `pause` (the rules reject others, so a new capability needs a rules change first) |
+| `capabilities` | list of strings ≤ 20 | Only `travel`, `spokenAlarms`, `plus` (the phone has Plus benefits, whether bought or free for a limited time), `pause` (the rules reject others, so a new capability needs a rules change first) |
 | `lastPing` | map | `{id: string ≤ 64, receivedAt: timestamp}` echo of the latest test ping |
 | `updatedAt` | timestamp | `request.time` |
 
 A phone writes this only while `assistant/state.connected == true`, and deletes it when the flag
-turns false, on sign-out, and before account deletion.
+turns false, on sign-out, and before account deletion. The server pushes to at most the 10 most
+recently updated devices and reads at most the 5 most recently published snapshots.
 
 ### Snapshot
 
@@ -55,13 +61,14 @@ publish request that caused it) and `payload` (JSON string ≤ 800,000 character
 ```json
 {
   "device": "Pixel 9",
+  "builtAt": 1793119990000,
   "timeZone": "America/Los_Angeles",
   "valuesAppliedThrough": 1793120000000,
   "windowEnd": 1795712000000,
   "paused": {"until": 0},
   "calendars": [
     {"key": "c_…", "name": "Work", "accountType": "com.google", "watched": true,
-     "leadTimes": [10, 0], "enabled": true, "rsvpFilter": "NOT_DECLINED", "includeAllDay": false}
+     "leadTimes": [10, 0], "enabled": true, "rsvpFilter": "not_declined", "includeAllDay": false}
   ],
   "events": [
     {"eventKey": "e_…", "seriesKey": "s_…", "calendarKey": "c_…", "title": "Standup",
@@ -75,16 +82,29 @@ publish request that caused it) and `payload` (JSON string ≤ 800,000 character
 }
 ```
 
+- `builtAt`: when the phone built the snapshot (epoch ms). Snapshot age uses it (capped at
+  `publishedAt`), so a snapshot built offline and uploaded later reads as old; without it the
+  server uses `publishedAt`.
 - `valuesAppliedThrough`: the greatest `updatedAt` (ms) among `values` documents the phone has
   applied, never lowered. A connector change is confirmed when this is ≥ the change's write time.
 - `calendars`: every calendar on the phone, watched or not. `key` is null for calendars without a
   portable identity (local-only); such calendars are listed but cannot be changed remotely.
+  A name that is an email address (a primary calendar is named after its account) is shared as
+  `Google calendar (example.com)` for Google calendars or `Calendar (example.com)` otherwise,
+  keeping only the domain. `rsvpFilter` is the storage value: `accepted_only`,
+  `accepted_or_tentative`, `not_declined` or `all_events` (the server also accepts older phones'
+  upper-case names). `leadTimes`, `enabled`, `rsvpFilter` and `includeAllDay` are the calendar's
+  effective settings and may be absent.
 - `events`: watched calendars, after the app's filters, from now until `windowEnd` (30 days).
   Events filtered out by RSVP or all-day settings are omitted. `eventKey`/`seriesKey` are null when
   the event has no portable identity.
+- `rsvp`: `ACCEPTED`, `TENTATIVE`, `DECLINED`, `INVITED`, `NONE`, `ORGANIZER`, or absent.
 - `alarms[].kind`: `lead` (minutes before start) or `travel` (minutes before leaving).
   `source`: `app`, `calendar`, `series`, `event` or `travel`. `status`: `on`, `off` (alarm disabled
   for the event), `paused` (inside a pause window), or `past`.
+- The server drops fields it doesn't know and values outside these lists, and treats titles and
+  names as untrusted text: it strips control, format and bidirectional characters, collapses
+  whitespace and cuts them at 200 characters.
 - Never included: descriptions, attendees, locations, meeting links, travel origins or
   destinations, sound or voice choices.
 
@@ -94,8 +114,17 @@ publish request that caused it) and `payload` (JSON string ≤ 800,000 character
 `assistant` (client display name), `tool`, `summary` (plain-language, may contain an event title),
 `records` (map of recordId → `{before: string|null, after: string|null}` payloads), `writtenAt`
 (server timestamp written in the same commit as the `values`, so it equals their `updatedAt`),
-`undoneAt` (timestamp or absent),
+`alert` (absent, or why the app should highlight the entry), `undoneAt` (timestamp or absent),
 `expiresAt` (timestamp).
+
+`alert` marks changes that could stop alarms from ringing or being heard, checked in this order:
+
+| `alert` | When |
+| --- | --- |
+| `paused` | `p_alarms_paused_until` set to −1 or a time |
+| `calendar_unwatched` | a `c_` record's `selected` becomes false |
+| `alarms_off` | a `c_` record's `overrides.enabled`, or an `s_`/`e_` record's `enabled`, becomes false |
+| `alerts_reduced` | `alarm_volume` set to 20 or less and lower than before (unset counts as 80), `alert_type` lowered (`sound_and_vibration` > `vibration_only` > `visual_only`), or `vibration_enabled` set to false while the alert type is `vibration_only` |
 
 ## Record keys and payloads
 
@@ -111,7 +140,7 @@ and no escaping beyond JSON's required escapes (kotlinx `Json.encodeToString(lis
   `e_` + sha256(`{seriesKey}:single`) for single events.
 - Preferences: `p_{name}` from the allowlist below.
 
-Test vectors (both implementations must reproduce them):
+Test vectors (both implementations must reproduce them; also in the vectors file):
 
 | Input | Key |
 | --- | --- |
@@ -124,13 +153,14 @@ Test vectors (both implementations must reproduce them):
 
 Payloads (`values/{key}.payload`, ≤ 16 KB):
 
-- `c_`: `{"selected": bool|null, "overrides": Override|null}`
+- `c_`: `{"selected": bool, "overrides": Override}`, each optional
 - `s_`, `e_`: `Override` JSON, or the string `null` to clear the rule or override.
 - `Override`: `leadTimes` (≤ 20 ints in −1440..10080), `enabled` (bool), `volume` (0..100),
   `vibrationPattern` (≤ 100 chars), `ignoreAllDay` (bool, calendars), `rsvpFilter` (≤ 100 chars,
   calendars), `addedLeadTimes` (≤ 20 ints), `travelLeadTimes` (1..4 ints in 0..179, calendars; the app's per-event alarm limit and
-  longest travel lead). Absent fields mean "inherit". Unknown fields are ignored by phones; the
-  server never writes them.
+  longest travel lead). Absent fields mean "inherit". Phones ignore unknown fields; the server
+  validates only the fields it knows and keeps unknown ones when it rewrites a record, so a newer
+  app's fields survive an assistant change.
 - `p_`: JSON scalars (`null` clears). Booleans: `dynamic_color`, `apply_accent_to_app`,
   `vibration_enabled`, `gradual_volume_enabled`, `spoken_alarm_include_event_name`,
   `spoken_alarm_include_time_until_event`, `spoken_alarm_include_location`,
@@ -138,10 +168,23 @@ Payloads (`values/{key}.payload`, ≤ 16 KB):
   `ignore_all_day_events`, `auto_detect_meeting_urls`, `override_system_volume`,
   `smart_snooze_suggestions`. Integers: `default_lead_time_minutes` 0..10080, `alarm_volume`
   0..100, `snooze_duration_minutes` 1..1440, `alarm_duration_seconds` 0..86400, `max_snoozes`
-  0..100, `spoken_alarm_speech_rate_hundredths` 25..400. Strings (≤ 500): `theme_preference`,
-  `accent_id`, `default_lead_times_csv`, `alert_type`, `vibration_pattern`,
-  `spoken_alarm_meeting_type_preference`, `spoken_alarm_repetition`, `rsvp_filter`.
-  Long: `alarms_paused_until` (0 = not paused, −1 = until resumed, otherwise epoch ms).
+  0..100, `spoken_alarm_speech_rate_hundredths` 25..400. Strings (≤ 500): `theme_preference`
+  (`system`, `light`, `dark`), `accent_id`, `default_lead_times_csv` (a JSON list, e.g. `[0,10]`),
+  `alert_type` (`sound_and_vibration`, `vibration_only`, `visual_only`), `vibration_pattern`,
+  `spoken_alarm_meeting_type_preference` (`enabled`, `disabled`), `spoken_alarm_repetition`
+  (`never`, `after_15_seconds`, `after_30_seconds`, `after_1_minute`, `after_2_minutes`, and the
+  older `once`, `automatic`), `rsvp_filter` (`accepted_only`, `accepted_or_tentative`,
+  `not_declined`, `all_events`); the others take any string. Long: `alarms_paused_until`
+  (0 = not paused, −1 = until resumed, otherwise epoch ms ≤ 4102444800000).
+
+Canonical encoding: payloads are written the way kotlinx serialization writes the app's data
+classes. Fields appear in the data class's order (`leadTimes`, `enabled`, `volume`,
+`vibrationPattern`, `ignoreAllDay`, `rsvpFilter`, `addedLeadTimes`, `travelLeadTimes`; `selected`,
+`overrides`), null fields are left out, lead-time lists are sorted ascending without duplicates,
+and there are no spaces. So `c_` with only `selected` is `{"selected":true}`. Unknown fields
+follow the known ones. Equal meaning, not equal text, is what counts: comparisons (skipping a
+change that changes nothing, undo's "changed since" check) parse both payloads and compare their
+canonical forms.
 
 The server validates every write against these limits before writing; phones validate again on
 apply.
@@ -179,3 +222,26 @@ snapshot per 10 seconds; extra requests coalesce.
 `settings/alarms`, `settings/sounds`, `settings/spoken`, `permissions`, `battery`, `travel`,
 `account`, `assistants`, `plus?source=assistant`. Links only open screens; they never change
 settings and never contain titles.
+
+## Changing the protocol
+
+Update this file and [`assistant-protocol-vectors.json`](assistant-protocol-vectors.json) in the
+same change as the code, and ship the side that must accept a value before the side that sends it.
+
+- **A new preference:** add it to `PREFERENCE_*` in
+  [`assistant-records.js`](../functions/assistant-records.js), the vectors' `preferences` and the
+  list above, with its range or allowed values; then to the app's account-sync allowlist. Expose it
+  to assistants through `SETTINGS` in [`assistant-settings.js`](../functions/assistant-settings.js)
+  (the schema comes from the allowlist), and decide whether `changeAlert` should flag it.
+- **A new tool:** add it to the read, write or connection module, list it in
+  [ASSISTANT_CONNECTOR.md](ASSISTANT_CONNECTOR.md#tools), and set its annotations; a tool that can
+  stop alarms is `destructiveHint: true` and its writes go through `writeTool` so they are logged,
+  pushed and undoable.
+- **A new capability:** allow it in [`firestore.rules`](../firestore.rules) and deploy the rules
+  first (phones that write an unknown capability are rejected), then add it to `CAPABILITIES` in
+  [`assistant-tools-connection.js`](../functions/assistant-tools-connection.js) and this file, and
+  finally ship the app.
+- **A new App Link destination:** the app's link routing must handle it first. Then add it to
+  `DESTINATIONS` and `appLink` in [`assistant-snapshot.js`](../functions/assistant-snapshot.js)
+  (`open_in_app` takes its values) and this file's App Links list. The Hosting fallback in
+  `account-web/open/` serves every path, so it needs no change.

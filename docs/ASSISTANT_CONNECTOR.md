@@ -30,7 +30,12 @@ All on `https://always-on-time-zombit-2026.web.app` (Hosting rewrites to the fun
 
 The app calls `listAssistantConnections`, `revokeAssistantConnection` and `undoAssistantChange`
 (the activity log's Undo, with the same checks as the `undo` tool) (callable functions;
-Google sign-in and an active synced account required). `pruneAssistantConnections` runs daily and
+Google sign-in and an active synced account required). `listAssistantConnections` returns
+`{connections: [{grantId, clientName, assistant, verified, clientHost, scopes, createdAt,
+lastUsedAt, setupConfirmedAt}]}`, most recently used first: `assistant` is `claude`, `chatgpt` or
+`other`, `clientName` is "Unverified app" unless `verified`, `clientHost` is the host the
+connection's codes went to (null for connections made before it was recorded), and times are epoch
+ms or null. `pruneAssistantConnections` runs daily and
 `sendAssistantUsageSummary` posts anonymous weekly totals to the developer's Discord channel.
 
 ## OAuth
@@ -41,14 +46,25 @@ parameter (RFC 9207).
 - Clients register either with a Client ID Metadata Document (an `https` URL as `client_id`) or
   with dynamic registration. Metadata documents are fetched with SSRF guards: https on the default
   port, a host name (not an IP), every resolved address public, no redirects, 5 KB and 5 s limits.
-  They are cached for a day.
+  They are cached for a day. Only `/oauth/authorize` fetches one; the token and revoke endpoints
+  use the stored client and reject unknown ones. A failed fetch is remembered for 10 minutes, and
+  fetches are capped per host and overall.
+- Only Claude and ChatGPT are named, and only when their `client_id` is a metadata document on
+  their own host: `claude.ai` (Claude) or `chatgpt.com` (ChatGPT), exactly. Every other client,
+  including any dynamically registered one, whatever `client_name` it declares, is shown as
+  "Unverified app" together with the host its codes are sent to (`clientHost`, the redirect URI's
+  host). The consent page warns about unverified apps.
+- Errors and cancellation redirect back only to a verified client. For an unverified client, a bad
+  authorization request shows an error page and Cancel shows "Cancelled", so the endpoint can't be
+  used as an open redirect.
 - Redirect URIs must match exactly; `http` is allowed only for loopback hosts, where the port may
   differ.
 - The consent page asks the user to sign in with the Google account they use in the app. Approval
   works only for an account that has turned on account sync.
 - Tokens are random and opaque; only their SHA-256 hashes are stored. Access tokens last 1 hour,
-  refresh tokens 90 days and rotate on every use. Reusing a spent refresh token or authorization
-  code revokes the connection (a short grace period covers a client retrying a lost response).
+  refresh tokens 90 days and rotate on every use. Reusing a spent authorization code or refresh
+  token within 30 seconds is refused (`invalid_grant`) without other effect, which covers a client
+  retrying a lost response; reusing it later revokes the connection.
 - A connection (grant) is created when the code is exchanged. Connecting the same assistant again
   replaces its earlier connection. Connections idle for 90 days are removed.
 - Disconnecting the last assistant deletes the shared snapshot, device and activity documents.
@@ -67,7 +83,7 @@ parameter (RFC 9207).
 | `get_alarm_history` | What happened to alarms in the last 1–14 days |
 | `set_event_alarms` | Lead times for one occurrence, off, or reset |
 | `set_series_alarms` | Lead times for every occurrence of a recurring event, off, or reset |
-| `set_calendar` | Watch a calendar or not, its lead times, invitation filter, all-day events |
+| `set_calendar` | Watch a calendar or not, its lead times, invitation filter (all-day events are an app-wide setting) |
 | `update_settings` | App-wide settings |
 | `pause_alarms` / `resume_alarms` | Pause every alarm until a time or until resumed |
 | `undo` | Reverses an earlier change from the last 30 days unless those settings changed since |
@@ -77,9 +93,34 @@ parameter (RFC 9207).
 | `open_in_app` | A link that opens a screen of the app (sounds, permissions, Plus and so on) |
 
 Each change writes the new `values` records and an activity entry atomically, then sends the
-phones an FCM `sync` message. Write tools return a `changeId` for `confirm_change` and `undo`.
-Live traffic for travel alarms needs Always On Time Plus; the connector only explains that and
-links to the app. Calls are rate limited per connection and per IP.
+phones an FCM `sync` message. Write tools return a `changeId` for `confirm_change` and `undo`. Once
+the change is saved, a failure to notify the phones doesn't make the call fail: it returns the
+`changeId` with a note that the phone will pick the change up on its next sync. Tools that can
+stop alarms from ringing (pausing, turning alarms off, unwatching a calendar, quieter settings)
+are annotated `destructiveHint: true`, and the server instructions tell the assistant to confirm
+them with the user first. Event titles and calendar names are third-party text (anyone can send an
+invitation): they are cleaned, quoted in tool output, and the instructions say never to follow
+instructions in them. Live traffic for travel alarms needs Plus benefits; the connector only
+explains that and links to the app.
+
+### Rate limits
+
+| Limit | Where counted | Applies to |
+| --- | --- | --- |
+| Per caller: register 30/h, authorize 60, consent 120, approve 30, token and revoke 120 per 10 min | Firestore, shared | OAuth endpoints |
+| Per network hop: 300 per 10 min | memory, per instance | OAuth endpoints |
+| Overall: authorize 300, consent and approve 600, token and revoke 600 per 10 min; registrations 500/h (Firestore) | memory, per instance | OAuth endpoints |
+| Metadata document fetches: 20 per host, 100 overall per 10 min | memory, per instance | `/oauth/authorize` |
+| Tool calls: 120 per connection per 10 min; pushes 40 per connection per 10 min | memory; Firestore | `/mcp` |
+| Calls without a valid token: 30 per caller, 600 overall per minute, checked before any database read | memory, per instance | `/mcp` |
+
+In-memory limits hold per instance; with at most 10 instances they hold at ten times their value
+overall. Callers are identified as follows. Google's front end appends the connecting address to
+`X-Forwarded-For`, so its last entry (the hop) can't be forged: for a direct call to the
+function's own URL it is the caller, and through Hosting it is the CDN, shared by many users. The
+per-caller key is `Fastly-Client-IP` (the visitor as Hosting's CDN reports it), else the hop; a
+direct caller can forge it, so it only keeps one honest client from using up the shared budget.
+No header identifies a person reliably here, so the overall caps are what bound abuse.
 
 ## What is stored
 
@@ -87,7 +128,7 @@ links to the app. Calls are rate limited per connection and per IP.
 | --- | --- | --- |
 | Snapshot of upcoming events and alarms (titles, times, calendar names), device model label, FCM token | `accounts/{uid}/assistantSnapshots`, `assistantDevices` | Until the last assistant disconnects, sign-out or account deletion |
 | Change log (summary, before/after settings) | `accounts/{uid}/assistantActivity` | 30 days, or until the last assistant disconnects |
-| Connection: assistant name, scopes, created/last used | `oauthGrants` | Until revoked, or 90 days idle |
+| Connection: assistant name, whether it is verified, the host its codes go to, scopes, created/last used | `oauthGrants` | Until revoked, or 90 days idle |
 | Token and code hashes | `oauthTokens`, `oauthCodes`, `oauthRequests` | Expiry (TTL) |
 | Registered assistant clients (public metadata) | `oauthClients` | 90 days unused (TTL) |
 | Rate limit counts (document ID is a hash of the connection or IP and the time window) | `assistantRateLimits` | About an hour (TTL) |
@@ -117,6 +158,9 @@ Cloud Logging. `assistantEvent` names the action:
 | `connection.revoked`, `prune` | `grantId`, `reason` (`app`, `client`, `idle`, `code_reuse`, `refresh_reuse`), `remaining` / `revoked` |
 | `callable.undo`, `callable.list_connections`, `callable.revoke_connection` | as `tool.call`, or `count` / `revoked` |
 | `push.failed`, `push.invalid_token_removed`, `push.state_failed` | `deviceId`, `type`, `errorCode` |
+| `push.after_commit_failed` | A change was saved but reading devices or pushing failed: `changeId`, `errorCode` |
+| `grant.touch_failed`, `oauth.client_touch_failed` | Updating a connection's or client's last-used time failed: `grantId` or `clientId`, `errorName`, `errorCode` |
+| `account_emails_failed` | Reading the account's emails (to match Google Calendar IDs) failed: `errorCode` |
 
 The helper writes only an allowlist of fields: never event titles, summaries, settings payloads,
 tool arguments, tokens, codes, PKCE values, redirect URIs or emails. Tool errors log their outcome,
