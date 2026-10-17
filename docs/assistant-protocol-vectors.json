@@ -1,0 +1,58 @@
+{
+  "recordKeys": [
+    {"kind": "calendar", "input": ["com.google", "alex@example.com", "alex@example.com"], "key": "c_42fb4c3a3db8d2bba3e4897484575c76b2c03322bddf69f7dfcd787a6c213d5a"},
+    {"kind": "calendar", "input": ["com.google", "alex@example.com", "en.usa#holiday@group.v.calendar.google.com"], "key": "c_fee33e5026cd74ede2b023b984a72453b4d16a166b50e29d92fdd0af1c561ec9"},
+    {"kind": "series", "input": ["c_42fb4c3a3db8d2bba3e4897484575c76b2c03322bddf69f7dfcd787a6c213d5a", "4kq0l1v3s9example"], "key": "s_050961489e18b374331b1996aed77c48ac038669dd77a00357129ece44535a7d"},
+    {"kind": "occurrence", "input": "s_050961489e18b374331b1996aed77c48ac038669dd77a00357129ece44535a7d:single", "key": "e_e41735eed816bc24db9dc5b08d92ac12b112a12a4600a6ede42faf14cf6df08d"},
+    {"kind": "series", "input": ["c_42fb4c3a3db8d2bba3e4897484575c76b2c03322bddf69f7dfcd787a6c213d5a", "7rcurring0example"], "key": "s_a4b8d08d97e8a3a8fd964c4e1811abafeb4c2ae465c396f6b6debbbf06929e5f"},
+    {"kind": "occurrence", "input": "s_a4b8d08d97e8a3a8fd964c4e1811abafeb4c2ae465c396f6b6debbbf06929e5f:1793124000000", "key": "e_7b1ec89029a39d5b40d6ffb94cb7187192ac341db9b4f614b97fae4fc623abda"}
+  ],
+  "payloads": [
+    {"record": "e", "description": "Several lead times given unsorted with a duplicate: ascending, de-duplicated, fields in data class order", "value": {"enabled": true, "leadTimes": [30, 5, 30, 0]}, "canonical": "{\"leadTimes\":[0,5,30],\"enabled\":true}"},
+    {"record": "s", "description": "Override with enabled false; null fields are left out", "value": {"addedLeadTimes": [15, 5], "enabled": false, "leadTimes": [15, 10, 5], "volume": null}, "canonical": "{\"leadTimes\":[5,10,15],\"enabled\":false,\"addedLeadTimes\":[5,15]}"},
+    {"record": "e", "description": "Alarms off for an occurrence with no lead times", "value": {"leadTimes": [], "enabled": false}, "canonical": "{\"leadTimes\":[],\"enabled\":false}"},
+    {"record": "e", "description": "null clears an occurrence override", "value": null, "canonical": "null"},
+    {"record": "c", "description": "Calendar with selected only (no \"overrides\":null)", "value": {"selected": true, "overrides": null}, "canonical": "{\"selected\":true}"},
+    {"record": "c", "description": "Calendar with overrides, fields reordered", "value": {"overrides": {"rsvpFilter": "accepted_only", "leadTimes": [1440, 60]}, "selected": false}, "canonical": "{\"selected\":false,\"overrides\":{\"leadTimes\":[60,1440],\"rsvpFilter\":\"accepted_only\"}}"},
+    {"record": "c", "description": "Calendar with nothing set", "value": {"selected": null, "overrides": null}, "canonical": "{}"},
+    {"record": "c", "description": "Calendar travel lead times, ascending", "value": {"selected": true, "overrides": {"travelLeadTimes": [10, 0]}}, "canonical": "{\"selected\":true,\"overrides\":{\"travelLeadTimes\":[0,10]}}"},
+    {"record": "p", "name": "alarm_volume", "description": "Integer preference", "value": 40, "canonical": "40"},
+    {"record": "p", "name": "respect_dnd", "description": "Boolean preference", "value": false, "canonical": "false"},
+    {"record": "p", "name": "theme_preference", "description": "String preference", "value": "dark", "canonical": "\"dark\""},
+    {"record": "p", "name": "default_lead_times_csv", "description": "Default lead times: a string holding the app's JSON list", "value": "[0,10]", "canonical": "\"[0,10]\""},
+    {"record": "p", "name": "vibration_enabled", "description": "null clears a preference", "value": null, "canonical": "null"},
+    {"record": "p", "name": "alarms_paused_until", "description": "Paused until resumed", "value": -1, "canonical": "-1"},
+    {"record": "p", "name": "alarms_paused_until", "description": "Paused until an epoch time", "value": 1793124000000, "canonical": "1793124000000"},
+    {"record": "p", "name": "alarms_paused_until", "description": "Not paused", "value": 0, "canonical": "0"}
+  ],
+  "preferences": {
+    "booleans": [
+      "dynamic_color", "apply_accent_to_app", "vibration_enabled", "gradual_volume_enabled",
+      "spoken_alarm_include_event_name", "spoken_alarm_include_time_until_event",
+      "spoken_alarm_include_location", "spoken_alarm_include_helpful_reminder",
+      "respect_dnd", "override_dnd_for_priority", "ignore_all_day_events",
+      "auto_detect_meeting_urls", "override_system_volume", "smart_snooze_suggestions"
+    ],
+    "integers": {
+      "default_lead_time_minutes": [0, 10080],
+      "alarm_volume": [0, 100],
+      "snooze_duration_minutes": [1, 1440],
+      "alarm_duration_seconds": [0, 86400],
+      "max_snoozes": [0, 100],
+      "spoken_alarm_speech_rate_hundredths": [25, 400]
+    },
+    "strings": {
+      "theme_preference": {"maxLength": 500, "values": ["system", "light", "dark"]},
+      "accent_id": {"maxLength": 500, "values": null},
+      "default_lead_times_csv": {"maxLength": 500, "values": null},
+      "alert_type": {"maxLength": 500, "values": ["sound_and_vibration", "vibration_only", "visual_only"]},
+      "vibration_pattern": {"maxLength": 500, "values": null},
+      "spoken_alarm_meeting_type_preference": {"maxLength": 500, "values": ["enabled", "disabled"]},
+      "spoken_alarm_repetition": {"maxLength": 500, "values": ["never", "after_15_seconds", "after_30_seconds", "after_1_minute", "after_2_minutes", "once", "automatic"]},
+      "rsvp_filter": {"maxLength": 500, "values": ["accepted_only", "accepted_or_tentative", "not_declined", "all_events"]}
+    },
+    "longs": {
+      "alarms_paused_until": [-1, 4102444800000]
+    }
+  }
+}

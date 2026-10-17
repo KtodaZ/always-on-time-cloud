@@ -3,24 +3,61 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
+const path = require("node:path");
+
 const {
-  RecordError, calendarKey, encodePayload, googleCalendarCandidates, googleEventKeys, occurrenceKey, originalStartMillis,
-  parseGoogleEventId, seriesKey, validatePayload,
+  PREFERENCE_BOOLEANS, PREFERENCE_INTEGERS, PREFERENCE_LONGS, PREFERENCE_STRINGS, PREFERENCE_STRING_MAX, RecordError,
+  calendarKey, canonicalPayload, encodePayload, googleCalendarCandidates, googleEventKeys, occurrenceKey, originalStartMillis,
+  parseGoogleEventId, samePayload, seriesKey, sha256Hex, validatePayload,
 } = require("../assistant-records");
 
-// docs/ASSISTANT_PROTOCOL.md "Test vectors": the Kotlin app must produce the same keys.
-const CALENDAR = "c_42fb4c3a3db8d2bba3e4897484575c76b2c03322bddf69f7dfcd787a6c213d5a";
+// Shared with the apps: docs/assistant-protocol-vectors.json. The Kotlin app tests against the same file.
+const VECTORS = require(path.join(__dirname, "../../docs/assistant-protocol-vectors.json"));
+const CALENDAR = VECTORS.recordKeys[0].key;
+const HEX = "a".repeat(64);
 
-test("record keys reproduce every protocol test vector", () => {
-  assert.equal(calendarKey("com.google", "alex@example.com", "alex@example.com"), CALENDAR);
-  assert.equal(calendarKey("com.google", "alex@example.com", "en.usa#holiday@group.v.calendar.google.com"),
-    "c_fee33e5026cd74ede2b023b984a72453b4d16a166b50e29d92fdd0af1c561ec9");
-  const single = seriesKey(CALENDAR, "4kq0l1v3s9example");
-  assert.equal(single, "s_050961489e18b374331b1996aed77c48ac038669dd77a00357129ece44535a7d");
-  assert.equal(occurrenceKey(single, null), "e_e41735eed816bc24db9dc5b08d92ac12b112a12a4600a6ede42faf14cf6df08d");
-  const recurring = seriesKey(CALENDAR, "7rcurring0example");
-  assert.equal(recurring, "s_a4b8d08d97e8a3a8fd964c4e1811abafeb4c2ae465c396f6b6debbbf06929e5f");
-  assert.equal(occurrenceKey(recurring, 1793124000000), "e_7b1ec89029a39d5b40d6ffb94cb7187192ac341db9b4f614b97fae4fc623abda");
+test("record keys reproduce every shared test vector", () => {
+  assert.equal(VECTORS.recordKeys.length, 6);
+  for (const { kind, input, key } of VECTORS.recordKeys) {
+    if (kind === "calendar") assert.equal(calendarKey(...input), key);
+    else if (kind === "series") assert.equal(seriesKey(...input), key);
+    else {
+      assert.equal(`e_${sha256Hex(input)}`, key);
+      const [series, start] = input.split(":");
+      assert.equal(occurrenceKey(series, start === "single" ? null : Number(start)), key);
+    }
+  }
+});
+
+test("payloads encode to the canonical form in every shared vector", () => {
+  assert.ok(VECTORS.payloads.length >= 8);
+  for (const vector of VECTORS.payloads) {
+    const recordId = vector.record === "p" ? `p_${vector.name}` : `${vector.record}_${HEX}`;
+    assert.equal(encodePayload(recordId, vector.value), vector.canonical, vector.description);
+    // Encoding the canonical form again changes nothing.
+    assert.equal(canonicalPayload(recordId, vector.canonical), vector.canonical, vector.description);
+  }
+});
+
+test("the preference allowlist matches the shared vectors", () => {
+  const { booleans, integers, strings, longs } = VECTORS.preferences;
+  assert.deepEqual([...PREFERENCE_BOOLEANS].sort(), [...booleans].sort());
+  assert.deepEqual(Object.fromEntries(PREFERENCE_INTEGERS), integers);
+  assert.deepEqual(Object.fromEntries([...PREFERENCE_STRINGS].map(([name, values]) => [name, { maxLength: PREFERENCE_STRING_MAX, values }])), strings);
+  assert.deepEqual(Object.fromEntries(PREFERENCE_LONGS), longs);
+});
+
+test("fields from a newer app are kept, after the known ones, and payloads compare by meaning", () => {
+  const stored = '{"futureField":{"x":1},"enabled":true,"leadTimes":[10,5]}';
+  assert.equal(canonicalPayload(`s_${HEX}`, stored), '{"leadTimes":[5,10],"enabled":true,"futureField":{"x":1}}');
+  assert.equal(encodePayload(`c_${HEX}`, { future: 1, overrides: { soon: true, leadTimes: [0] }, selected: true }),
+    '{"selected":true,"overrides":{"leadTimes":[0],"soon":true},"future":1}');
+  assert.equal(samePayload(`e_${HEX}`, '{"enabled":false,"leadTimes":[10,0]}', '{"leadTimes":[0,10],"enabled":false,"volume":null}'), true);
+  assert.equal(samePayload(`e_${HEX}`, '{"leadTimes":[0,10]}', '{"leadTimes":[0,15]}'), false);
+  // A missing document means "nothing set".
+  assert.equal(samePayload(`c_${HEX}`, null, '{"selected":null,"overrides":null}'), true);
+  assert.equal(samePayload(`p_alarm_volume`, null, "null"), true);
+  assert.equal(samePayload(`p_alarm_volume`, "not json", "not json"), true);
 });
 
 test("key inputs are escaped like kotlinx JSON and rejected when missing", () => {
@@ -90,7 +127,6 @@ test("payloads are validated with the app's limits before anything is written", 
     ["e_" + "a".repeat(64), '{"volume":101}'],
     ["e_" + "a".repeat(64), '{"enabled":"yes"}'],
     ["e_" + "a".repeat(64), '{"vibrationPattern":"' + "x".repeat(101) + '"}'],
-    ["e_" + "a".repeat(64), '{"surprise":1}'],
     ["e_" + "a".repeat(64), "[1]"],
     ["c_" + "a".repeat(64), '{"overrides":{"travelLeadTimes":[]}}'],
     ["c_" + "a".repeat(64), '{"overrides":{"travelLeadTimes":[0,10,20,30,40]}}'],
@@ -102,6 +138,9 @@ test("payloads are validated with the app's limits before anything is written", 
     ["p_respect_dnd", "1"],
     ["p_theme_preference", JSON.stringify("x".repeat(501))],
     ["p_alarms_paused_until", "-2"],
+    ["p_alarms_paused_until", "4102444800001"],
+    ["p_theme_preference", '"sepia"'],
+    ["p_alert_type", '"silent"'],
     ["p_not_synced", "true"],
     ["x_" + "a".repeat(64), "null"],
     ["e_" + "a".repeat(64), `{"vibrationPattern":"${"x".repeat(17000)}"}`],
@@ -109,7 +148,7 @@ test("payloads are validated with the app's limits before anything is written", 
   for (const [id, payload] of bad) assert.throws(() => validatePayload(id, payload), RecordError, `${id} ${payload.slice(0, 60)}`);
   assert.deepEqual(validatePayload("c_" + "a".repeat(64), '{"selected":false,"overrides":{"travelLeadTimes":[0,10],"ignoreAllDay":true}}'),
     { selected: false, overrides: { travelLeadTimes: [0, 10], ignoreAllDay: true } });
-  for (const [id, value] of [["p_alarm_volume", 100], ["p_alarms_paused_until", -1], ["p_alarms_paused_until", 1793124000000], ["p_respect_dnd", null]]) {
+  for (const [id, value] of [["p_alarm_volume", 100], ["p_alarms_paused_until", -1], ["p_alarms_paused_until", 4102444800000], ["p_respect_dnd", null], ["p_accent_id", "any accent"]]) {
     assert.equal(encodePayload(id, value), JSON.stringify(value));
   }
   assert.throws(() => encodePayload("p_alarm_volume", "loud"), RecordError);

@@ -18,6 +18,8 @@ const TRAVEL_LEAD_TIME_MAX = 179;
 const RECORD_ID = /^(p_[a-z_]+|[cse]_[a-f0-9]{64})$/;
 const KEY = { c: /^c_[a-f0-9]{64}$/, s: /^s_[a-f0-9]{64}$/, e: /^e_[a-f0-9]{64}$/ };
 
+// The app's synced preferences (PortablePreferences.kt), mirrored in
+// docs/assistant-protocol-vectors.json "preferences" (a test keeps the two equal).
 const PREFERENCE_BOOLEANS = new Set([
   "dynamic_color", "apply_accent_to_app", "vibration_enabled", "gradual_volume_enabled",
   "spoken_alarm_include_event_name", "spoken_alarm_include_time_until_event",
@@ -33,12 +35,27 @@ const PREFERENCE_INTEGERS = new Map([
   ["max_snoozes", [0, 100]],
   ["spoken_alarm_speech_rate_hundredths", [25, 400]],
 ]);
-const PREFERENCE_STRINGS = new Set([
-  "theme_preference", "accent_id", "default_lead_times_csv", "alert_type",
-  "vibration_pattern", "spoken_alarm_meeting_type_preference", "spoken_alarm_repetition", "rsvp_filter",
+const PREFERENCE_STRING_MAX = 500;
+// Allowed values are the app's storage values (null: any text up to 500 characters). Accents and
+// vibration patterns are open lists the app may grow. "once" and "automatic" are repetition
+// values older releases stored and the app still reads.
+const PREFERENCE_STRINGS = new Map([
+  ["theme_preference", ["system", "light", "dark"]],
+  ["accent_id", null],
+  ["default_lead_times_csv", null],
+  ["alert_type", ["sound_and_vibration", "vibration_only", "visual_only"]],
+  ["vibration_pattern", null],
+  ["spoken_alarm_meeting_type_preference", ["enabled", "disabled"]],
+  ["spoken_alarm_repetition", ["never", "after_15_seconds", "after_30_seconds", "after_1_minute", "after_2_minutes", "once", "automatic"]],
+  ["rsvp_filter", ["accepted_only", "accepted_or_tentative", "not_declined", "all_events"]],
 ]);
 const PAUSED_UNTIL = "alarms_paused_until";
-const PREFERENCE_NAMES = new Set([...PREFERENCE_BOOLEANS, ...PREFERENCE_INTEGERS.keys(), ...PREFERENCE_STRINGS, PAUSED_UNTIL]);
+// 0 = not paused, -1 = until resumed, otherwise epoch ms up to 2100-01-01 (PortablePreferences.LATEST_EPOCH_MILLIS).
+const PAUSED_UNTIL_MAX = 4102444800000;
+const PREFERENCE_LONGS = new Map([[PAUSED_UNTIL, [-1, PAUSED_UNTIL_MAX]]]);
+const PREFERENCE_NAMES = new Set([
+  ...PREFERENCE_BOOLEANS, ...PREFERENCE_INTEGERS.keys(), ...PREFERENCE_STRINGS.keys(), ...PREFERENCE_LONGS.keys(),
+]);
 
 class RecordError extends Error {}
 
@@ -173,11 +190,20 @@ function googleEventKeys(calendar, { eventId, recurringEventId, originalStartTim
   return { seriesKey: series, eventKey: occurrenceKey(series, null), recurring: singleEvent ? false : null, originalStartMillis: null };
 }
 
-// ---- Payload validation ----------------------------------------------------------------------
+// ---- Payloads ----------------------------------------------------------------------------------
+//
+// The canonical encoding of every payload is what the app's kotlinx serialization writes
+// (AccountAlarmOverride and AccountCalendarRecord in CalendarAccountData.kt, PortablePreferences):
+// fields in the data class order, null fields left out, lead-time lists ascending without
+// duplicates. Fields a newer app added are kept, after the known ones, when the server rewrites a
+// record; only the known fields are validated (plus the size limit). Comparisons between payloads
+// go through canonicalPayload, never the raw strings. Vectors: docs/assistant-protocol-vectors.json.
 
-const OVERRIDE_FIELDS = new Set([
+const OVERRIDE_FIELDS = [
   "leadTimes", "enabled", "volume", "vibrationPattern", "ignoreAllDay", "rsvpFilter", "addedLeadTimes", "travelLeadTimes",
-]);
+];
+const CALENDAR_FIELDS = ["selected", "overrides"];
+const LEAD_TIME_LISTS = new Set(["leadTimes", "addedLeadTimes", "travelLeadTimes"]);
 
 const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -188,12 +214,12 @@ function intList(value, name, { min, max, minSize = 0, maxSize }) {
   }
 }
 
-/** Throws RecordError unless `value` is a valid Override object (absent or null fields inherit). */
+/** Throws RecordError unless the known fields of `value` are a valid Override (absent or null fields inherit). */
 function validateOverride(value) {
   if (!isPlainObject(value)) throw new RecordError("override must be an object");
-  for (const [field, item] of Object.entries(value)) {
-    if (!OVERRIDE_FIELDS.has(field)) throw new RecordError(`unknown override field ${field}`);
-    if (item === null) continue;
+  for (const field of OVERRIDE_FIELDS) {
+    const item = value[field];
+    if (item === null || item === undefined) continue;
     switch (field) {
       case "leadTimes":
       case "addedLeadTimes":
@@ -227,9 +253,12 @@ function validatePreference(name, value) {
     const [min, max] = PREFERENCE_INTEGERS.get(name);
     if (!Number.isInteger(value) || value < min || value > max) throw new RecordError(`${name} must be a whole number from ${min} to ${max}`);
   } else if (PREFERENCE_STRINGS.has(name)) {
-    if (typeof value !== "string" || value.length > 500) throw new RecordError(`${name} must be text up to 500 characters`);
-  } else if (!Number.isSafeInteger(value) || value < -1) {
-    throw new RecordError(`${name} must be 0, -1 or epoch milliseconds`);
+    const allowed = PREFERENCE_STRINGS.get(name);
+    if (typeof value !== "string" || value.length > PREFERENCE_STRING_MAX) throw new RecordError(`${name} must be text up to ${PREFERENCE_STRING_MAX} characters`);
+    if (allowed && !allowed.includes(value)) throw new RecordError(`${name} must be one of ${allowed.join(", ")}`);
+  } else {
+    const [min, max] = PREFERENCE_LONGS.get(name);
+    if (!Number.isSafeInteger(value) || value < min || value > max) throw new RecordError(`${name} must be 0, -1 or epoch milliseconds before 2100`);
   }
   return value;
 }
@@ -244,16 +273,12 @@ function parseJson(payload) {
   }
 }
 
-/** Throws RecordError unless `payload` (the stored string) is valid for `recordId`. Returns the parsed value. */
-function validatePayload(recordId, payload) {
+/** Throws RecordError unless `value` is valid for `recordId`. Returns it. */
+function validateValue(recordId, value) {
   if (!isRecordId(recordId)) throw new RecordError(`invalid record id ${recordId}`);
-  const value = parseJson(payload);
   if (recordId.startsWith("p_")) return validatePreference(recordId.slice(2), value);
   if (recordId.startsWith("c_")) {
     if (!isPlainObject(value)) throw new RecordError("calendar record must be an object");
-    for (const field of Object.keys(value)) {
-      if (field !== "selected" && field !== "overrides") throw new RecordError(`unknown calendar field ${field}`);
-    }
     if (value.selected !== undefined && value.selected !== null && typeof value.selected !== "boolean") {
       throw new RecordError("selected must be true, false or null");
     }
@@ -264,26 +289,83 @@ function validatePayload(recordId, payload) {
   return validateOverride(value);
 }
 
-/** Serializes and validates in one step, so nothing unchecked can reach Firestore. */
+/** Throws RecordError unless `payload` (the stored string) is valid for `recordId`. Returns the parsed value. */
+function validatePayload(recordId, payload) {
+  if (!isRecordId(recordId)) throw new RecordError(`invalid record id ${recordId}`);
+  return validateValue(recordId, parseJson(payload));
+}
+
+const ascendingUnique = (list) => [...new Set(list)].sort((a, b) => a - b);
+
+/** Known fields in `order` (null fields dropped), then any fields a newer app added, in their own order. */
+function ordered(value, order, transform = (field, item) => item) {
+  const out = {};
+  for (const field of order) {
+    const item = value[field];
+    if (item !== null && item !== undefined) out[field] = transform(field, item);
+  }
+  for (const [field, item] of Object.entries(value)) {
+    if (order.includes(field) || item === null || item === undefined || field === "__proto__") continue;
+    out[field] = item;
+  }
+  return out;
+}
+
+const canonicalOverride = (value) => ordered(value, OVERRIDE_FIELDS, (field, item) => (LEAD_TIME_LISTS.has(field) ? ascendingUnique(item) : item));
+
+/** The canonical form of a validated value. */
+function canonicalValue(recordId, value) {
+  if (recordId.startsWith("p_") || value === null) return value;
+  if (recordId.startsWith("c_")) return ordered(value, CALENDAR_FIELDS, (field, item) => (field === "overrides" ? canonicalOverride(item) : item));
+  return canonicalOverride(value);
+}
+
+/** Validates `value` and serializes it canonically, so nothing unchecked or non-canonical reaches Firestore. */
 function encodePayload(recordId, value) {
-  const payload = JSON.stringify(value === undefined ? null : value);
-  validatePayload(recordId, payload);
+  const checked = validateValue(recordId, value === undefined ? null : value);
+  const payload = JSON.stringify(canonicalValue(recordId, checked));
+  if (payload.length > MAX_PAYLOAD_CHARS) throw new RecordError("payload is too large");
   return payload;
 }
 
+/** What a missing record means: nothing set ("{}" for calendars, "null" otherwise). */
+const unsetPayload = (recordId) => (recordId.startsWith("c_") ? "{}" : "null");
+
+/**
+ * A stored payload (or null for a missing document) in canonical form, for comparing by meaning.
+ * A payload that does not validate is returned as stored, so it only equals itself.
+ */
+function canonicalPayload(recordId, payload) {
+  if (payload === null || payload === undefined) return unsetPayload(recordId);
+  try {
+    return encodePayload(recordId, validatePayload(recordId, payload));
+  } catch (error) {
+    if (error instanceof RecordError) return payload;
+    throw error;
+  }
+}
+
+const samePayload = (recordId, a, b) => canonicalPayload(recordId, a) === canonicalPayload(recordId, b);
+
 module.exports = {
+  CALENDAR_FIELDS,
   GOOGLE_SHARED_CALENDAR_ID,
   GOOGLE_ACCOUNT_TYPE,
   MAX_PAYLOAD_CHARS,
   MAX_TRAVEL_LEAD_TIMES,
+  OVERRIDE_FIELDS,
   PAUSED_UNTIL,
+  PAUSED_UNTIL_MAX,
   PREFERENCE_BOOLEANS,
   PREFERENCE_INTEGERS,
+  PREFERENCE_LONGS,
   PREFERENCE_NAMES,
   PREFERENCE_STRINGS,
+  PREFERENCE_STRING_MAX,
   RecordError,
   TRAVEL_LEAD_TIME_MAX,
   calendarKey,
+  canonicalPayload,
   encodePayload,
   googleCalendarCandidates,
   googleEventKeys,
@@ -294,8 +376,10 @@ module.exports = {
   occurrenceKey,
   originalStartMillis,
   parseGoogleEventId,
+  samePayload,
   seriesKey,
   sha256Hex,
+  unsetPayload,
   validateOverride,
   validatePayload,
 };
