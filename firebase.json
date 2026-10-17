@@ -13,7 +13,8 @@
     "public": "account-web",
     "ignore": [
       "firebase.json",
-      "**/.*",
+      "**/.!(well-known)",
+      "**/.!(well-known)/**",
       "**/node_modules/**"
     ],
     "headers": [
@@ -29,6 +30,91 @@
             "value": "no-referrer"
           }
         ]
+      },
+      {
+        "source": "/.well-known/assetlinks.json",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ]
+      },
+      {
+        "source": "/connect/**",
+        "headers": [
+          {
+            "key": "X-Frame-Options",
+            "value": "DENY"
+          },
+          {
+            "key": "Content-Security-Policy",
+            "value": "default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com http://127.0.0.1:9199; frame-src https://always-on-time-zombit-2026.firebaseapp.com http://127.0.0.1:9199; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+          }
+        ]
+      }
+    ],
+    "redirects": [
+      {
+        "source": "/",
+        "destination": "https://zombit.io/always-on-time/",
+        "type": 301
+      },
+      {
+        "source": "/index.html",
+        "destination": "https://zombit.io/always-on-time/",
+        "type": 301
+      },
+      {
+        "source": "/privacy-policy.html",
+        "destination": "https://zombit.io/always-on-time/privacy/",
+        "type": 301
+      },
+      {
+        "source": "/privacy-policy.md",
+        "destination": "https://zombit.io/always-on-time/privacy/",
+        "type": 301
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "/mcp",
+        "function": {
+          "functionId": "assistantMcp",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/oauth/**",
+        "function": {
+          "functionId": "assistantOauth",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/.well-known/oauth-protected-resource",
+        "function": {
+          "functionId": "assistantOauth",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/.well-known/oauth-protected-resource/**",
+        "function": {
+          "functionId": "assistantOauth",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/.well-known/oauth-authorization-server",
+        "function": {
+          "functionId": "assistantOauth",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/open/**",
+        "destination": "/open/index.html"
       }
     ]
   },
@@ -41,6 +127,9 @@
     },
     "functions": {
       "port": 5011
+    },
+    "hosting": {
+      "port": 5012
     },
     "ui": {
       "enabled": false

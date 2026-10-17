@@ -1,0 +1,13 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.zombitstudios.alwaysontime",
+      "sha256_cert_fingerprints": [
+        "B0:2D:EB:09:B4:D9:93:66:FA:4D:69:3F:A9:D1:F4:7B:D2:00:1B:78:E0:54:95:60:50:86:5A:D4:3E:CC:19:35",
+        "50:55:8F:64:8A:45:34:9F:01:30:8E:67:A9:47:AE:4B:2A:90:11:B5:89:4A:27:61:D6:E7:E3:F7:EE:38:3E:50"
+      ]
+    }
+  }
+]

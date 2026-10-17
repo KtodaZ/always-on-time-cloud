@@ -1,3 +1,6 @@
+const { deleteConnectorData, refs } = require('./assistant-data');
+const { deleteAllGrants } = require('./assistant-oauth');
+
 const HISTORY_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
 function requireRecentGoogleAccount(auth, now = Date.now()) {
@@ -20,6 +23,10 @@ async function deleteAccountData(db, auth, uid) {
   await root.set({ active: false, schemaVersion: 1 });
   await db.recursiveDelete(root.collection('values'));
   await db.recursiveDelete(root.collection('history'));
+  // Assistant connections: revoke every grant, then remove what the connector stored.
+  await deleteAllGrants(db, uid);
+  await deleteConnectorData(db, uid);
+  await refs.state(db, uid).delete();
   await auth.deleteUser(uid);
 }
 

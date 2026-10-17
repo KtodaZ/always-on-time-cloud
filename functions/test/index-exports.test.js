@@ -6,15 +6,22 @@ const test = require("node:test");
 test("index exports the feedback trigger unchanged alongside the iOS push functions", () => {
   const functions = require("../index");
   assert.deepEqual(Object.keys(functions).sort(), [
+    "assistantMcp",
+    "assistantOauth",
     "calculateTravelRoute",
     "deleteSyncedAccount",
     "deliverIosPushDispatch",
     "iosGoogleWebhook",
     "iosMicrosoftWebhook",
     "iosPushApi",
+    "listAssistantConnections",
+    "pruneAssistantConnections",
     "pruneSyncedHistory",
     "publishFeedbackNotification",
+    "revokeAssistantConnection",
     "scheduleIosPushes",
+    "sendAssistantUsageSummary",
+    "undoAssistantChange",
   ]);
 
   const feedback = functions.publishFeedbackNotification.__endpoint;
@@ -47,4 +54,20 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
   assert.deepEqual(route.region, ["us-central1"]);
   assert.ok(route.callableTrigger, "the route proxy is a callable function");
   assert.deepEqual(route.secretEnvironmentVariables, [{ key: "TOMTOM_API_KEY" }, { key: "TRAVEL_ROUTE_API_KEY" }]);
+
+  // The assistant endpoints are public HTTP (Hosting rewrites to them) and read no secrets; only
+  // the weekly summary reads the Discord webhook.
+  for (const name of ["assistantMcp", "assistantOauth"]) {
+    const endpoint = functions[name].__endpoint;
+    assert.deepEqual(endpoint.region, ["us-central1"], name);
+    assert.deepEqual(endpoint.httpsTrigger, { invoker: ["public"] }, name);
+    assert.equal(endpoint.secretEnvironmentVariables, undefined, name);
+  }
+  for (const name of ["listAssistantConnections", "revokeAssistantConnection", "undoAssistantChange"]) {
+    assert.ok(functions[name].__endpoint.callableTrigger, name);
+    assert.equal(functions[name].__endpoint.secretEnvironmentVariables, undefined, name);
+  }
+  assert.equal(functions.pruneAssistantConnections.__endpoint.secretEnvironmentVariables, undefined);
+  assert.deepEqual(functions.sendAssistantUsageSummary.__endpoint.secretEnvironmentVariables, [{ key: "FEEDBACK_DISCORD_WEBHOOK_URL" }]);
+  assert.equal(functions.sendAssistantUsageSummary.__endpoint.scheduleTrigger.schedule, "every monday 09:00");
 });

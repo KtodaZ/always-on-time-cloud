@@ -97,6 +97,59 @@ service cloud.firestore {
           && request.resource.data.createdAt <= request.time.toMillis() + 300000;
         allow delete: if activeAccount(uid);
       }
+
+      // Assistant connector (docs/ASSISTANT_PROTOCOL.md). The server writes assistant/state and
+      // assistantActivity; a phone writes its own device and snapshot documents only while an
+      // assistant is connected.
+      function assistantConnected() {
+        let state = /databases/$(database)/documents/accounts/$(uid)/assistant/state;
+        return exists(state) && get(state).data.connected == true;
+      }
+      function isDeviceId(deviceId) {
+        return deviceId.matches('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$');
+      }
+      function isValidDevice(data) {
+        return data.keys().hasOnly(['platform', 'deviceName', 'appVersion', 'fcmToken', 'capabilities', 'lastPing', 'updatedAt'])
+          && data.keys().hasAll(['platform', 'deviceName', 'appVersion', 'capabilities', 'updatedAt'])
+          && data.platform in ['android', 'ios']
+          && data.deviceName is string && data.deviceName.size() <= 100
+          && data.appVersion is string && data.appVersion.size() <= 40
+          && (!data.keys().hasAny(['fcmToken']) || (data.fcmToken is string && data.fcmToken.size() <= 4096))
+          && data.capabilities is list && data.capabilities.size() <= 20
+          && data.capabilities.hasOnly(['travel', 'spokenAlarms', 'plus', 'pause'])
+          && (!data.keys().hasAny(['lastPing']) || (
+            data.lastPing is map
+            && data.lastPing.keys().hasOnly(['id', 'receivedAt']) && data.lastPing.keys().hasAll(['id', 'receivedAt'])
+            && data.lastPing.id is string && data.lastPing.id.size() <= 64
+            && data.lastPing.receivedAt is timestamp && data.lastPing.receivedAt <= request.time))
+          && data.updatedAt == request.time;
+      }
+      function isValidSnapshot(data) {
+        return data.keys().hasOnly(['schemaVersion', 'publishedAt', 'requestId', 'payload'])
+          && data.keys().hasAll(['schemaVersion', 'publishedAt', 'payload'])
+          && data.schemaVersion == 1
+          && data.publishedAt == request.time
+          && (!data.keys().hasAny(['requestId']) || (data.requestId is string && data.requestId.size() <= 64))
+          && data.payload is string && data.payload.size() <= 800000;
+      }
+      match /assistant/{document} {
+        allow read: if document == 'state' && activeAccount(uid);
+        allow write: if false;
+      }
+      match /assistantDevices/{deviceId} {
+        allow read, delete: if activeAccount(uid);
+        allow create, update: if activeAccount(uid) && isDeviceId(deviceId) && assistantConnected()
+          && isValidDevice(request.resource.data);
+      }
+      match /assistantSnapshots/{deviceId} {
+        allow read, delete: if activeAccount(uid);
+        allow create, update: if activeAccount(uid) && isDeviceId(deviceId) && assistantConnected()
+          && isValidSnapshot(request.resource.data);
+      }
+      match /assistantActivity/{changeId} {
+        allow read: if activeAccount(uid);
+        allow write: if false;
+      }
     }
 
     match /feedback/{feedbackId} {
@@ -159,6 +212,36 @@ service cloud.firestore {
 
     // Per-install route call counters, written only by the route function.
     match /travelRouteUsage/{document=**} {
+      allow read, write: if false;
+    }
+
+    // Assistant connector OAuth state, anonymous usage totals and rate limit counters: written and
+    // read only by Cloud Functions through the Admin SDK.
+    match /oauthClients/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /oauthRequests/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /oauthCodes/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /oauthGrants/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /oauthTokens/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /assistantUsage/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /assistantRateLimits/{document=**} {
       allow read, write: if false;
     }
   }

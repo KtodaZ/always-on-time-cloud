@@ -33,10 +33,12 @@ them; how they work, how to check a file yourself, and their limits:
 | Travel routes | [`functions/travel-route*.js`](functions/travel-route.js) | Start/destination coordinates and times for one route request, forwarded to TomTom or Google Routes. Not stored; only a per-installation daily counter is kept, and it expires. |
 | Feedback | [`functions/index.js`](functions/index.js), [`feedback-notification.js`](functions/feedback-notification.js), [`storage.rules`](storage.rules) | Feedback text, contact email, optional screenshots and an optional redacted diagnostics file. The contact email is never included in the developer notification. |
 | iOS calendar refresh relay | [`functions/ios-push-*.js`](functions/ios-push-service.js), [protocol](docs/IOS_PUSH_PROTOCOL.md) | APNs token, hashed install secret, hashed alarm and subscription IDs with times. Never OAuth tokens, event titles, calendar IDs or meeting links. |
-| Privacy policy and account pages | [`account-web/`](account-web/) | The published [privacy policy](https://always-on-time-zombit-2026.web.app/privacy-policy.html) and account deletion page. |
+| AI assistant connector (optional) | [`functions/assistant-*.js`](functions/assistant-functions.js), [`account-web/connect/`](account-web/connect/index.html), [docs](docs/ASSISTANT_CONNECTOR.md) | Only after the user connects Claude or ChatGPT: a snapshot of upcoming event titles, times, calendar names and alarms shared by the phone, a 30-day log of the assistant's changes, and hashed OAuth tokens. Deleted when the last assistant disconnects. |
+| Account pages | [`account-web/`](account-web/) | The account deletion page, the assistant consent page and the App Link fallback, served at `https://alwaysontime.zombit.io`. The [privacy policy](https://zombit.io/always-on-time/privacy/) is published on the Zombit Studios website. |
 
-More detail: [feedback](docs/FEEDBACK.md), [travel routes](docs/TRAVEL_ROUTES.md),
-[iOS relay protocol](docs/IOS_PUSH_PROTOCOL.md), [privacy policy updates](docs/PRIVACY_POLICY.md),
+More detail: [assistant connector](docs/ASSISTANT_CONNECTOR.md) and its
+[protocol](docs/ASSISTANT_PROTOCOL.md), [feedback](docs/FEEDBACK.md), [travel routes](docs/TRAVEL_ROUTES.md),
+[iOS relay protocol](docs/IOS_PUSH_PROTOCOL.md), [privacy policy](docs/PRIVACY_POLICY.md),
 [deploying](docs/DEPLOYING.md).
 
 ## Tests
@@ -45,15 +47,15 @@ More detail: [feedback](docs/FEEDBACK.md), [travel routes](docs/TRAVEL_ROUTES.md
 npm ci && npm ci --prefix functions && npm test
 ```
 
-Security rules, the Firestore store and account deletion also have emulator tests (Java 21 and the
+Security rules, the Firestore store, account deletion and the assistant connector also have emulator tests (Java 21 and the
 Firebase CLI). The emulators load every function, so give the declared secrets and params stand-in
 values first:
 
 ```sh
 printf 'APNS_AUTH_KEY_P8=x\nFEEDBACK_DISCORD_WEBHOOK_URL=http://127.0.0.1:9/\nTOMTOM_API_KEY=x\nTRAVEL_ROUTE_API_KEY=x\n' > functions/.secret.local
 cp functions/.env.always-on-time-zombit-2026 functions/.env.local
-npx firebase emulators:exec --only firestore --project demo-account-sync 'node functions/testing/account-sync-rules.cjs && npm --prefix functions test'
-npx firebase emulators:exec --only auth,firestore,functions --project demo-account-sync 'node functions/testing/account-delete.cjs'
+npx firebase emulators:exec --only firestore --project demo-account-sync 'node functions/testing/account-sync-rules.cjs && node functions/testing/assistant-rules.cjs && npm --prefix functions test'
+npx firebase emulators:exec --only auth,firestore,functions,hosting --project demo-account-sync 'node functions/testing/account-delete.cjs && node functions/testing/assistant-e2e.cjs'
 ```
 
 The [Test workflow](.github/workflows/test.yml) runs all of these on every push and pull request.

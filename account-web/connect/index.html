@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Connect an assistant · Always On Time</title>
+<link rel="stylesheet" href="/account.css">
+<main>
+  <a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Always On Time</a>
+  <h1 id="heading">Connect an assistant</h1>
+  <p id="intro">Checking this connection request…</p>
+  <section id="details" hidden>
+    <p id="unverified" class="warning" hidden>This app isn’t Claude or ChatGPT, and we can’t confirm who runs it. Only approve if you set it up yourself and trust <strong id="unverified-host"></strong>.</p>
+    <p><strong id="client"></strong> wants to manage your Always On Time alarms. After you approve, you return to <strong id="redirect-host"></strong>.</p>
+    <dl class="disclosure">
+      <dt>What it can see</dt>
+      <dd>Event titles, times and calendar names for the next 30 days, your alarm settings, and 14 days of alarm history.</dd>
+      <dt>What it never sees</dt>
+      <dd>Event descriptions, attendees, locations, meeting links, your Google account, email or files.</dd>
+      <dt>What it can change</dt>
+      <dd>Your alarm settings only, never your calendar.</dd>
+      <dt>Where it goes</dt>
+      <dd>The assistant you choose receives what it reads, and its provider’s privacy policy then applies. We keep a copy in your account only so the assistant can read it.</dd>
+      <dt>How to stop</dt>
+      <dd>Disconnect anytime in the app (Settings › Connected assistants) or in your assistant; the copy is deleted immediately.</dd>
+    </dl>
+  </section>
+  <p id="status" role="status" aria-live="polite"></p>
+  <button id="sign-in" class="google" hidden><img src="/google-g.svg" alt="">Sign in with Google</button>
+  <section id="account" hidden>
+    <p>Signed in as <strong id="email"></strong> · <button id="sign-out" class="link">Use another account</button></p>
+    <div id="not-ready" hidden>
+      <p>This Google account isn’t set up in Always On Time yet. Install the app, sign in with this account under Settings › Account &amp; sync, then start connecting again from your assistant.</p>
+      <p><a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Get Always On Time on Google Play</a></p>
+    </div>
+  </section>
+  <div class="actions"><button id="approve" class="primary" hidden>Approve</button><button id="cancel" hidden>Cancel</button></div>
+  <p class="secondary">Sign in with the Google account you use in the Always On Time app. Signing in here does not give the assistant your Google account or calendar. <a href="https://zombit.io/always-on-time/privacy/">Privacy policy</a></p>
+</main>
+<script type="module" src="/connect/connect.js"></script>
+</html>

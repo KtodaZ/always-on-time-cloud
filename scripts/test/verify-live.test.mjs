@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { DEPLOY_ACCOUNT, attestationCommit, classifyAuditEntry, describePrincipal, expectedHostingPaths } from "../verify-live.mjs";
@@ -20,6 +24,17 @@ test("deploys by a person outside CI are failures", () => {
   ]) assert.equal(classifyAuditEntry(entry(method, person)), "deploy", method);
   assert.equal(classifyAuditEntry({ protoPayload: { serviceName: "firebasehosting.googleapis.com",
     methodName: "google.firebase.hosting.v1beta1.FirebaseHosting.CreateRelease", authenticationInfo: { principalEmail: person } } }), "deploy");
+});
+
+test("custom domain changes are listed, not failed", () => {
+  const hosting = (methodName) => classifyAuditEntry({ protoPayload: { serviceName: "firebasehosting.googleapis.com", methodName,
+    authenticationInfo: { principalEmail: person } } });
+  for (const method of ["CreateCustomDomain", "UpdateCustomDomain", "DeleteCustomDomain", "CreateDomain", "UpdateDomain"]) {
+    assert.equal(hosting(`google.firebase.hosting.v1beta1.FirebaseHosting.${method}`), "config", method);
+  }
+  for (const method of ["CreateVersion", "UpdateVersion", "CreateChannel", "CreateSite", "UpdateSiteConfig"]) {
+    assert.equal(hosting(`google.firebase.hosting.v1beta1.FirebaseHosting.${method}`), "deploy", method);
+  }
 });
 
 test("the deploy account is expected only when CI uses it for this repository", () => {
@@ -72,8 +87,28 @@ test("reports never show a person's email", () => {
 });
 
 test("hosting expects every account-web file except ignored ones", () => {
-  assert.deepEqual(expectedHostingPaths(["account-web/index.html", "account-web/.DS_Store", "account-web/a/b.js", "README.md"]),
-    ["/index.html", "/a/b.js"]);
+  assert.deepEqual(expectedHostingPaths(["account-web/index.html", "account-web/.DS_Store", "account-web/a/b.js", "README.md",
+    "account-web/.well-known/assetlinks.json", "account-web/.git/config", "account-web/a/.env"]),
+  ["/index.html", "/a/b.js", "/.well-known/assetlinks.json"]);
+});
+
+test("the verifier expects exactly the files firebase deploy uploads with firebase.json's ignore list", () => {
+  // Runs the Firebase CLI's own file listing over a sample tree, so a change to either side fails here.
+  const { listFiles } = createRequire(import.meta.url)("firebase-tools/lib/listFiles");
+  const { ignore } = JSON.parse(readFileSync(new URL("../../firebase.json", import.meta.url), "utf8")).hosting;
+  const sample = [
+    "index.html", "firebase.json", ".DS_Store", ".env", "a/.env", "a/b.js", ".well-known/assetlinks.json", ".well-known/.hidden",
+    ".git/config", "a/.hidden/x.js", "node_modules/x/y.js", "open/index.html", "connect/connect.js", ".well-knownx/z",
+  ];
+  const root = mkdtempSync(join(tmpdir(), "hosting-"));
+  for (const path of sample) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), "x");
+  }
+  const deployed = listFiles(root, ignore).map((path) => `/${path}`).sort();
+  assert.deepEqual(deployed, expectedHostingPaths(sample.map((path) => `account-web/${path}`)).sort());
+  assert.ok(deployed.includes("/.well-known/assetlinks.json"));
+  assert.equal(deployed.some((path) => path.includes("/.env") || path.includes(".git")), false);
 });
 
 test("the commit and run come from the attestation's provenance", () => {
