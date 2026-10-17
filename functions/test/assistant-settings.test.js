@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const test = require("node:test");
 
-const { PREFERENCE_NAMES } = require("../assistant-records");
+const { PREFERENCE_NAMES, RETIRED_PREFERENCES } = require("../assistant-records");
 const { SETTINGS, changeAlert } = require("../assistant-settings");
 
 const { preferences } = require(path.join(__dirname, "../../docs/assistant-protocol-vectors.json"));
@@ -28,6 +28,12 @@ test("every assistant setting is a synced preference and accepts exactly the sha
       assert.deepEqual(schema.options, preferences.strings[record].values, field);
     }
   }
+});
+
+test("retired preferences stay allowed but aren't assistant settings", () => {
+  assert.ok(PREFERENCE_NAMES.has("override_dnd_for_priority"));
+  assert.ok(RETIRED_PREFERENCES.has("override_dnd_for_priority"));
+  for (const setting of Object.values(SETTINGS)) assert.equal(RETIRED_PREFERENCES.has(setting.record), false, setting.record);
 });
 
 test("alerts flag only changes that could stop alarms from ringing or being heard", () => {

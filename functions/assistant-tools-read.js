@@ -8,7 +8,9 @@ const z = require("zod");
 const {
   DAY_MS, HISTORY_DAYS, SNAPSHOT_WINDOW_DAYS, readDevices, readValues, refs, toMillis,
 } = require("./assistant-data");
-const { PAUSED_UNTIL, PREFERENCE_NAMES, isRecordId } = require("./assistant-records");
+const {
+  PAUSED_UNTIL, PREFERENCE_NAMES, RETIRED_PREFERENCES, isRecordId,
+} = require("./assistant-records");
 const {
   SETTINGS, describePause, leadTimesText, parseStored, tidyLeadTimes,
 } = require("./assistant-settings");
@@ -229,6 +231,11 @@ const TOOLS = [
     scope: "read",
     async handler(ctx) {
       const snapshot = await requireSnapshot(ctx);
+      // Ring-through is an Android-only calendar override that the snapshot doesn't carry, so it
+      // comes from the calendar's synced record.
+      const keys = [...new Set(snapshot.calendars.map((calendar) => calendar.key).filter(Boolean))];
+      const records = await readValues(ctx.db, ctx.uid, keys);
+      const ringsThrough = (calendar) => Boolean(calendar.key) && parseStored(records[calendar.key])?.overrides?.ringThroughDnd === true;
       const lines = [basis(snapshot, ctx.now())];
       const kind = (type) => (type === "com.google" ? "Google" : type === "LOCAL" || !type ? "local" : /exchange/i.test(type) ? "Exchange" : "other");
       for (const calendar of snapshot.calendars) {
@@ -237,6 +244,7 @@ const TOOLS = [
         if (calendar.enabled === false) settings.push("alarms off");
         if (calendar.rsvpFilter) settings.push(`invitations: ${calendar.rsvpFilter.replace(/_/g, " ")}`);
         if (calendar.includeAllDay !== null) settings.push(`all-day events ${calendar.includeAllDay ? "ring" : "skipped"}`);
+        if (ringsThrough(calendar)) settings.push("rings through Do Not Disturb");
         const key = calendar.key ? ` [${shortKey(calendar.key)}]` : " [local only: change it in the app]";
         lines.push(`- ${quoted(calendar.name || "Unnamed")} (${kind(calendar.accountType)}): ${calendar.watched ? "watched" : "not watched"}${settings.length ? `; ${settings.join("; ")}` : ""}${key}`);
       }
@@ -246,7 +254,7 @@ const TOOLS = [
         calendars: snapshot.calendars.map((calendar) => ({
           key: calendar.key, name: calendar.name || null, accountType: calendar.accountType, watched: calendar.watched,
           leadTimes: calendar.leadTimes, enabled: calendar.enabled, rsvpFilter: calendar.rsvpFilter,
-          includeAllDay: calendar.includeAllDay, changeable: Boolean(calendar.key),
+          includeAllDay: calendar.includeAllDay, ringsThroughDoNotDisturb: ringsThrough(calendar), changeable: Boolean(calendar.key),
         })),
       });
     },
@@ -259,7 +267,7 @@ const TOOLS = [
     annotations: READ,
     scope: "read",
     async handler(ctx) {
-      const recordIds = [...PREFERENCE_NAMES].map((name) => `p_${name}`);
+      const recordIds = [...PREFERENCE_NAMES].filter((name) => !RETIRED_PREFERENCES.has(name)).map((name) => `p_${name}`);
       const values = await readValues(ctx.db, ctx.uid, recordIds);
       const settings = {};
       const lines = [];

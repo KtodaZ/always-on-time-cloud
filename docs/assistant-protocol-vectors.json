@@ -16,6 +16,7 @@
     {"record": "c", "description": "Calendar with overrides, fields reordered", "value": {"overrides": {"rsvpFilter": "accepted_only", "leadTimes": [1440, 60]}, "selected": false}, "canonical": "{\"selected\":false,\"overrides\":{\"leadTimes\":[60,1440],\"rsvpFilter\":\"accepted_only\"}}"},
     {"record": "c", "description": "Calendar with nothing set", "value": {"selected": null, "overrides": null}, "canonical": "{}"},
     {"record": "c", "description": "Calendar travel lead times, ascending", "value": {"selected": true, "overrides": {"travelLeadTimes": [10, 0]}}, "canonical": "{\"selected\":true,\"overrides\":{\"travelLeadTimes\":[0,10]}}"},
+    {"record": "c", "description": "Calendar rings through Do Not Disturb (Android only), after the other overrides", "value": {"overrides": {"ringThroughDnd": true, "leadTimes": [10]}}, "canonical": "{\"overrides\":{\"leadTimes\":[10],\"ringThroughDnd\":true}}"},
     {"record": "p", "name": "alarm_volume", "description": "Integer preference", "value": 40, "canonical": "40"},
     {"record": "p", "name": "respect_dnd", "description": "Boolean preference", "value": false, "canonical": "false"},
     {"record": "p", "name": "theme_preference", "description": "String preference", "value": "dark", "canonical": "\"dark\""},

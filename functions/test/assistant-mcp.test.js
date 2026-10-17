@@ -330,6 +330,36 @@ test("an unconfirmed change says it will apply when the phone is online", async 
   });
 });
 
+test("a calendar rings through Do Not Disturb as the override ringThroughDnd, and the retired app-wide setting is gone", async () => {
+  const { db, handler, token } = setup();
+  const stored = () => db.documents.get(`accounts/alice/values/${WORK}`)?.payload;
+  await withServer(handler, async ({ call }) => {
+    db.documents.set(`accounts/alice/values/${WORK}`, { payload: '{"selected":true,"overrides":{"leadTimes":[0,10],"futureField":"keep"}}' });
+    const on = await call(token, "set_calendar", { calendar: "Work", ringThroughDoNotDisturb: true });
+    assert.match(on.text, /rings through Do Not Disturb once Respect Do Not Disturb is on \(it is off/);
+    assert.equal(on.structuredContent.alert, undefined);
+    assert.equal(stored(), '{"selected":true,"overrides":{"leadTimes":[0,10],"ringThroughDnd":true,"futureField":"keep"}}');
+    const listed = await call(token, "list_calendars");
+    assert.match(listed.text, /"Work" \(Google\): watched; .*; rings through Do Not Disturb \[/);
+    assert.deepEqual(listed.structuredContent.calendars.map((calendar) => calendar.ringsThroughDoNotDisturb), [true, false, false]);
+
+    db.documents.set("accounts/alice/values/p_respect_dnd", { payload: "true" });
+    db.documents.set(`accounts/alice/values/${WORK}`, { payload: '{"selected":true}' });
+    assert.match((await call(token, "set_calendar", { calendar: "Work", ringThroughDoNotDisturb: true })).text, /Set "Work": rings through Do Not Disturb\./);
+    // Off is stored as no override, like the app; nothing left means no overrides object.
+    const off = await call(token, "set_calendar", { calendar: "Work", ringThroughDoNotDisturb: false });
+    assert.match(off.text, /silent during Do Not Disturb while Respect Do Not Disturb is on/);
+    assert.equal(stored(), '{"selected":true}');
+    assert.equal((await call(token, "list_calendars")).structuredContent.calendars[0].ringsThroughDoNotDisturb, false);
+
+    db.documents.set("accounts/alice/values/p_override_dnd_for_priority", { payload: "true" });
+    const settings = await call(token, "get_settings");
+    assert.equal("overrideDndForPriority" in settings.structuredContent.settings, false);
+    assert.equal("p_override_dnd_for_priority" in settings.structuredContent.raw, false);
+    assert.equal((await call(token, "update_settings", { settings: { overrideDndForPriority: true } })).isError, true);
+  });
+});
+
 test("series, calendar and settings changes write the right records and refuse what can't change", async () => {
   const { db, handler, token } = setup();
   await withServer(handler, async ({ call }) => {

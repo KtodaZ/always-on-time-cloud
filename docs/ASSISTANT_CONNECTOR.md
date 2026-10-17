@@ -91,7 +91,7 @@ parameter (RFC 9207).
 | `get_alarm_history` | What happened to alarms in the last 1–14 days |
 | `set_event_alarms` | Lead times for one occurrence, off, or reset |
 | `set_series_alarms` | Lead times for every occurrence of a recurring event, off, or reset |
-| `set_calendar` | Watch a calendar or not, its lead times, invitation filter (all-day events are an app-wide setting) |
+| `set_calendar` | Watch a calendar or not, its lead times, invitation filter, whether it rings through Do Not Disturb (all-day events are an app-wide setting) |
 | `update_settings` | App-wide settings |
 | `pause_alarms` / `resume_alarms` | Pause every alarm until a time or until resumed |
 | `undo` | Reverses an earlier change from the last 30 days unless those settings changed since |
