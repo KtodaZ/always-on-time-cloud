@@ -19,10 +19,12 @@ test('deletion blocks stale writes, then deletes data, assistant connections and
   db.documents.set('accounts/user/values/p_alarm_volume', { payload: '50' });
   db.documents.set('accounts/user/history/h1', { payload: '{}', createdAt: now });
   db.documents.set('accounts/user/assistant/state', { connected: true, connections: 1 });
+  // The pseudonym that names the account in request logs must go with it.
+  db.documents.set('accounts/user/assistant/log', { logId: 'log_abcdefghijklmnop', createdAt: new Date(now) });
   db.documents.set('accounts/user/assistantDevices/d1', { platform: 'android' });
   db.documents.set('accounts/user/assistantSnapshots/d1', { payload: '{}' });
   db.documents.set('accounts/user/assistantActivity/ch_1', { summary: 'x' });
-  db.documents.set('oauthGrants/g1', { uid: 'user', clientId: 'c' });
+  db.documents.set('oauthGrants/g1', { uid: 'user', clientId: 'c', logId: 'log_abcdefghijklmnop' });
   db.documents.set('oauthTokens/t1', { grantId: 'g1', uid: 'user' });
   db.documents.set('oauthGrants/g2', { uid: 'someone-else', clientId: 'c' });
   db.documents.set('oauthTokens/t2', { grantId: 'g2', uid: 'someone-else' });
@@ -34,6 +36,7 @@ test('deletion blocks stale writes, then deletes data, assistant connections and
   } }, 'user');
   assert.deepEqual(deleted, ['user']);
   assert.deepEqual(Object.keys(db.dump()).sort(), ['accounts/user', 'oauthGrants/g2', 'oauthTokens/t2']);
+  assert.ok(!JSON.stringify(db.dump()).includes('log_abcdefghijklmnop'), 'no copy of the logId survives');
 });
 
 test('history pruning uses fourteen-day cutoff and batches until empty', async () => {

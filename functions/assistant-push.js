@@ -30,10 +30,11 @@ async function removeDevice(db, uid, deviceId, failedToken) {
 
 /**
  * Sends `{type, ...data}` to the devices of `uid` that have an FCM token (at most MAX_DEVICES).
+ * Failures are logged under `logId` (the account's log pseudonym), never the uid.
  * Returns which devices it reached, which failed (with `errors[deviceId]` = FCM error code) and
  * which cannot receive messages (no token, e.g. iOS for now).
  */
-async function sendToDevices({ db, messaging, logger }, uid, type, data = {}, devices = null) {
+async function sendToDevices({ db, messaging, logger, logId = null }, uid, type, data = {}, devices = null) {
   const list = (devices ?? await readDevices(db, uid)).slice(0, MAX_DEVICES);
   const withToken = list.filter((device) => typeof device.fcmToken === "string" && device.fcmToken.length > 0);
   const result = { sent: [], failed: [], removed: [], errors: {}, noToken: list.filter((device) => !withToken.includes(device)) };
@@ -55,8 +56,8 @@ async function sendToDevices({ db, messaging, logger }, uid, type, data = {}, de
     result.errors[device.id] = code;
     if (PERMANENT_ERRORS.has(code) && await removeDevice(db, uid, device.id, device.fcmToken)) {
       result.removed.push(device);
-      logEvent(logger, "info", "push.invalid_token_removed", { uid, deviceId: device.id, type, errorCode: code });
-    } else logEvent(logger, "warn", "push.failed", { uid, deviceId: device.id, type, errorCode: code });
+      logEvent(logger, "info", "push.invalid_token_removed", { logId, deviceId: device.id, type, errorCode: code });
+    } else logEvent(logger, "warn", "push.failed", { logId, deviceId: device.id, type, errorCode: code });
   }));
   return result;
 }

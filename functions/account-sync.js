@@ -1,4 +1,4 @@
-const { deleteConnectorData, refs } = require('./assistant-data');
+const { deleteConnectorData } = require('./assistant-data');
 const { deleteAllGrants } = require('./assistant-oauth');
 
 const HISTORY_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
@@ -26,7 +26,9 @@ async function deleteAccountData(db, auth, uid) {
   // Assistant connections: revoke every grant, then remove what the connector stored.
   await deleteAllGrants(db, uid);
   await deleteConnectorData(db, uid);
-  await refs.state(db, uid).delete();
+  // assistant/state and assistant/log: removing the logId leaves the connector's request logs
+  // (which name the account only by it) with nothing that ties them to this account.
+  await db.recursiveDelete(root.collection('assistant'));
   await auth.deleteUser(uid);
 }
 

@@ -44,6 +44,8 @@ const account = (db, uid) => {
 const refs = {
   account,
   state: (db, uid) => account(db, uid).collection("assistant").doc("state"),
+  // Server-only (clients can read only assistant/state): the account's logId.
+  log: (db, uid) => account(db, uid).collection("assistant").doc("log"),
   devices: (db, uid) => account(db, uid).collection("assistantDevices"),
   snapshots: (db, uid) => account(db, uid).collection("assistantSnapshots"),
   activity: (db, uid) => account(db, uid).collection("assistantActivity"),
@@ -61,6 +63,38 @@ function toMillis(value) {
 }
 
 const randomId = (prefix, bytes = 16) => `${prefix}${randomBytes(bytes).toString("base64url")}`;
+
+// logIds are "log_" + 12 random bytes in base64url. Debugging log entries name the account by its
+// logId, never its uid (assistant-log.js); deleting accounts/{uid}/assistant/log with the account
+// leaves nothing that ties those entries back to it.
+const LOG_ID_PREFIX = "log_";
+const LOG_ID_BYTES = 12;
+
+/**
+ * Inside `transaction`, returns the account's logId, creating it if needed, or null when the
+ * account isn't active (deleted or never set up), so a request racing account deletion can't
+ * recreate it. Reads two documents, so call it after the transaction's other reads and before its
+ * writes.
+ */
+async function ensureLogId(transaction, db, uid, now = Date.now()) {
+  const [root, log] = await Promise.all([transaction.get(refs.account(db, uid)), transaction.get(refs.log(db, uid))]);
+  if (!root.exists || root.data().active !== true) return null;
+  const existing = log.exists ? log.data().logId : null;
+  if (typeof existing === "string" && existing.startsWith(LOG_ID_PREFIX)) return existing;
+  const logId = randomId(LOG_ID_PREFIX, LOG_ID_BYTES);
+  transaction.set(refs.log(db, uid), { logId, createdAt: new Date(now) });
+  return logId;
+}
+
+/** The account's logId if it has one, else null. Never creates one and never throws. */
+async function readLogId(db, uid) {
+  try {
+    const doc = await refs.log(db, uid).get();
+    return doc.exists && typeof doc.data().logId === "string" ? doc.data().logId : null;
+  } catch {
+    return null;
+  }
+}
 
 /** The account's most recently updated phones (at most MAX_DEVICES; the rules require updatedAt). */
 async function readDevices(db, uid) {
@@ -215,9 +249,11 @@ module.exports = {
   UNDO_DAYS,
   deleteCollection,
   deleteConnectorData,
+  ensureLogId,
   isChangeId,
   randomId,
   readDevices,
+  readLogId,
   readSnapshots,
   readValues,
   recordChange,

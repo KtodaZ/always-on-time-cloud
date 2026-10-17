@@ -136,12 +136,13 @@ No header identifies a person reliably here, so the overall caps are what bound 
 | --- | --- | --- |
 | Snapshot of upcoming events and alarms (titles, times, calendar names), device model label, FCM token | `accounts/{uid}/assistantSnapshots`, `assistantDevices` | Until the last assistant disconnects, sign-out or account deletion |
 | Change log (summary, before/after settings) | `accounts/{uid}/assistantActivity` | 30 days, or until the last assistant disconnects |
-| Connection: assistant name, whether it is verified, the host its codes go to, scopes, created/last used | `oauthGrants` | Until revoked, or 90 days idle |
+| Connection: assistant name, whether it is verified, the host its codes go to, scopes, created/last used, the account's `logId` | `oauthGrants` | Until revoked, or 90 days idle |
+| `logId`: a random pseudonym that names the account in request logs | `accounts/{uid}/assistant/log` | Until account deletion |
 | Token and code hashes | `oauthTokens`, `oauthCodes`, `oauthRequests` | Expiry (TTL) |
 | Registered assistant clients (public metadata) | `oauthClients` | 90 days unused (TTL) |
 | Rate limit counts (document ID is a hash of the connection or IP and the time window) | `assistantRateLimits` | About an hour (TTL) |
 | Anonymous daily totals: connections, tool calls and errors, setup tests, undos | `assistantUsage` | Kept; no user identifiers |
-| Request logs: action, ids (uid, grant, change, request, ping, record, device), outcome, duration | Cloud Logging `_Default` bucket | 30 days |
+| Request logs: action, the account's `logId` (never its uid or email), random ids (grant, change, request, ping, record, device), outcome, duration | Cloud Logging `_Default` bucket | 30 days; account deletion deletes the `logId` and the records those ids pointed to, so remaining entries can't be tied to the person |
 
 The Google account email is read from Firebase Auth only to match Google Calendar IDs to calendar
 keys; it is not stored or given to the assistant.
@@ -154,24 +155,33 @@ connector is offered in the app.
 
 Every connector action writes one structured line through `firebase-functions`' logger
 ([`assistant-log.js`](../functions/assistant-log.js)), so each field is a `jsonPayload` field in
-Cloud Logging. `assistantEvent` names the action:
+Cloud Logging. `assistantEvent` names the action.
 
-| `assistantEvent` | Fields besides `uid` |
+Entries name the account by `logId` (`log_` and 16 random characters), never by the Firebase uid or
+an email address. The account's first assistant connection creates it in
+`accounts/{uid}/assistant/log` and copies it onto each connection (`oauthGrants`), so logging needs
+no extra read; it is the same across reconnects. Account deletion deletes that document and the
+connections, after which nothing links the account's entries (kept for the bucket's retention) to
+it. Cloud Logging can't delete single entries, which is why the uid is never written. Error messages
+are logged with `accounts/<uid>` paths and email addresses replaced.
+
+| `assistantEvent` | Fields besides `logId` |
 | --- | --- |
 | `tool.call` | `tool`, `outcome` (`ok`, `no_phone`, `tool_error`, `unexpected_error`), `durationMs`, `grantId`, `client`, and when they apply `changeId`, `undoneChangeId`, `recordIds`, `requestId`, `pingId`, `status`, `push` (`{type, devices: [{deviceId, result, errorCode}]}`) |
-| `oauth.client_metadata`, `oauth.register` | CIMD fetch or DCR registration: `clientId`, `client`, `outcome`, `reason` |
-| `oauth.authorize`, `oauth.consent` | `clientId`, `outcome` (`consent`, `approved`, `denied`, or an error code) |
-| `oauth.code_exchange`, `oauth.refresh`, `oauth.revoke` | `grantId`, `clientId`, `outcome`, `reason` when refused, `replacedGrantIds`, `revokedGrantId` |
+| `oauth.client_metadata`, `oauth.register` | CIMD fetch or DCR registration (no `logId`): `clientId`, `client`, `outcome`, `reason` |
+| `oauth.authorize`, `oauth.consent` | `clientId`, `outcome` (`consent`, `approved`, `denied`, or an error code); only `oauth.consent` `approved` has a `logId` |
+| `oauth.code_exchange`, `oauth.refresh`, `oauth.revoke` | `grantId`, `clientId`, `outcome`, `reason` when refused, `replacedGrantIds`, `revokedGrantId`; `oauth.revoke` has only the `grantId` |
 | `oauth.token_rejected`, `oauth.error` | `reason` or `errorCode` only |
 | `connection.revoked`, `prune` | `grantId`, `reason` (`app`, `client`, `idle`, `code_reuse`, `refresh_reuse`), `remaining` / `revoked` |
 | `callable.undo`, `callable.list_connections`, `callable.revoke_connection` | as `tool.call`, or `count` / `revoked` |
 | `push.failed`, `push.invalid_token_removed`, `push.state_failed` | `deviceId`, `type`, `errorCode` |
 | `push.after_commit_failed` | A change was saved but reading devices or pushing failed: `changeId`, `errorCode` |
 | `grant.touch_failed`, `oauth.client_touch_failed` | Updating a connection's or client's last-used time failed: `grantId` or `clientId`, `errorName`, `errorCode` |
+| `grant.log_id_failed` | A connection made before logIds existed couldn't get one; its request went ahead without: `grantId`, `errorCode` |
 | `account_emails_failed` | Reading the account's emails (to match Google Calendar IDs) failed: `errorCode` |
 
 The helper writes only an allowlist of fields: never event titles, summaries, settings payloads,
-tool arguments, tokens, codes, PKCE values, redirect URIs or emails. Tool errors log their outcome,
+tool arguments, tokens, codes, PKCE values, redirect URIs, emails or uids. Tool errors log their outcome,
 not their message (it can quote a title).
 
 The phone logs the same ids with an `Assistant:` prefix (the app's `docs/ASSISTANT_MCP.md`
@@ -183,8 +193,13 @@ jsonPayload.changeId="ch_…" OR jsonPayload.undoneChangeId="ch_…"
 jsonPayload.requestId="req_…"
 jsonPayload.pingId="ping_…"
 jsonPayload.push.devices.deviceId="<deviceId>" OR jsonPayload.deviceId="<deviceId>"
-jsonPayload.uid="<uid>" AND jsonPayload.assistantEvent:*
+jsonPayload.logId="log_…" AND jsonPayload.assistantEvent:*
 ```
+
+To find a user's entries from their account, look up the `logId` in Firestore at
+`accounts/{uid}/assistant/log` (or on any of their `oauthGrants` documents) and filter on it as
+above. Accounts that have never connected an assistant have no `logId`. Once the account is deleted
+there is nothing to look up, which is the point.
 
 Logs stay in the `_Default` bucket for its 30-day retention.
 

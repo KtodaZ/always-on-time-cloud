@@ -7,10 +7,13 @@
 // "Debugging").
 //
 // Only the fields below are written. Anything else a caller passes is dropped, so event titles,
-// summaries, payloads, tokens, codes and redirect URIs cannot end up here by accident.
+// summaries, payloads, tokens, codes, redirect URIs and the Firebase uid cannot end up here by
+// accident. An account is named by its logId instead: a random pseudonym kept in
+// accounts/{uid}/assistant/log (assistant-data.js), which account deletion removes, so entries
+// that outlive an account can no longer be tied to it.
 
 const FIELDS = [
-  "uid", "grantId", "clientId", "client", "assistant", "tool", "outcome", "reason", "durationMs",
+  "logId", "grantId", "clientId", "client", "assistant", "tool", "outcome", "reason", "durationMs",
   "changeId", "undoneChangeId", "requestId", "pingId", "recordIds", "push", "deviceId", "type",
   "errorName", "errorCode", "errorMessage", "kind", "scopes", "remaining", "connections",
   "replacedGrantIds", "revokedGrantId", "revoked", "count", "path", "status",
@@ -26,13 +29,23 @@ function clientIdForLog(clientId) {
 }
 
 /**
+ * An error message without account identifiers: Firestore errors can quote a document path
+ * (accounts/{uid}/...), and other errors could quote an email address.
+ */
+function scrubMessage(message) {
+  return message
+    .replace(/accounts\/[^/\s"'`]+/g, "accounts/{uid}")
+    .replace(/[^\s@"'`<>()]+@[^\s@"'`<>()]+\.[A-Za-z]{2,}/g, "{email}");
+}
+
+/**
  * Error details that are safe to log. JSON parse errors quote the text they failed on (which can
  * be a payload), so their message is left out.
  */
 function errorFields(error) {
   const fields = { errorName: error?.name ?? typeof error };
   if (error?.code !== undefined) fields.errorCode = String(error.code).slice(0, 80);
-  if (!(error instanceof SyntaxError) && typeof error?.message === "string") fields.errorMessage = error.message.slice(0, MAX_STRING);
+  if (!(error instanceof SyntaxError) && typeof error?.message === "string") fields.errorMessage = scrubMessage(error.message.slice(0, 1000)).slice(0, MAX_STRING);
   return fields;
 }
 
@@ -70,4 +83,4 @@ function logEvent(logger, level, event, fields = {}) {
   }
 }
 
-module.exports = { FIELDS, clientIdForLog, deliveryFields, errorFields, logEvent };
+module.exports = { FIELDS, clientIdForLog, deliveryFields, errorFields, logEvent, scrubMessage };

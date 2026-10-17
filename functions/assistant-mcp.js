@@ -7,7 +7,7 @@
 const { clientKeys, createInstanceLimiters } = require("./assistant-limits");
 const { COLLECTIONS } = require("./assistant-data");
 const { errorFields, logEvent } = require("./assistant-log");
-const { LAST_USED_RESOLUTION_MS, SCOPES, movedUrl, urls, verifyAccessToken } = require("./assistant-oauth");
+const { LAST_USED_RESOLUTION_MS, SCOPES, grantLogId, movedUrl, urls, verifyAccessToken } = require("./assistant-oauth");
 const { ToolError } = require("./assistant-snapshot");
 const { createToolContext } = require("./assistant-tool-context");
 const { INSTRUCTIONS, TOOLS, noPhone } = require("./assistant-tools");
@@ -66,7 +66,7 @@ function createMcpHandler(deps) {
     }
     if (Object.keys(update).length) {
       await db.collection(COLLECTIONS.grants).doc(grant.grantId).update(update).catch((error) => {
-        logEvent(logger, "warn", "grant.touch_failed", { uid: grant.uid, grantId: grant.grantId, ...errorFields(error) });
+        logEvent(logger, "warn", "grant.touch_failed", { logId: grant.logId, grantId: grant.grantId, ...errorFields(error) });
       });
     }
     if (Object.keys(counts).length) await usage(counts);
@@ -135,7 +135,7 @@ function createMcpHandler(deps) {
       tool: tool.name,
       outcome,
       durationMs,
-      uid: ctx.uid,
+      logId: ctx.logId,
       grantId: ctx.grant.grantId,
       client: ctx.grant.clientName,
       assistant: ctx.grant.assistant,
@@ -189,6 +189,13 @@ function createMcpHandler(deps) {
     }
     for (const [name, value] of Object.entries(CORS)) res.setHeader(name, value);
     res.setHeader("Cache-Control", "no-store");
+    if (!grant.logId) {
+      // A connection made before logIds existed gets one once; the request goes ahead without it if that fails.
+      grant.logId = await grantLogId(db, grant, now()).catch((error) => {
+        logEvent(logger, "warn", "grant.log_id_failed", { grantId: grant.grantId, ...errorFields(error) });
+        return null;
+      });
+    }
     await touch(grant);
     const server = buildServer(grant);
     const transport = new deps.sdk.StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
@@ -200,7 +207,7 @@ function createMcpHandler(deps) {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
-      logEvent(logger, "error", "mcp.request_failed", { uid: grant.uid, grantId: grant.grantId, ...errorFields(error) });
+      logEvent(logger, "error", "mcp.request_failed", { logId: grant.logId, grantId: grant.grantId, ...errorFields(error) });
       if (!res.headersSent) sendJson(res, 500, { jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
     }
   };

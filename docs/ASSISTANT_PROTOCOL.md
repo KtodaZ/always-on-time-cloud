@@ -24,6 +24,7 @@ Connector data:
 | Path | Written by | Read by | Content |
 | --- | --- | --- | --- |
 | `accounts/{uid}/assistant/state` | server | owner | `connected` (bool), `connections` (int), `updatedAt` (timestamp) |
+| `accounts/{uid}/assistant/log` | server | server | `logId`: the pseudonym that names the account in request logs (no client access) |
 | `accounts/{uid}/assistantDevices/{deviceId}` | owner | owner, server | see Devices |
 | `accounts/{uid}/assistantSnapshots/{deviceId}` | owner | owner, server | see Snapshot |
 | `accounts/{uid}/assistantActivity/{changeId}` | server | owner | see Activity |

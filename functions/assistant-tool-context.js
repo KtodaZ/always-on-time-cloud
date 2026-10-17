@@ -16,9 +16,10 @@ const { ToolError, appLink, normalizeSnapshot } = require("./assistant-snapshot"
 const POLL_MS = 1500;
 
 /**
- * `deps`: db, uid, grant ({grantId, clientName, assistant, scopes, setupConfirmedAt}), origin, now,
- * sleep, messaging, logger, accountEmails(uid). Usage counts and the debugging trace for one call
- * collect on the context (ctx.counts, ctx.trace).
+ * `deps`: db, uid, grant ({grantId, logId, clientName, assistant, scopes, setupConfirmedAt}), logId
+ * (when the grant has none), origin, now, sleep, messaging, logger, accountEmails(uid). Usage counts
+ * and the debugging trace for one call collect on the context (ctx.counts, ctx.trace). Log lines
+ * name the account by ctx.logId, never ctx.uid (assistant-log.js).
  */
 function createToolContext(deps) {
   const { db, uid, grant, now, logger } = deps;
@@ -26,6 +27,7 @@ function createToolContext(deps) {
   const ctx = {
     db,
     uid,
+    logId: grant.logId ?? deps.logId ?? null,
     grant,
     origin: deps.origin,
     now,
@@ -83,7 +85,7 @@ async function accountEmails(ctx) {
   try {
     return await ctx.accountEmails();
   } catch (error) {
-    logEvent(ctx.logger, "warn", "account_emails_failed", { uid: ctx.uid, ...errorFields(error) });
+    logEvent(ctx.logger, "warn", "account_emails_failed", { logId: ctx.logId, ...errorFields(error) });
     return [];
   }
 }
@@ -99,7 +101,7 @@ async function push(ctx, type, data, devices) {
     ctx.count("rateLimited");
     sent = { limited: true, sent: [], failed: [], removed: [], errors: {}, noToken: devices ?? [] };
   } else {
-    sent = await sendToDevices({ db: ctx.db, messaging: ctx.messaging, logger: ctx.logger }, ctx.uid, type, data, devices);
+    sent = await sendToDevices({ db: ctx.db, messaging: ctx.messaging, logger: ctx.logger, logId: ctx.logId }, ctx.uid, type, data, devices);
   }
   trace(ctx, { push: deliveryFields(type, sent) });
   return sent;
@@ -148,7 +150,7 @@ async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite })
     else if (!devices.length) delivery = "No phone is connected yet; the change applies when Always On Time next syncs on the user's phone.";
     else delivery = "The phone couldn't be reached right now; it applies the change the next time Always On Time syncs (opening the app does it).";
   } catch (error) {
-    logEvent(ctx.logger, "warn", "push.after_commit_failed", { uid: ctx.uid, changeId, type: "sync", ...errorFields(error) });
+    logEvent(ctx.logger, "warn", "push.after_commit_failed", { logId: ctx.logId, changeId, type: "sync", ...errorFields(error) });
     trace(ctx, { status: "changed_not_notified" });
     delivery = "The phone couldn't be notified right now; it applies the change the next time Always On Time syncs (opening the app does it).";
   }
