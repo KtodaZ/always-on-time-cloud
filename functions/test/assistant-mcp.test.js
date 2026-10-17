@@ -79,9 +79,12 @@ function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabil
       }
     });
   };
+  const logs = [];
+  const logger = Object.fromEntries(["info", "warn", "error"].map((level) => [level, (message, fields) => logs.push({ level, message, ...fields })]));
   const handler = createMcpHandler({
     db,
     messaging,
+    logger,
     now: () => clock.time,
     sleep: async (ms) => {
       clock.time += ms;
@@ -105,7 +108,7 @@ function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabil
     });
     db.documents.set("accounts/alice/assistantSnapshots/11111111-1111-4111-8111-111111111111", { schemaVersion: 1, publishedAt: new Date(T0 - 5 * 60000), payload: snapshotPayload() });
   }
-  return { db, clock, messaging, handler, token, phoneState };
+  return { db, clock, messaging, handler, token, phoneState, logs };
 }
 
 async function withServer(handler, run) {
@@ -403,4 +406,55 @@ test("tokens only reach their own account, and read-only connections cannot chan
     assert.equal(refused.isError, true);
     assert.match(refused.text, /can only read/);
   });
+});
+
+test("every tool call logs one line with its ids, and never titles, arguments or payloads", async () => {
+  const { handler, token, logs, messaging } = setup();
+  const toolLines = () => logs.filter((entry) => entry.assistantEvent === "tool.call");
+  await withServer(handler, async ({ call, rpc }) => {
+    await call(token, "find_events", { query: "Team standup" });
+    const changed = await call(token, "set_event_alarms", { event: STANDUP, leadTimes: [30, 5] });
+    const { changeId } = changed.structuredContent;
+    await call(token, "confirm_change", { changeId, waitSeconds: 5 });
+    await call(token, "undo", { changeId });
+    await call(token, "test_connection", { waitSeconds: 5 });
+    await call(token, "refresh", { waitSeconds: 5 });
+    await call(token, "set_series_alarms", { event: DENTIST, leadTimes: [10] });
+    await rpc("aot_at_forged", "tools/list");
+
+    const lines = toolLines();
+    assert.deepEqual(lines.map((line) => line.tool), [
+      "find_events", "set_event_alarms", "confirm_change", "undo", "test_connection", "refresh", "set_series_alarms",
+    ]);
+    for (const line of lines) {
+      assert.equal(line.uid, "alice");
+      assert.equal(line.grantId, "g1");
+      assert.equal(line.client, "Claude");
+      assert.equal(typeof line.durationMs, "number");
+      assert.equal(line.message, `Assistant tool.call ${line.tool} ${line.outcome}`);
+    }
+    const [find, set, confirm, undo, ping, refresh, refused] = lines;
+    assert.equal(find.outcome, "ok");
+    assert.deepEqual(
+      { outcome: set.outcome, changeId: set.changeId, recordIds: set.recordIds, status: set.status, push: set.push },
+      {
+        outcome: "ok", changeId, recordIds: [STANDUP], status: "changed",
+        push: { type: "sync", devices: [{ deviceId: "11111111-1111-4111-8111-111111111111", result: "sent" }] },
+      },
+    );
+    assert.deepEqual([confirm.changeId, confirm.status], [changeId, "confirmed"]);
+    assert.equal(undo.undoneChangeId, changeId);
+    assert.match(undo.changeId, /^ch_/);
+    assert.notEqual(undo.changeId, changeId);
+    const sentPing = messaging.sent.find((message) => message.data.type === "ping");
+    assert.deepEqual([ping.pingId, ping.status, ping.push.type], [sentPing.data.pingId, "received", "ping"]);
+    const sentPublish = messaging.sent.find((message) => message.data.type === "publish");
+    assert.deepEqual([refresh.requestId, refresh.status], [sentPublish.data.requestId, "fresh"]);
+    assert.equal(refused.outcome, "tool_error");
+    assert.deepEqual(logs.find((entry) => entry.assistantEvent === "oauth.token_rejected").reason, "unknown");
+  });
+  const text = JSON.stringify(logs);
+  for (const secret of ["Team standup", "Dentist", "Pixel 9", "leadTimes", "aot_at_", "fcm-token", "alex@example.com", "doesn't repeat"]) {
+    assert.ok(!text.includes(secret), `log contains ${secret}`);
+  }
 });

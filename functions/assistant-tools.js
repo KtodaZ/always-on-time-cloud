@@ -11,6 +11,7 @@ const z = require("zod");
 const {
   RawPayload, readDevices, readSnapshots, readValues, recordChange, refs, toMillis,
 } = require("./assistant-data");
+const { deliveryFields } = require("./assistant-log");
 const { deviceName, sendToDevices } = require("./assistant-push");
 const { PAUSED_UNTIL, PREFERENCE_NAMES, isRecordId } = require("./assistant-records");
 const {
@@ -128,13 +129,22 @@ const SOURCE_TEXT = {
 
 const hasPlus = (devices) => devices.some((device) => Array.isArray(device.capabilities) && device.capabilities.includes("plus"));
 
+/** Ids and outcomes for this call's debugging log line (assistant-log.js); a no-op without one. */
+const trace = (ctx, fields) => {
+  if (ctx.trace) Object.assign(ctx.trace, fields);
+};
+
 /** Sends an FCM hint unless this connection has used up its push allowance. */
 async function push(ctx, type, data, devices) {
+  let sent;
   if (!(await ctx.pushAllowed())) {
     ctx.count("rateLimited");
-    return { limited: true, sent: [], failed: [], removed: [], noToken: devices ?? [] };
+    sent = { limited: true, sent: [], failed: [], removed: [], errors: {}, noToken: devices ?? [] };
+  } else {
+    sent = await sendToDevices({ db: ctx.db, messaging: ctx.messaging, logger: ctx.logger }, ctx.uid, type, data, devices);
   }
-  return sendToDevices({ db: ctx.db, messaging: ctx.messaging, logger: ctx.logger }, ctx.uid, type, data, devices);
+  trace(ctx, { push: deliveryFields(type, sent) });
+  return sent;
 }
 
 const names = (devices) => devices.map(deviceName).join(", ");
@@ -153,7 +163,11 @@ async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite })
   const { changeId, records } = await recordChange(ctx.db, ctx.uid, {
     recordIds, build, assistant: ctx.grant.clientName, tool, summary, now: ctx.now(), afterWrite,
   });
-  if (!changeId) return result("That is already how it's set; nothing changed.", { changed: false });
+  if (!changeId) {
+    trace(ctx, { status: "unchanged" });
+    return result("That is already how it's set; nothing changed.", { changed: false });
+  }
+  trace(ctx, { changeId, recordIds: Object.keys(records), status: "changed" });
   ctx.count("changes");
   const devices = await readDevices(ctx.db, ctx.uid);
   const sent = await push(ctx, "sync", { changeId }, devices);
@@ -757,6 +771,7 @@ const TOOLS = [
     annotations: { ...CHANGE, idempotentHint: false },
     scope: "write",
     async handler(ctx, args) {
+      trace(ctx, { undoneChangeId: args.changeId });
       const activityRef = refs.activity(ctx.db, ctx.uid).doc(args.changeId);
       const activity = await activityRef.get();
       if (!activity.exists) throw new ToolError("No change with that changeId in the last 30 days.");
@@ -799,6 +814,7 @@ const TOOLS = [
     scope: "read",
     waits: true,
     async handler(ctx, args) {
+      trace(ctx, { changeId: args.changeId });
       const activity = await refs.activity(ctx.db, ctx.uid).doc(args.changeId).get();
       if (!activity.exists) throw new ToolError("No change with that changeId in the last 30 days.");
       const writtenAt = await changeWriteTime(ctx, activity.data());
@@ -812,6 +828,7 @@ const TOOLS = [
       const waiting = snapshots.filter((snapshot) => snapshot.valuesAppliedThrough < writtenAt);
       const outcome = !snapshots.length || !applied.length ? "pending" : waiting.length ? "partial" : "confirmed";
       ctx.count(`confirms.${outcome}`);
+      trace(ctx, { status: outcome });
       let text;
       if (outcome === "confirmed") text = `Confirmed on ${applied.map((snapshot) => snapshot.device).join(", ")}.`;
       else if (outcome === "partial") text = `Confirmed on ${applied.map((s) => s.device).join(", ")}; ${waiting.map((s) => s.device).join(", ")} will apply it when it's online.`;
@@ -835,12 +852,14 @@ const TOOLS = [
       const devices = await readDevices(ctx.db, ctx.uid);
       if (!devices.length) {
         ctx.count("setupTests.noDevices");
+        trace(ctx, { status: "noDevices" });
         const link = appLink(ctx.origin, "assistants");
         return result(`Open Always On Time on your phone to finish connecting (signed in with the same Google account), then run this test again. Link: ${link}`, {
           outcome: "noDevices", links: { assistants: link },
         });
       }
       const pingId = `ping_${randomBytes(12).toString("base64url")}`;
+      trace(ctx, { pingId });
       const sent = await push(ctx, "ping", { pingId, assistant: String(ctx.grant.clientName).slice(0, 60) }, devices);
       if (sent.limited) throw new ToolError("Too many messages to the phone recently; wait a few minutes and try again.");
       const reachable = sent.sent;
@@ -864,6 +883,7 @@ const TOOLS = [
       if (noToken.length) lines.push(`${names(noToken)} can't receive messages from the assistant yet; changes reach it on its next sync.`);
       const outcome = received.length ? (missing.length ? "partial" : "received") : silent.length ? "noAnswer" : "unreachable";
       ctx.count(`setupTests.${outcome}`);
+      trace(ctx, { status: outcome });
       if (received.length && !ctx.grant.setupConfirmedAt) {
         await ctx.confirmSetup();
         lines.push("Setup is confirmed.");
@@ -889,6 +909,7 @@ const TOOLS = [
       const devices = await readDevices(ctx.db, ctx.uid);
       if (!devices.length) return noPhone(ctx);
       const requestId = `req_${randomBytes(12).toString("base64url")}`;
+      trace(ctx, { requestId });
       const sent = await push(ctx, "publish", { requestId }, devices);
       if (sent.limited) throw new ToolError("Too many messages to the phone recently; wait a few minutes and try again.");
       const deadline = ctx.now() + (args.waitSeconds ?? 10) * 1000;
@@ -900,6 +921,7 @@ const TOOLS = [
       if (!snapshots.length) snapshots = await loadSnapshots(ctx);
       const snapshot = fresh ?? snapshots[0];
       if (!snapshot) return noPhone(ctx);
+      trace(ctx, { status: fresh ? "fresh" : "stale" });
       const alarms = snapshot.events.reduce((total, event) => total + event.alarms.filter((alarm) => alarm.status === "on").length, 0);
       const summary = `${snapshot.events.length} events with ${alarms} upcoming alarms on ${snapshot.calendars.filter((c) => c.watched).length} watched calendars.`;
       const text = fresh

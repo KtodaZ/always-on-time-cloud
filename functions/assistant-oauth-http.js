@@ -6,6 +6,7 @@
 const { OAuthError, authorizationServerMetadata, protectedResourceMetadata } = require("./assistant-oauth");
 const { ClientError, registerClient } = require("./assistant-oauth-clients");
 const { LIMITS, clientIp, consume } = require("./assistant-limits");
+const { errorFields, logEvent } = require("./assistant-log");
 
 const MAX_BODY_CHARS = 16 * 1024;
 
@@ -89,12 +90,20 @@ function createOAuthHandler({ oauth, db, now = Date.now, logger, usage = async (
     "POST /oauth/register": async (req, res) => {
       if (await limited("register", clientIp(req)) || await limited("registerGlobal", "all")) {
         await usage({ rateLimited: 1 });
+        logEvent(logger, "warn", "oauth.register", { kind: "dcr", outcome: "rate_limited" });
         return send(res, 429, { error: "too_many_requests", error_description: "Too many registrations; try again later." }, CORS);
       }
       try {
-        return send(res, 201, await registerClient(db, bodyOf(req), { now: now() }), CORS);
+        const registered = await registerClient(db, bodyOf(req), { now: now() });
+        logEvent(logger, "info", "oauth.register", {
+          kind: "dcr", clientId: registered.client_id, client: registered.client_name, outcome: "ok",
+        });
+        return send(res, 201, registered, CORS);
       } catch (error) {
-        if (error instanceof ClientError) return send(res, 400, { error: error.error, error_description: error.message }, CORS);
+        if (error instanceof ClientError) {
+          logEvent(logger, "info", "oauth.register", { kind: "dcr", outcome: "rejected", errorCode: error.error, reason: error.message });
+          return send(res, 400, { error: error.error, error_description: error.message }, CORS);
+        }
         throw error;
       }
     },
@@ -136,6 +145,8 @@ function createOAuthHandler({ oauth, db, now = Date.now, logger, usage = async (
       await route(req, res);
     } catch (error) {
       if (error instanceof OAuthError) {
+        // Error codes and their fixed descriptions only; never the request's tokens or codes.
+        logEvent(logger, "info", "oauth.error", { path, status: error.status, errorCode: error.error, reason: error.message });
         const headers = { ...CORS };
         if (error.status === 401 && error.error === "invalid_client" && req.headers.authorization?.startsWith("Basic ")) {
           headers["WWW-Authenticate"] = "Basic realm=\"Always On Time\"";
@@ -143,7 +154,7 @@ function createOAuthHandler({ oauth, db, now = Date.now, logger, usage = async (
         return send(res, error.status, { error: error.error, error_description: error.message }, headers);
       }
       if (error instanceof SyntaxError) return send(res, 400, { error: "invalid_request", error_description: "malformed body" }, CORS);
-      logger?.error?.("Assistant OAuth request failed", { path, name: error?.name, message: error?.message });
+      logEvent(logger, "error", "oauth.request_failed", { path, ...errorFields(error) });
       return send(res, 500, { error: "server_error" }, CORS);
     }
   };

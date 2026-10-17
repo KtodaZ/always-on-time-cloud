@@ -12,6 +12,7 @@ const { HttpsError, onCall, onRequest } = require("firebase-functions/v2/https")
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 
 const { LIMITS, consume } = require("./assistant-limits");
+const { errorFields, logEvent } = require("./assistant-log");
 const { createMcpHandler, loadSdk } = require("./assistant-mcp");
 const { ToolError } = require("./assistant-snapshot");
 const { TOOLS } = require("./assistant-tools");
@@ -95,7 +96,9 @@ async function requireActiveAccount(request) {
 
 exports.listAssistantConnections = onCall({ region: REGION, maxInstances: 5 }, async (request) => {
   const uid = await requireActiveAccount(request);
-  return { connections: await services().oauth.listConnections(uid) };
+  const connections = await services().oauth.listConnections(uid);
+  logEvent(logger, "info", "callable.list_connections", { uid, count: connections.length });
+  return { connections };
 });
 
 exports.revokeAssistantConnection = onCall({ region: REGION, maxInstances: 5 }, async (request) => {
@@ -104,7 +107,9 @@ exports.revokeAssistantConnection = onCall({ region: REGION, maxInstances: 5 }, 
   if (typeof grantId !== "string" || grantId.length === 0 || grantId.length > 100) {
     throw new HttpsError("invalid-argument", "grantId is required.");
   }
-  return { revoked: await services().oauth.revokeGrant(grantId, { reason: "app", uid }) };
+  const revoked = await services().oauth.revokeGrant(grantId, { reason: "app", uid });
+  logEvent(logger, "info", "callable.revoke_connection", { uid, grantId, revoked });
+  return { revoked };
 });
 
 /** Undo from the app's activity log; the same checks as the assistant's undo tool. */
@@ -116,6 +121,8 @@ exports.undoAssistantChange = onCall({ region: REGION, maxInstances: 5 }, async 
   }
   const { db, messaging, usage } = services();
   const counts = {};
+  const started = Date.now();
+  const trace = {};
   const ctx = {
     db,
     uid,
@@ -127,13 +134,22 @@ exports.undoAssistantChange = onCall({ region: REGION, maxInstances: 5 }, async 
     logger,
     pushAllowed: () => consume(db, `push|app|${uid}`, LIMITS.push, Date.now()),
     count: (name, amount = 1) => { counts[name] = (counts[name] ?? 0) + amount; },
+    trace,
   };
+  const done = (outcome, extra = {}) => logEvent(logger, outcome === "unexpected_error" ? "error" : "info", "callable.undo", {
+    uid, outcome, durationMs: Date.now() - started, ...trace, ...extra,
+  });
   try {
     const out = await TOOLS.find((tool) => tool.name === "undo").handler(ctx, { changeId });
     if (Object.keys(counts).length) await usage(counts).catch(() => {});
+    done("ok");
     return { undone: out.data?.changed === true, changeId: out.data?.changeId ?? null, message: out.text };
   } catch (error) {
-    if (error instanceof ToolError) throw new HttpsError("failed-precondition", error.message);
+    if (error instanceof ToolError) {
+      done("tool_error");
+      throw new HttpsError("failed-precondition", error.message);
+    }
+    done("unexpected_error", errorFields(error));
     throw error;
   }
 });
@@ -142,7 +158,7 @@ exports.pruneAssistantConnections = onSchedule(
   { schedule: "every 24 hours", region: REGION, maxInstances: 1, timeoutSeconds: 300 },
   async () => {
     const revoked = await services().oauth.pruneIdleGrants();
-    logger.info("Pruned idle assistant connections", { revoked });
+    logEvent(logger, "info", "prune", { revoked });
   },
 );
 

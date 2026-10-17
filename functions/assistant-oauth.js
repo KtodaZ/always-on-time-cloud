@@ -18,6 +18,7 @@ const {
 const {
   ClientError, authenticateClient, getClient, redirectMatches, touchClient,
 } = require("./assistant-oauth-clients");
+const { clientIdForLog, logEvent } = require("./assistant-log");
 const { sendToDevices } = require("./assistant-push");
 
 const PRODUCTION_ORIGIN = "https://always-on-time-zombit-2026.web.app";
@@ -123,9 +124,10 @@ function createOAuth(deps) {
   const origin = deps.origin ?? PRODUCTION_ORIGIN;
   const u = urls(origin);
   const collection = (name) => db.collection(COLLECTIONS[name]);
+  const log = (level, event, fields) => logEvent(logger, level, event, fields);
   const lookupClient = async (clientId) => {
     try {
-      return await getClient(db, clientId, { now: now(), fetchMetadata });
+      return await getClient(db, clientId, { now: now(), fetchMetadata, logger });
     } catch (error) {
       if (error instanceof ClientError) throw new OAuthError("invalid_client", error.message, 401);
       throw error;
@@ -144,16 +146,23 @@ function createOAuth(deps) {
     try {
       client = await lookupClient(value("client_id"));
     } catch (error) {
+      log("info", "oauth.authorize", { clientId: clientIdForLog(value("client_id")), outcome: "unknown_client" });
       return { page: { status: 400, message: "This assistant could not be identified. Start connecting again from your assistant." } };
     }
     const requested = value("redirect_uri");
     let redirectUri;
     if (requested) redirectUri = client.redirectUris.some((registered) => redirectMatches(registered, requested)) ? requested : null;
     else redirectUri = client.redirectUris.length === 1 ? client.redirectUris[0] : null;
-    if (!redirectUri) return { page: { status: 400, message: "This sign-in link has an unregistered return address. Start connecting again from your assistant." } };
+    if (!redirectUri) {
+      log("info", "oauth.authorize", { clientId: clientIdForLog(client.clientId), outcome: "unregistered_redirect" });
+      return { page: { status: 400, message: "This sign-in link has an unregistered return address. Start connecting again from your assistant." } };
+    }
 
     const state = value("state");
-    const fail = (error, description) => ({ redirect: withParams(redirectUri, { error, error_description: description, state, iss: u.issuer }) });
+    const fail = (error, description) => {
+      log("info", "oauth.authorize", { clientId: clientIdForLog(client.clientId), outcome: error });
+      return { redirect: withParams(redirectUri, { error, error_description: description, state, iss: u.issuer }) };
+    };
     if (value("response_type") !== "code") return fail("unsupported_response_type", "response_type must be code");
     const challenge = value("code_challenge");
     if (!challenge || !PKCE_VALUE.test(challenge) || value("code_challenge_method") !== "S256") {
@@ -177,6 +186,7 @@ function createOAuth(deps) {
       createdAt: new Date(time),
       expiresAt: new Date(time + REQUEST_TTL_MS),
     });
+    log("info", "oauth.authorize", { clientId: clientIdForLog(client.clientId), client: client.clientName, outcome: "consent" });
     return { redirect: `${u.consent}?request=${encodeURIComponent(requestId)}` };
   }
 
@@ -224,10 +234,12 @@ function createOAuth(deps) {
       const pending = await pendingRequest(requestId);
       if (!pending) throw new OAuthError("expired", "This connection request expired.", 404);
       await pending.ref.delete();
+      log("info", "oauth.consent", { clientId: clientIdForLog(pending.clientId), outcome: "denied" });
       return { redirect: withParams(pending.redirectUri, { error: "access_denied", error_description: "The user cancelled.", state: pending.state, iss: u.issuer }) };
     }
     const user = await signedInUser(idToken);
     if (!user.accountReady) {
+      log("info", "oauth.consent", { uid: user.uid, outcome: "account_not_ready" });
       throw new OAuthError("account_not_ready", "Install Always On Time and sign in with this Google account in the app first.", 409);
     }
     const code = newSecret("aot_code_");
@@ -252,7 +264,11 @@ function createOAuth(deps) {
       });
       return data;
     });
-    if (!pending) throw new OAuthError("expired", "This connection request expired. Start connecting again from your assistant.", 404);
+    if (!pending) {
+      log("info", "oauth.consent", { uid: user.uid, outcome: "expired" });
+      throw new OAuthError("expired", "This connection request expired. Start connecting again from your assistant.", 404);
+    }
+    log("info", "oauth.consent", { uid: user.uid, clientId: clientIdForLog(pending.clientId), scopes: pending.scopes, outcome: "approved" });
     return { redirect: withParams(pending.redirectUri, { code, state: pending.state, iss: u.issuer }) };
   }
 
@@ -329,9 +345,22 @@ function createOAuth(deps) {
       return { grant, tokens: issueTokens(transaction, grant, time), replaced, connectionsChanged: replaced.length === 0 };
     });
     if (outcome.error) {
+      log("warn", "oauth.code_exchange", {
+        clientId: clientIdForLog(client.clientId), outcome: "rejected", reason: outcome.error, revokedGrantId: outcome.revoke,
+      });
       if (outcome.revoke) await revokeGrant(outcome.revoke, { reason: "code_reuse" });
       throw new OAuthError("invalid_grant", outcome.error);
     }
+    log("info", "oauth.code_exchange", {
+      uid: outcome.grant.uid,
+      grantId: outcome.grant.grantId,
+      clientId: clientIdForLog(client.clientId),
+      client: client.clientName,
+      assistant: outcome.grant.assistant,
+      scopes: outcome.grant.scopes,
+      replacedGrantIds: outcome.replaced,
+      outcome: "ok",
+    });
     for (const id of outcome.replaced) await deleteTokens(id);
     await touchClient(db, client, time).catch(() => {});
     await usage({ [`connectionsNew.${outcome.grant.assistant}`]: 1 });
@@ -362,12 +391,16 @@ function createOAuth(deps) {
       const grant = grantDoc.data();
       transaction.update(tokenRef, { rotatedAt: new Date(time) });
       transaction.update(grantRef, { lastUsedAt: new Date(time) });
-      return { tokens: issueTokens(transaction, grant, time) };
+      return { grant, tokens: issueTokens(transaction, grant, time) };
     });
     if (outcome.error) {
+      log("warn", "oauth.refresh", {
+        clientId: clientIdForLog(client.clientId), outcome: "rejected", reason: outcome.error, revokedGrantId: outcome.revoke,
+      });
       if (outcome.revoke) await revokeGrant(outcome.revoke, { reason: "refresh_reuse" });
       throw new OAuthError("invalid_grant", outcome.error);
     }
+    log("info", "oauth.refresh", { uid: outcome.grant.uid, grantId: outcome.grant.grantId, client: outcome.grant.clientName, outcome: "ok" });
     await touchClient(db, client, time).catch(() => {});
     return outcome.tokens;
   }
@@ -384,10 +417,18 @@ function createOAuth(deps) {
   async function revoke(body, basic) {
     const client = await tokenClient(body, basic);
     const value = body.token;
-    if (typeof value !== "string" || value.length > 200) return;
+    if (typeof value !== "string" || value.length > 200) {
+      log("info", "oauth.revoke", { clientId: clientIdForLog(client.clientId), outcome: "ignored", reason: "malformed" });
+      return;
+    }
     const doc = await collection("tokens").doc(sha256(value)).get();
-    if (!doc.exists || doc.data().clientId !== client.clientId) return;
-    if (doc.data().kind === "refresh") await revokeGrant(doc.data().grantId, { reason: "client" });
+    if (!doc.exists || doc.data().clientId !== client.clientId) {
+      log("info", "oauth.revoke", { clientId: clientIdForLog(client.clientId), outcome: "ignored", reason: "unknown_token" });
+      return;
+    }
+    const { kind, grantId, uid } = doc.data();
+    log("info", "oauth.revoke", { uid, grantId, clientId: clientIdForLog(client.clientId), kind, outcome: "ok" });
+    if (kind === "refresh") await revokeGrant(grantId, { reason: "client" });
     else await doc.ref.delete();
   }
 
@@ -402,7 +443,7 @@ function createOAuth(deps) {
     try {
       await sendToDevices({ db, messaging, logger }, uid, "state", {}, devices);
     } catch (error) {
-      logger?.warn?.("Assistant state push failed", { name: error?.name });
+      log("warn", "push.state_failed", { uid, errorName: error?.name, errorCode: error?.code });
     }
   }
 
@@ -431,7 +472,9 @@ function createOAuth(deps) {
     await notifyState(outcome.grant.uid, devices);
     if (outcome.remaining === 0) await deleteConnectorData(db, outcome.grant.uid);
     await usage({ [`disconnects.${outcome.grant.assistant ?? "other"}`]: 1 });
-    logger?.info?.("Assistant connection revoked", { reason, remaining: outcome.remaining });
+    log("info", "connection.revoked", {
+      uid: outcome.grant.uid, grantId, client: outcome.grant.clientName, reason, remaining: outcome.remaining,
+    });
     return true;
   }
 
@@ -481,15 +524,21 @@ function createOAuth(deps) {
 /**
  * Resolves a bearer token for the MCP endpoint: {uid, grantId, clientId, clientName, assistant,
  * scopes, ...} for a live access token whose connection still exists, otherwise null.
+ * `onReject(reason)` hears why a token was refused (for the debugging log; never the token).
  */
-async function verifyAccessToken(db, token, { now = Date.now() } = {}) {
-  if (typeof token !== "string" || !token.startsWith("aot_at_") || token.length > 200) return null;
+async function verifyAccessToken(db, token, { now = Date.now(), onReject = () => {} } = {}) {
+  const reject = (reason) => {
+    onReject(reason);
+    return null;
+  };
+  if (typeof token !== "string" || !token.startsWith("aot_at_") || token.length > 200) return reject("malformed");
   const doc = await db.collection(COLLECTIONS.tokens).doc(sha256(token)).get();
-  if (!doc.exists) return null;
+  if (!doc.exists) return reject("unknown");
   const data = doc.data();
-  if (data.kind !== "access" || toMillis(data.expiresAt) <= now) return null;
+  if (data.kind !== "access") return reject("not_access_token");
+  if (toMillis(data.expiresAt) <= now) return reject("expired");
   const grantDoc = await db.collection(COLLECTIONS.grants).doc(data.grantId).get();
-  if (!grantDoc.exists || grantDoc.data().uid !== data.uid) return null;
+  if (!grantDoc.exists || grantDoc.data().uid !== data.uid) return reject("connection_revoked");
   const grant = grantDoc.data();
   return {
     uid: data.uid,

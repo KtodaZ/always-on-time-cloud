@@ -92,6 +92,7 @@ links to the app. Calls are rate limited per connection and per IP.
 | Registered assistant clients (public metadata) | `oauthClients` | 90 days unused (TTL) |
 | Rate limit counts (document ID is a hash of the connection or IP and the time window) | `assistantRateLimits` | About an hour (TTL) |
 | Anonymous daily totals: connections, tool calls and errors, setup tests, undos | `assistantUsage` | Kept; no user identifiers |
+| Request logs: action, ids (uid, grant, change, request, ping, record, device), outcome, duration | Cloud Logging `_Default` bucket | 30 days |
 
 The Google account email is read from Firebase Auth only to match Google Calendar IDs to calendar
 keys; it is not stored or given to the assistant.
@@ -99,6 +100,41 @@ keys; it is not stored or given to the assistant.
 The [privacy policy](PRIVACY_POLICY.md) and Play's Data safety answers need to cover this table,
 including that what an assistant reads then falls under its provider's policy, before the
 connector is offered in the app.
+
+## Debugging
+
+Every connector action writes one structured line through `firebase-functions`' logger
+([`assistant-log.js`](../functions/assistant-log.js)), so each field is a `jsonPayload` field in
+Cloud Logging. `assistantEvent` names the action:
+
+| `assistantEvent` | Fields besides `uid` |
+| --- | --- |
+| `tool.call` | `tool`, `outcome` (`ok`, `no_phone`, `tool_error`, `unexpected_error`), `durationMs`, `grantId`, `client`, and when they apply `changeId`, `undoneChangeId`, `recordIds`, `requestId`, `pingId`, `status`, `push` (`{type, devices: [{deviceId, result, errorCode}]}`) |
+| `oauth.client_metadata`, `oauth.register` | CIMD fetch or DCR registration: `clientId`, `client`, `outcome`, `reason` |
+| `oauth.authorize`, `oauth.consent` | `clientId`, `outcome` (`consent`, `approved`, `denied`, or an error code) |
+| `oauth.code_exchange`, `oauth.refresh`, `oauth.revoke` | `grantId`, `clientId`, `outcome`, `reason` when refused, `replacedGrantIds`, `revokedGrantId` |
+| `oauth.token_rejected`, `oauth.error` | `reason` or `errorCode` only |
+| `connection.revoked`, `prune` | `grantId`, `reason` (`app`, `client`, `idle`, `code_reuse`, `refresh_reuse`), `remaining` / `revoked` |
+| `callable.undo`, `callable.list_connections`, `callable.revoke_connection` | as `tool.call`, or `count` / `revoked` |
+| `push.failed`, `push.invalid_token_removed`, `push.state_failed` | `deviceId`, `type`, `errorCode` |
+
+The helper writes only an allowlist of fields: never event titles, summaries, settings payloads,
+tool arguments, tokens, codes, PKCE values, redirect URIs or emails. Tool errors log their outcome,
+not their message (it can quote a title).
+
+The phone logs the same ids with an `Assistant:` prefix (the app's `docs/ASSISTANT_MCP.md`
+"Debugging"), and feedback can attach the last 24 hours of that log. To follow an action end to
+end, take an id from the feedback log and filter Logs Explorer in `always-on-time-zombit-2026`:
+
+```
+jsonPayload.changeId="ch_…" OR jsonPayload.undoneChangeId="ch_…"
+jsonPayload.requestId="req_…"
+jsonPayload.pingId="ping_…"
+jsonPayload.push.devices.deviceId="<deviceId>" OR jsonPayload.deviceId="<deviceId>"
+jsonPayload.uid="<uid>" AND jsonPayload.assistantEvent:*
+```
+
+Logs stay in the `_Default` bucket for its 30-day retention.
 
 ## Local testing
 

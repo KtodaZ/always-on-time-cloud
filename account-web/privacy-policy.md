@@ -113,7 +113,8 @@ connection. Nothing below is collected until you do.
 - **Connection records.** We store which assistant is connected, the address it returns to after
   approval, when it connected and was last used, and its access tokens, stored only as one-way
   hashes. Changes the assistant makes are logged with the previous values for 30 days so you can
-  undo them.
+  undo them. Connector request logs (which action was taken, its IDs and outcome, never event
+  titles or settings contents) are kept for troubleshooting for up to 30 days.
 
 A connected assistant can read the upcoming alarms copy, your synced alarm settings and 14 days of
 alarm history, and change your alarm settings. It cannot read or change your calendar, and

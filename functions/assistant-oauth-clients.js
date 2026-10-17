@@ -12,6 +12,7 @@ const net = require("node:net");
 const { createHash, randomBytes, timingSafeEqual } = require("node:crypto");
 
 const { COLLECTIONS, toMillis } = require("./assistant-data");
+const { clientIdForLog, logEvent } = require("./assistant-log");
 
 const CIMD_MAX_BYTES = 5 * 1024;
 const CIMD_TIMEOUT_MS = 5000;
@@ -264,7 +265,7 @@ async function registerClient(db, body, { now }) {
  * Looks up a client by client_id: a registered (DCR) client from Firestore, or a metadata document
  * client fetched (and cached for a day) from its URL. Throws ClientError("invalid_client").
  */
-async function getClient(db, clientId, { now, fetchMetadata = fetchClientMetadata }) {
+async function getClient(db, clientId, { now, fetchMetadata = fetchClientMetadata, logger }) {
   if (typeof clientId !== "string" || clientId.length === 0 || clientId.length > MAX_URL_LENGTH) {
     throw new ClientError("invalid_client", "client_id is missing");
   }
@@ -281,9 +282,14 @@ async function getClient(db, clientId, { now, fetchMetadata = fetchClientMetadat
   try {
     client = validateClientMetadata(await fetchMetadata(clientId), { kind: "cimd", clientId });
   } catch (error) {
+    const reason = error instanceof ClientError ? error.message : "client metadata document could not be used";
     // A client whose document is briefly unreachable keeps working from the cached copy.
-    if (stored && fetchedAt !== null && now - fetchedAt < CIMD_STALE_OK_MS) return stored;
-    throw error instanceof ClientError ? error : new ClientError("invalid_client", "client metadata document could not be used");
+    if (stored && fetchedAt !== null && now - fetchedAt < CIMD_STALE_OK_MS) {
+      logEvent(logger, "warn", "oauth.client_metadata", { clientId: clientIdForLog(clientId), kind: "cimd", outcome: "stale_cache", reason });
+      return stored;
+    }
+    logEvent(logger, "warn", "oauth.client_metadata", { clientId: clientIdForLog(clientId), kind: "cimd", outcome: "rejected", reason });
+    throw error instanceof ClientError ? error : new ClientError("invalid_client", reason);
   }
   const record = {
     ...client,
@@ -294,6 +300,9 @@ async function getClient(db, clientId, { now, fetchMetadata = fetchClientMetadat
     expiresAt: new Date(now + CLIENT_IDLE_TTL_MS),
   };
   await ref.set(record);
+  logEvent(logger, "info", "oauth.client_metadata", {
+    clientId: clientIdForLog(clientId), client: record.clientName, assistant: record.assistant, kind: "cimd", outcome: stored ? "refreshed" : "registered",
+  });
   return record;
 }
 

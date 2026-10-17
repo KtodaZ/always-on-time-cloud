@@ -6,6 +6,7 @@
 
 const { LIMITS, createMemoryLimiter, consume } = require("./assistant-limits");
 const { COLLECTIONS } = require("./assistant-data");
+const { errorFields, logEvent } = require("./assistant-log");
 const { LAST_USED_RESOLUTION_MS, SCOPES, urls, verifyAccessToken } = require("./assistant-oauth");
 const { ToolError } = require("./assistant-snapshot");
 const { INSTRUCTIONS, TOOLS, noPhone } = require("./assistant-tools");
@@ -95,7 +96,7 @@ function createMcpHandler(deps) {
         description: tool.description,
         inputSchema: tool.inputSchema,
         annotations: { title: tool.title, ...tool.annotations },
-      }, async (args) => runTool(tool, { ...ctx, counts: {} }, args ?? {}));
+      }, async (args) => runTool(tool, { ...ctx, counts: {}, trace: {} }, args ?? {}));
     }
     return server;
   }
@@ -108,6 +109,8 @@ function createMcpHandler(deps) {
     };
     ctx.count(`tools.${tool.name}`);
     let response;
+    let outcome = "ok";
+    let failure = {};
     try {
       const needed = tool.scope === "write" ? "alarms.write" : "alarms.read";
       if (!ctx.grant.scopes.includes(needed)) {
@@ -123,18 +126,35 @@ function createMcpHandler(deps) {
       response = { content: [{ type: "text", text: out.text }], structuredContent: out.data ?? {} };
     } catch (error) {
       if (error?.noPhone) {
+        outcome = "no_phone";
         const out = noPhone(ctx);
         response = { content: [{ type: "text", text: out.text }], structuredContent: out.data };
       } else if (error instanceof ToolError) {
+        // The message can quote an event title, so only the outcome is logged.
+        outcome = "tool_error";
         ctx.count(`errors.${tool.name}`);
         response = { content: [{ type: "text", text: error.message }], structuredContent: { error: error.message, ...error.data }, isError: true };
       } else {
+        outcome = "unexpected_error";
+        failure = errorFields(error);
         ctx.count(`errors.${tool.name}`);
-        logger?.error?.("Assistant tool failed", { tool: tool.name, name: error?.name, message: error?.message });
         response = { content: [{ type: "text", text: "Something went wrong on the Always On Time server. Try again in a moment." }], isError: true };
       }
     }
-    if (!tool.waits && now() - started > SLOW_MS) ctx.count(`slow.${tool.name}`);
+    const durationMs = now() - started;
+    if (!tool.waits && durationMs > SLOW_MS) ctx.count(`slow.${tool.name}`);
+    // One line per call (assistant-log.js keeps it to ids, never arguments or results).
+    logEvent(logger, outcome === "unexpected_error" ? "error" : "info", "tool.call", {
+      tool: tool.name,
+      outcome,
+      durationMs,
+      uid: ctx.uid,
+      grantId: ctx.grant.grantId,
+      client: ctx.grant.clientName,
+      assistant: ctx.grant.assistant,
+      ...ctx.trace,
+      ...failure,
+    });
     await usage(ctx.counts);
     return response;
   }
@@ -147,8 +167,10 @@ function createMcpHandler(deps) {
       return;
     }
     const token = bearer(req);
-    const grant = token ? await verifyAccessToken(db, token, { now: now() }) : null;
+    let rejected = token ? null : "missing";
+    const grant = token ? await verifyAccessToken(db, token, { now: now(), onReject: (reason) => { rejected = reason; } }) : null;
     if (!grant) {
+      logEvent(logger, "info", "oauth.token_rejected", { reason: rejected ?? "invalid" });
       return sendJson(res, 401, { error: "invalid_token", error_description: "Sign in to Always On Time to use this connector." }, {
         "WWW-Authenticate": challenge(token ? ", error=\"invalid_token\"" : ""),
       });
@@ -170,7 +192,7 @@ function createMcpHandler(deps) {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
-      logger?.error?.("Assistant MCP request failed", { name: error?.name, message: error?.message });
+      logEvent(logger, "error", "mcp.request_failed", { uid: grant.uid, grantId: grant.grantId, ...errorFields(error) });
       if (!res.headersSent) sendJson(res, 500, { jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
     }
   };

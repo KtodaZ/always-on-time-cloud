@@ -26,6 +26,8 @@ const CHALLENGE = createHash("sha256").update(VERIFIER).digest("base64url");
 
 function setup({ metadata } = {}) {
   const db = new FakeFirestore();
+  const logs = [];
+  const logger = Object.fromEntries(["info", "warn", "error"].map((level) => [level, (message, fields) => logs.push({ level, message, ...fields })]));
   let time = Date.parse("2026-10-16T12:00:00Z");
   const messaging = createRecordingMessaging();
   const counts = [];
@@ -34,6 +36,7 @@ function setup({ metadata } = {}) {
     db,
     now: () => time,
     messaging,
+    logger,
     usage: async (c) => counts.push(c),
     verifyIdToken: async (token) => {
       if (!token.startsWith("id:")) throw new Error("bad token");
@@ -46,7 +49,7 @@ function setup({ metadata } = {}) {
     },
   });
   db.documents.set("accounts/alice", { active: true, schemaVersion: 1 });
-  return { db, oauth, messaging, counts, fetches, clock: { advance: (ms) => { time += ms; }, now: () => time } };
+  return { db, oauth, messaging, counts, fetches, logs, clock: { advance: (ms) => { time += ms; }, now: () => time } };
 }
 
 const requestIdFrom = (redirect) => new URL(redirect).searchParams.get("request");
@@ -104,6 +107,40 @@ test("a full connection issues opaque tokens, stores only hashes and marks the a
   assert.equal(await verifyAccessToken(db, tokens.refresh_token, { now: T0 }), null, "refresh tokens are not access tokens");
   assert.equal(await verifyAccessToken(db, "aot_at_unknown", { now: T0 }), null);
   assert.ok(counts.some((c) => c["connectionsNew.claude"] === 1));
+});
+
+test("the OAuth flow logs each step with ids and reasons, never tokens, codes or redirect URIs", async () => {
+  const { oauth, logs, clock } = setup();
+  const tokens = await connect(oauth);
+  await oauth.token({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: CLAUDE_ID });
+  clock.advance(REFRESH_REUSE_GRACE_MS + 1);
+  await assert.rejects(oauth.token({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: CLAUDE_ID }));
+  const events = logs.map((entry) => `${entry.assistantEvent}:${entry.outcome ?? entry.reason}`);
+  assert.deepEqual(events, [
+    "oauth.client_metadata:registered", "oauth.authorize:consent", "oauth.consent:approved", "oauth.code_exchange:ok",
+    "oauth.refresh:ok", "oauth.refresh:rejected", "connection.revoked:refresh_reuse",
+  ]);
+  const exchange = logs.find((entry) => entry.assistantEvent === "oauth.code_exchange");
+  assert.equal(exchange.uid, "alice");
+  assert.match(exchange.grantId, /^[0-9a-f-]{36}$/);
+  assert.equal(exchange.clientId, CLAUDE_ID);
+  assert.equal(logs.find((entry) => entry.assistantEvent === "connection.revoked").grantId, exchange.grantId);
+  const text = JSON.stringify(logs);
+  for (const secret of ["aot_at_", "aot_rt_", "aot_code_", VERIFIER, CHALLENGE, CLAUDE_REDIRECT, "alice@example.com"]) {
+    assert.ok(!text.includes(secret), `log contains ${secret}`);
+  }
+});
+
+test("rejected access tokens are logged with a reason only", async () => {
+  const { db, oauth } = setup();
+  const tokens = await connect(oauth);
+  const reasons = [];
+  const onReject = (reason) => reasons.push(reason);
+  await verifyAccessToken(db, "nope", { now: T0, onReject });
+  await verifyAccessToken(db, "aot_at_unknown", { now: T0, onReject });
+  await verifyAccessToken(db, tokens.refresh_token.replace("aot_rt_", "aot_at_"), { now: T0, onReject });
+  await verifyAccessToken(db, tokens.access_token, { now: T0 + 2 * 60 * 60 * 1000, onReject });
+  assert.deepEqual(reasons, ["malformed", "unknown", "unknown", "expired"]);
 });
 
 test("PKCE, redirect URI, client and resource must all match the authorization", async () => {
