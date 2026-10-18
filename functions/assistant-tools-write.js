@@ -287,6 +287,11 @@ const TOOLS = [
           const fresh = await read(activityRef);
           if (!fresh.exists) throw new ToolError(missing);
           if (fresh.data().undoneAt) throw new ToolError("That change was already undone.");
+          // Every change writes its records, so a missing occurrence record was deleted by a phone
+          // after its event ended (firestore.rules); undo must not bring it back.
+          if (originalIds.some((id) => id.startsWith("e_") && current[id] === null)) {
+            throw new ToolError("That event has ended, so there is nothing to undo.");
+          }
           // Compared by meaning: a phone re-encoding the same setting doesn't block undo.
           if (originalIds.some((id) => !samePayload(id, current[id], original.records[id].after))) {
             throw new ToolError("Those settings have changed again since, so undo would overwrite newer changes. Make the change you want directly instead.");
