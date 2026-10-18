@@ -1,10 +1,13 @@
 // Consent page for connecting an AI assistant (docs/ASSISTANT_CONNECTOR.md). The user signs in with
 // the Google account they use in the app; approving sends the Firebase ID token and the pending
 // request id to /oauth/approve, which returns the assistant's redirect with a one-time code.
-// Only Claude and ChatGPT (verified by their client metadata host) are named; any other app shows
+// Only Claude, Claude Code and ChatGPT (by their exact client metadata URLs) are named; any other app shows
 // as "Unverified app" with the site its codes go to, and cancelling it shows a page, not a redirect.
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
-import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut, connectAuthEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
+import {
+  initializeAuth, inMemoryPersistence, browserPopupRedirectResolver, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut,
+  connectAuthEmulator,
+} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
 
 const element = id => document.getElementById(id);
 const request = new URLSearchParams(location.search).get('request');
@@ -70,6 +73,7 @@ async function start() {
   element('redirect-host').textContent = info.clientHost;
   element('unverified').hidden = info.verified;
   element('unverified-host').textContent = info.clientHost;
+  element('started-from').textContent = info.verified ? info.clientName : `the app at ${info.clientHost}`;
   element('intro').textContent = 'Sign in to review and approve this connection.';
   element('details').hidden = false;
   element('cancel').hidden = false;
@@ -77,7 +81,9 @@ async function start() {
   const config = await fetch('/firebase-config.json').then(response => response.json());
   // Local testing runs against the Auth emulator and the emulators' demo project.
   const app = initializeApp(local ? { ...config, projectId: 'demo-account-sync' } : config);
-  const auth = getAuth(app);
+  // Kept in memory only: a sign-in from another visit or tab never carries over, so whoever opens
+  // this link signs in here themselves before anything can be approved.
+  const auth = initializeAuth(app, { persistence: inMemoryPersistence, popupRedirectResolver: browserPopupRedirectResolver });
   if (local) connectAuthEmulator(auth, 'http://127.0.0.1:9199', { disableWarnings: true });
   let currentUser = null;
 

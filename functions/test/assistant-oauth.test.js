@@ -205,6 +205,22 @@ test("an authorization code works once; a quick retry is refused, later reuse re
   assert.equal(db.documents.get("accounts/alice/assistant/state").connected, false);
 });
 
+test("a spent code revokes the connection only when its own client presents it with the right verifier", async () => {
+  const { db, oauth, clock } = setup();
+  const code = await approveCode(oauth);
+  const request = { grant_type: "authorization_code", code, code_verifier: VERIFIER, client_id: CLAUDE_ID, redirect_uri: CLAUDE_REDIRECT };
+  const tokens = await oauth.token(request);
+  clock.advance(REUSE_GRACE_MS + 1000);
+  const stranger = await registerClient(db, { redirect_uris: ["https://elsewhere.example/cb"], token_endpoint_auth_method: "none" }, { now: clock.now() });
+  await assert.rejects(oauth.token({ ...request, client_id: stranger.client_id, redirect_uri: "https://elsewhere.example/cb" }),
+    { error: "invalid_grant", message: /another client/ });
+  await assert.rejects(oauth.token({ ...request, code_verifier: "w".repeat(43) }), { error: "invalid_grant", message: /PKCE/ });
+  assert.ok(await verifyAccessToken(db, tokens.access_token, { now: clock.now() }), "the connection survives both");
+  assert.equal(db.documents.get("accounts/alice/assistant/state").connected, true);
+  await assert.rejects(oauth.token(request), { error: "invalid_grant", message: /revoked/ });
+  assert.equal(await verifyAccessToken(db, tokens.access_token, { now: clock.now() }), null);
+});
+
 test("codes expire after ten minutes", async () => {
   const { oauth, clock } = setup();
   const code = await approveCode(oauth);
@@ -345,6 +361,7 @@ test("client ID metadata URLs must be plain https URLs with a path on a host nam
     "http://claude.ai/oauth/meta", "https://claude.ai/", "https://claude.ai", "https://user:pw@claude.ai/x",
     "https://claude.ai/x#frag", "https://127.0.0.1/x", "https://[::1]/x", "https://localhost/x", "https://claude.ai:8443/x",
     "https://claude.ai/a/../b", "https://CLAUDE.ai/x", "ftp://claude.ai/x", "not a url",
+    `${CLAUDE_ID}?x=1`, `${CLAUDE_ID}?`, "https://chatgpt.com/oauth/client.json?redirect=1",
   ]) assert.throws(() => parseClientIdUrl(bad), ClientError, bad);
 });
 
@@ -366,7 +383,11 @@ test("metadata fetches refuse private DNS answers, redirects, large and non-JSON
   await assert.rejects(fetchClientMetadata(CLAUDE_ID, { lookup: publicLookup, get: body(200, "x".repeat(6000)) }), /too large/);
   await assert.rejects(fetchClientMetadata(CLAUDE_ID, { lookup: publicLookup, get: body(200, "<html>", { "content-type": "text/html" }) }), /not JSON/);
   let pinned;
-  const doc = await fetchClientMetadata(CLAUDE_ID, { lookup: publicLookup, get: async (url, address) => { pinned = address; return { status: 200, headers: {}, body: Buffer.from('{"a":1}') }; } });
+  await assert.rejects(fetchClientMetadata(CLAUDE_ID, { lookup: publicLookup, get: body(200, '{"a":1}', {}) }), /not JSON/, "a JSON content type is required");
+  const doc = await fetchClientMetadata(CLAUDE_ID, { lookup: publicLookup, get: async (url, address) => {
+    pinned = address;
+    return { status: 200, headers: { "content-type": "application/json; charset=utf-8" }, body: Buffer.from('{"a":1}') };
+  } });
   assert.deepEqual(doc, { a: 1 });
   assert.deepEqual(pinned, { address: "160.79.104.10", family: 4 }, "the request connects to the checked address");
 });
@@ -404,6 +425,94 @@ test("metadata documents must name themselves and list valid redirects; they are
   const failing = async () => { throw new ClientError("invalid_client", "down"); };
   assert.equal((await getClient(db, CLAUDE_ID, { now: now + 2 * 86400000, fetchMetadata: failing, fetch: true })).clientName, "Claude");
   await assert.rejects(getClient(db, CLAUDE_ID, { now: now + 8 * 86400000, fetchMetadata: failing, fetch: true }), ClientError);
+});
+
+// The documents Claude, Claude Code and ChatGPT served on 2026-10-17.
+const LIVE_DOCUMENTS = {
+  claude: {
+    client_id: "https://claude.ai/oauth/mcp-oauth-client-metadata", client_name: "Claude", client_uri: "https://claude.ai",
+    redirect_uris: ["https://claude.ai/api/mcp/auth_callback"],
+    grant_types: ["authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:jwt-bearer"], response_types: ["code"], token_endpoint_auth_method: "none",
+  },
+  claudeCode: {
+    client_id: "https://claude.ai/oauth/claude-code-client-metadata", client_name: "Claude Code", client_uri: "https://claude.ai",
+    redirect_uris: ["http://localhost/callback", "http://127.0.0.1/callback"], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"],
+    token_endpoint_auth_method: "none",
+  },
+  chatgpt: {
+    client_id: "https://chatgpt.com/oauth/client.json", client_uri: "https://chatgpt.com/", redirect_uris: ["https://chatgpt.com/connector_platform_oauth_redirect"],
+    token_endpoint_auth_method: "private_key_jwt", token_endpoint_auth_methods_supported: ["none", "private_key_jwt"], grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"], client_name: "ChatGPT", token_endpoint_auth_signing_alg: "RS256", jwks_uri: "https://chatgpt.com/oauth/jwks.json",
+  },
+  chatgptCallback: {
+    client_id: "https://chatgpt.com/oauth/test123/client.json", client_uri: "https://chatgpt.com/", redirect_uris: ["https://chatgpt.com/connector/oauth/test123"],
+    token_endpoint_auth_method: "private_key_jwt", token_endpoint_auth_methods_supported: ["none", "private_key_jwt"], grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"], client_name: "ChatGPT",
+  },
+};
+
+test("the real Claude, Claude Code and ChatGPT metadata documents are accepted and named", () => {
+  const check = (doc) => validateClientMetadata(doc, { kind: "cimd", clientId: doc.client_id });
+  const claude = check(LIVE_DOCUMENTS.claude);
+  assert.deepEqual([claude.clientName, claude.assistant, claude.verified, claude.tokenEndpointAuthMethod], ["Claude", "claude", true, "none"]);
+  assert.deepEqual(claude.grantTypes, ["authorization_code", "refresh_token"], "grants this server doesn't offer are left out");
+  const code = check(LIVE_DOCUMENTS.claudeCode);
+  assert.deepEqual([code.clientName, code.assistant, code.verified], ["Claude Code", "claude", true]);
+  for (const doc of [LIVE_DOCUMENTS.chatgpt, LIVE_DOCUMENTS.chatgptCallback]) {
+    const chatgpt = check(doc);
+    assert.deepEqual([chatgpt.clientName, chatgpt.assistant, chatgpt.verified, chatgpt.tokenEndpointAuthMethod], ["ChatGPT", "chatgpt", true, "none"]);
+  }
+  // A document that supports only signed assertions still can't be used.
+  assert.throws(() => check({ ...LIVE_DOCUMENTS.chatgpt, token_endpoint_auth_methods_supported: ["private_key_jwt"] }), /token_endpoint_auth_method/);
+  // Dynamic registration stays strict about grants.
+  assert.throws(() => validateClientMetadata({ redirect_uris: ["https://a.example/cb"], grant_types: LIVE_DOCUMENTS.claude.grant_types }, { kind: "dcr", clientId: "aot_client_x" }), /grant_types/);
+});
+
+test("only the exact known metadata URLs carry a brand", () => {
+  const { brandOf } = require("../assistant-oauth-clients");
+  const name = (clientId) => brandOf("cimd", clientId)?.name ?? null;
+  assert.equal(name("https://claude.ai/oauth/mcp-oauth-client-metadata"), "Claude");
+  assert.equal(name("https://claude.ai/oauth/claude-code-client-metadata"), "Claude Code");
+  assert.equal(name("https://chatgpt.com/oauth/client.json"), "ChatGPT");
+  assert.equal(name("https://chatgpt.com/oauth/Ab_9-x/client.json"), "ChatGPT");
+  for (const other of [
+    "https://claude.ai/oauth/other", "https://claude.ai/api/mcp/auth_callback", "https://claude.ai/oauth/mcp-oauth-client-metadata/",
+    "https://claude.ai/oauth/mcp-oauth-client-metadata?x=1", "https://chatgpt.com/oauth/client.json?x=1", "https://chatgpt.com/oauth/a/b/client.json",
+    "https://chatgpt.com/files/client.json", "https://chatgpt.com/oauth//client.json", "https://www.chatgpt.com/oauth/client.json",
+    "https://claude.ai.example/oauth/mcp-oauth-client-metadata", "https://chatgpt.com:8443/oauth/client.json",
+  ]) assert.equal(name(other), null, other);
+  assert.equal(brandOf("dcr", "https://claude.ai/oauth/mcp-oauth-client-metadata"), null);
+  // Any other document on the brand's host is an unverified app.
+  const other = validateClientMetadata({ client_id: "https://claude.ai/oauth/other", client_name: "Claude", redirect_uris: ["https://evil.example/cb"] },
+    { kind: "cimd", clientId: "https://claude.ai/oauth/other" });
+  assert.deepEqual([other.clientName, other.verified, other.assistant], ["Unverified app", false, "other"]);
+});
+
+test("a branded client's redirect URIs must stay on its host, or on loopback for Claude Code", () => {
+  const check = (doc, redirect_uris) => validateClientMetadata({ ...doc, redirect_uris }, { kind: "cimd", clientId: doc.client_id });
+  for (const uris of [["https://evil.example/cb"], [CLAUDE_REDIRECT, "https://evil.example/cb"], ["https://sub.claude.ai/cb"],
+    ["https://claude.ai:8443/cb"], ["http://localhost/callback"]]) {
+    assert.throws(() => check(LIVE_DOCUMENTS.claude, uris), { error: "invalid_redirect_uri" }, uris.join());
+  }
+  assert.throws(() => check(LIVE_DOCUMENTS.chatgpt, [CLAUDE_REDIRECT]), { error: "invalid_redirect_uri" });
+  assert.throws(() => check(LIVE_DOCUMENTS.claudeCode, ["https://claude.ai/api/mcp/auth_callback"]), { error: "invalid_redirect_uri" });
+  assert.throws(() => check(LIVE_DOCUMENTS.claudeCode, ["http://localhost/callback", "https://evil.example/cb"]), { error: "invalid_redirect_uri" });
+  assert.equal(check(LIVE_DOCUMENTS.claudeCode, ["http://[::1]/callback"]).verified, true);
+});
+
+test("ChatGPT connects through its metadata document as a public client", async () => {
+  const { db, oauth } = setup({ metadata: LIVE_DOCUMENTS.chatgpt });
+  const redirectUri = LIVE_DOCUMENTS.chatgpt.redirect_uris[0];
+  const tokens = await connect(oauth, { clientId: LIVE_DOCUMENTS.chatgpt.client_id, redirectUri });
+  const grant = await verifyAccessToken(db, tokens.access_token, { now: T0 });
+  assert.deepEqual([grant.clientName, grant.assistant], ["ChatGPT", "chatgpt"]);
+});
+
+test("Claude Code connects through its metadata document on any loopback port", async () => {
+  const { db, oauth } = setup({ metadata: LIVE_DOCUMENTS.claudeCode });
+  const tokens = await connect(oauth, { clientId: LIVE_DOCUMENTS.claudeCode.client_id, redirectUri: "http://localhost:3118/callback" });
+  const grant = await verifyAccessToken(db, tokens.access_token, { now: T0 });
+  assert.deepEqual([grant.clientName, grant.assistant], ["Claude Code", "claude"]);
 });
 
 test("redirect URIs: https anywhere, http only on loopback where any port matches", () => {

@@ -55,7 +55,7 @@ values first:
 printf 'APNS_AUTH_KEY_P8=x\nFEEDBACK_DISCORD_WEBHOOK_URL=http://127.0.0.1:9/\nTOMTOM_API_KEY=x\nTRAVEL_ROUTE_API_KEY=x\n' > functions/.secret.local
 cp functions/.env.always-on-time-zombit-2026 functions/.env.local
 npx firebase emulators:exec --only firestore,storage --project demo-account-sync 'node functions/testing/storage-rules.cjs && node functions/testing/account-sync-rules.cjs && node functions/testing/assistant-rules.cjs && npm --prefix functions test'
-npx firebase emulators:exec --only auth,firestore,functions,hosting --project demo-account-sync 'node functions/testing/account-delete.cjs && node functions/testing/assistant-e2e.cjs'
+npx firebase emulators:exec --only auth,firestore,functions,hosting --project demo-account-sync 'node functions/testing/hosting-headers.cjs && node functions/testing/account-delete.cjs && node functions/testing/assistant-e2e.cjs'
 ```
 
 The [Test workflow](.github/workflows/test.yml) runs all of these on every push and pull request.

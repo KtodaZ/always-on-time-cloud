@@ -5,7 +5,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { DEPLOY_ACCOUNT, attestationCommit, classifyAuditEntry, describePrincipal, expectedHostingPaths } from "../verify-live.mjs";
+import { execFileSync } from "node:child_process";
+
+import { canonicalJson } from "../live-state.mjs";
+import {
+  DEPLOY_ACCOUNT, attestationCommit, classifyAuditEntry, compareDirectory, deployStep, describePrincipal, expectedHostingPaths,
+  newestHostingDeploy, servingConfig,
+} from "../verify-live.mjs";
 
 const entry = (methodName, principalEmail, extra = {}) => ({ protoPayload: {
   methodName, resourceName: "projects/p/locations/us-central1/functions/f", authenticationInfo: { principalEmail }, ...extra,
@@ -117,4 +123,82 @@ test("the commit and run come from the attestation's provenance", () => {
     runDetails: { metadata: { invocationId: "https://github.com/o/r/actions/runs/42/attempts/1" } },
   } } } };
   assert.deepEqual(attestationCommit(attestation), { commit: "abc123", run: "https://github.com/o/r/actions/runs/42" });
+});
+
+test("firebase.json converts to Hosting's serving config shape", () => {
+  const config = servingConfig({ hosting: {
+    public: "account-web", ignore: [],
+    headers: [{ source: "**", headers: [{ key: "A", value: "1" }, { key: "B", value: "2" }] }, { regex: "^/[^/]*$", headers: [{ key: "C", value: "3" }] }],
+    redirects: [{ source: "/", destination: "https://zombit.io/", type: 301 }],
+    rewrites: [{ source: "/mcp", function: { functionId: "assistantMcp", region: "us-central1" } }, { source: "/open/**", destination: "/open/index.html" }],
+  } });
+  // The shape the Hosting API returned for the live release on 2026-10-18.
+  assert.deepEqual(config, {
+    headers: [{ glob: "**", headers: { A: "1", B: "2" } }, { regex: "^/[^/]*$", headers: { C: "3" } }],
+    redirects: [{ glob: "/", statusCode: 301, location: "https://zombit.io/" }],
+    rewrites: [{ glob: "/mcp", run: { serviceId: "assistantmcp", region: "us-central1" } }, { glob: "/open/**", path: "/open/index.html" }],
+  });
+  assert.throws(() => servingConfig({ hosting: { cleanUrls: true } }), /not compared/);
+  assert.throws(() => servingConfig({ hosting: { rewrites: [{ source: "/x", run: { serviceId: "s" } }] } }), /not compared/);
+  // The repository's own firebase.json is fully covered.
+  assert.ok(servingConfig(JSON.parse(readFileSync(new URL("../../firebase.json", import.meta.url), "utf8"))).headers.length > 0);
+});
+
+test("the Deploy step name says what a run deployed", () => {
+  const sha = "a".repeat(40);
+  assert.deepEqual(deployStep(`Deploy functions,hosting at ${sha}`), { only: "functions,hosting", commit: sha, dryRun: false });
+  assert.deepEqual(deployStep(`Deploy hosting at ${sha} (dry run)`), { only: "hosting", commit: sha, dryRun: true });
+  assert.equal(deployStep("Deploy hosting at main"), null);
+  assert.equal(deployStep("Set up job"), null);
+  // deploy.yml must keep producing names this parser reads.
+  const workflow = readFileSync(new URL("../../.github/workflows/deploy.yml", import.meta.url), "utf8");
+  const template = /- name: (Deploy \$\{\{ inputs\.only \}\} at .*)$/m.exec(workflow)?.[1];
+  assert.equal(template, "Deploy ${{ inputs.only }} at ${{ github.sha }}${{ inputs.dry_run && ' (dry run)' || '' }}");
+});
+
+test("the newest hosting deploy skips dry runs, other targets and unsigned runs", async () => {
+  const sha = (c) => c.repeat(40);
+  const run = (id, commit, extra = {}) => ({ id, head_sha: sha(commit), html_url: `https://github.com/o/r/actions/runs/${id}`,
+    conclusion: "success", head_branch: "main", event: "workflow_dispatch", ...extra });
+  const jobs = {
+    6: [{ name: "deploy", steps: [{ name: `Deploy hosting at ${sha("f")}` }] }, { name: "sign", conclusion: "success" }],
+    5: [{ name: "deploy", steps: [{ name: `Deploy storage at ${sha("e")}` }] }, { name: "sign", conclusion: "success" }],
+    4: [{ name: "deploy", steps: [{ name: `Deploy hosting at ${sha("d")} (dry run)` }] }, { name: "sign", conclusion: "skipped" }],
+    3: [{ name: "deploy", steps: [{ name: `Deploy hosting at ${sha("c")}` }] }, { name: "sign", conclusion: "failure" }],
+    2: [{ name: "deploy", steps: [{ name: "Set up job" }, { name: `Deploy functions,firestore,storage,hosting at ${sha("b")}` }] }, { name: "sign", conclusion: "success" }],
+    1: [{ name: "deploy", steps: [{ name: `Deploy hosting at ${sha("a")}` }] }, { name: "sign", conclusion: "success" }],
+  };
+  const runs = [run(6, "f", { head_branch: "other" }), run(5, "e"), run(4, "d"), run(3, "c"), run(2, "b"), run(1, "a")];
+  assert.deepEqual(await newestHostingDeploy(runs, (r) => jobs[r.id]), { run: "https://github.com/o/r/actions/runs/2", commit: sha("b") });
+  assert.equal(await newestHostingDeploy(runs.slice(0, 2), (r) => jobs[r.id]), null);
+});
+
+test("artifacts are compared with the repository before signing", () => {
+  const commit = execFileSync("git", ["rev-parse", "HEAD"]).toString().trim();
+  const show = (path) => execFileSync("git", ["show", `${commit}:${path}`]);
+  const tracked = execFileSync("git", ["ls-tree", "-r", "--name-only", commit, "account-web/"]).toString().split("\n").filter(Boolean);
+  const write = (files) => {
+    const dir = mkdtempSync(join(tmpdir(), "compare-"));
+    const manifest = [];
+    for (const [artifact, bytes] of files) {
+      mkdirSync(dirname(join(dir, artifact.file)), { recursive: true });
+      writeFileSync(join(dir, artifact.file), bytes);
+      manifest.push(artifact);
+    }
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+    return dir;
+  };
+  const config = [{ kind: "hosting-config", name: "hosting/.serving-config.json", file: "hosting-config.json" },
+    canonicalJson(servingConfig(JSON.parse(show("firebase.json").toString())))];
+  const hosting = expectedHostingPaths(tracked).map((path) => [
+    { kind: "hosting", name: `hosting${path}`, file: `hosting${path}`, repoPath: `account-web${path}` }, show(`account-web${path}`)]);
+  assert.deepEqual(compareDirectory(write([config, ...hosting]), commit), []);
+  // A changed file, a changed header and a missing file are each reported.
+  const [first, ...rest] = hosting;
+  const changed = compareDirectory(write([[config[0], config[1].replace("DENY", "SAMEORIGIN")], [first[0], Buffer.from("changed")], ...rest.slice(1)]), commit);
+  assert.ok(changed.some((p) => p.startsWith("hosting/.serving-config.json:")), changed.join());
+  assert.ok(changed.some((p) => p.startsWith(`${first[0].name}:`)), changed.join());
+  assert.ok(changed.some((p) => p === `hosting is missing ${rest[0][0].repoPath.slice("account-web".length)}`), changed.join());
+  // A rules release with no file here can't be signed.
+  assert.deepEqual(compareDirectory(write([[{ kind: "rules", name: "rules/x", file: "x.rules", repoPath: null }, "x"]]), commit), ["rules/x: no file in this repository deploys it"]);
 });

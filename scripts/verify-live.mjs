@@ -5,6 +5,9 @@
 //    .github/workflows/deploy.yml on refs/heads/main.
 // 2. Contents: source archives, rules, indexes and hosting files must match the repository at the
 //    commit named in their attestation, and no file from that commit may be missing from hosting.
+//    Every hosting file and the hosting serving config (headers, redirects, rewrites) must come from
+//    the newest successful Deploy run that deployed hosting, and that config must match firebase.json
+//    at its commit, so an older signed release cannot be put back.
 // 3. Inventory: nothing may run outside what this repository deploys (other Cloud Run services,
 //    hosting sites or channels, Firestore databases).
 // 4. Audit log: Google Cloud's Admin Activity log, from MONITORING_STARTS, must show no deploys or
@@ -12,14 +15,18 @@
 //    Other configuration changes are listed for transparency.
 //
 // Usage: node scripts/verify-live.mjs
+//        node scripts/verify-live.mjs --compare <dir> --commit <sha>
 // Needs GOOGLE_ACCESS_TOKEN (read-only verifier account) and GH_TOKEN, and a full git history.
 // Writes a Markdown report to $GITHUB_STEP_SUMMARY when set. Exits 1 if anything fails.
+// --compare checks artifacts written by live-state.mjs against the repository at <sha> without
+// signatures or network access; the Deploy workflow runs it before signing.
 
 import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 
 import {
   ALL_TARGETS, HOSTING_SITE, PROJECT, canonicalJson, collect, listFunctions, listRunServices, normalizeIndexes,
@@ -131,6 +138,78 @@ export function expectedHostingPaths(repoPaths) {
       p !== "/firebase.json");
 }
 
+/**
+ * Hosting's serving config (the shape the Hosting API returns as version.config) for a firebase.json:
+ * headers, redirects and rewrites, the way the Firebase CLI converts them. Throws on hosting settings
+ * this comparison does not cover, so a new kind of setting can't go unchecked.
+ */
+export function servingConfig(firebaseJson) {
+  const hosting = firebaseJson.hosting ?? {};
+  for (const key of Object.keys(hosting)) {
+    if (!["public", "ignore", "headers", "redirects", "rewrites"].includes(key)) throw new Error(`hosting.${key} is not compared`);
+  }
+  const pattern = (rule) => (rule.regex !== undefined ? { regex: rule.regex } : { glob: rule.source });
+  const config = {};
+  if (hosting.headers?.length) {
+    config.headers = hosting.headers.map((rule) => ({ ...pattern(rule), headers: Object.fromEntries(rule.headers.map(({ key, value }) => [key, value])) }));
+  }
+  if (hosting.redirects?.length) {
+    config.redirects = hosting.redirects.map((rule) => ({ ...pattern(rule), statusCode: rule.type ?? 301, location: rule.destination }));
+  }
+  if (hosting.rewrites?.length) {
+    config.rewrites = hosting.rewrites.map((rule) => {
+      if (typeof rule.destination === "string") return { ...pattern(rule), path: rule.destination };
+      // Second-generation functions are served by the Cloud Run service of the same (lowercased) name.
+      if (rule.function?.functionId) return { ...pattern(rule), run: { serviceId: rule.function.functionId.toLowerCase(), region: rule.function.region ?? "us-central1" } };
+      throw new Error(`rewrite for ${rule.source ?? rule.regex} is not compared`);
+    });
+  }
+  return config;
+}
+
+/** Targets and dry-run flag from the Deploy job's step name ("Deploy <only> at <sha>[ (dry run)]"), else null. */
+export function deployStep(name) {
+  const match = /^Deploy (\S+) at ([0-9a-f]{40})( \(dry run\))?$/.exec(name ?? "");
+  return match ? { only: match[1], commit: match[2], dryRun: Boolean(match[3]) } : null;
+}
+
+/**
+ * The newest Deploy run that put hosting live: a successful run on main whose deploy step included a
+ * hosting target, was not a dry run, and whose sign job succeeded. `runs` are newest first (the
+ * Actions API's order); `jobsOf(run)` returns the run's jobs. Returns {run, commit} or null.
+ */
+export async function newestHostingDeploy(runs, jobsOf) {
+  for (const run of runs) {
+    if (run.conclusion !== "success" || run.head_branch !== "main" || run.event !== "workflow_dispatch") continue;
+    const jobs = await jobsOf(run);
+    const step = jobs.find((job) => job.name === "deploy")?.steps?.map((s) => deployStep(s.name)).find(Boolean);
+    if (!step || step.dryRun || step.commit !== run.head_sha) continue;
+    let hosting = false;
+    try {
+      hosting = selectTargets(step.only).hosting;
+    } catch {
+      continue;
+    }
+    if (!hosting || jobs.find((job) => job.name === "sign")?.conclusion !== "success") continue;
+    return { run: run.html_url, commit: run.head_sha };
+  }
+  return null;
+}
+
+function gh(path) {
+  return JSON.parse(execFileSync("gh", ["api", path], { stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 }).toString());
+}
+
+/** newestHostingDeploy over this repository's Deploy runs, a page at a time. */
+async function findHostingDeploy() {
+  for (let page = 1; page <= 10; page += 1) {
+    const { workflow_runs: runs = [] } = gh(`repos/${REPOSITORY}/actions/workflows/deploy.yml/runs?branch=main&status=success&per_page=30&page=${page}`);
+    const found = await newestHostingDeploy(runs, (run) => gh(`repos/${REPOSITORY}/actions/runs/${run.id}/jobs?per_page=100`).jobs ?? []);
+    if (found || runs.length < 30) return found;
+  }
+  return null;
+}
+
 function git(...args) {
   return execFileSync("git", args, { maxBuffer: 64 * 1024 * 1024 });
 }
@@ -175,8 +254,42 @@ function compareContents(artifact, path, commit) {
     if (!artifact.repoPath) return ["no file in this repository deploys it"];
     return fileAtCommit(commit, artifact.repoPath)?.equals(readFileSync(path)) ? [] : [`differs from ${artifact.repoPath}`];
   }
-  // Function and hosting settings have no single repository file; their signature is the check.
+  if (artifact.kind === "hosting-config") {
+    const repo = fileAtCommit(commit, "firebase.json");
+    if (!repo) return ["firebase.json is not in the repository"];
+    try {
+      return canonicalJson(servingConfig(JSON.parse(repo.toString()))) === readFileSync(path, "utf8")
+        ? [] : ["headers, redirects or rewrites differ from firebase.json"];
+    } catch (error) {
+      return [`firebase.json: ${error.message}`];
+    }
+  }
+  // Function settings have no single repository file; their signature is the check.
   return [];
+}
+
+/** Hosting paths deployed from `commit` that `livePaths` lacks. */
+function missingHostingPaths(commit, livePaths) {
+  const repoPaths = git("ls-tree", "-r", "--name-only", commit, "account-web/").toString().split("\n").filter(Boolean);
+  return expectedHostingPaths(repoPaths).filter((path) => !livePaths.includes(path));
+}
+
+/**
+ * Compares artifacts written by live-state.mjs in `dir` with the repository at `commit`, with no
+ * signatures or network: the Deploy workflow's check before it signs. Returns problem messages.
+ */
+export function compareDirectory(dir, commit) {
+  const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+  const problems = [];
+  const hostingPaths = [];
+  for (const artifact of manifest) {
+    for (const problem of compareContents(artifact, join(dir, artifact.file), commit)) problems.push(`${artifact.name}: ${problem}`);
+    if (artifact.kind === "hosting") hostingPaths.push(artifact.repoPath.slice("account-web".length));
+  }
+  if (manifest.some((artifact) => artifact.kind === "hosting-config")) {
+    for (const path of missingHostingPaths(commit, hostingPaths)) problems.push(`hosting is missing ${path}`);
+  }
+  return problems;
 }
 
 function verifySignature(path) {
@@ -251,8 +364,14 @@ async function main() {
 
   // 1 and 2: signatures and contents.
   const rows = [];
-  let hostingCommit;
-  let hostingLive = [];
+  let hostingDeploy = null;
+  const hostingLive = [];
+  try {
+    hostingDeploy = await findHostingDeploy();
+    if (!hostingDeploy) fail("No successful Deploy run on main has deployed hosting");
+  } catch (error) {
+    fail(`Could not list Deploy runs: ${error.message}`);
+  }
   try {
     const dir = mkdtempSync(join(tmpdir(), "live-"));
     const artifacts = await collect(token, selectTargets(ALL_TARGETS));
@@ -269,9 +388,10 @@ async function main() {
         problems = ["no valid signature from the Deploy workflow on main"];
         if (process.env.VERBOSE) console.error(artifact.name, error.stderr?.toString() ?? error.message);
       }
-      if (artifact.kind === "hosting") {
-        hostingLive.push(artifact.repoPath.slice("account-web".length));
-        if (commit) hostingCommit ??= commit;
+      if (artifact.kind === "hosting") hostingLive.push(artifact.repoPath.slice("account-web".length));
+      // Hosting is replaced as a whole, so all of it must come from the newest hosting deploy.
+      if ((artifact.kind === "hosting" || artifact.kind === "hosting-config") && run && hostingDeploy && run !== hostingDeploy.run) {
+        problems.push(`signed by an older deploy than the newest hosting deploy ([run](${hostingDeploy.run}))`);
       }
       if (problems.length) failed = true;
       const where = commit ? `[\`${commit.slice(0, 7)}\`](https://github.com/${REPOSITORY}/commit/${commit})` +
@@ -282,11 +402,8 @@ async function main() {
     fail(`Could not read production: ${error.message}`);
   }
   report.push("### Live artifacts", "", "| | Artifact | SHA-256 | Signed deploy | Problem |", "| --- | --- | --- | --- | --- |", ...rows, "");
-  if (hostingCommit) {
-    const repoPaths = git("ls-tree", "-r", "--name-only", hostingCommit, "account-web/").toString().split("\n").filter(Boolean);
-    for (const path of expectedHostingPaths(repoPaths)) {
-      if (!hostingLive.includes(path)) fail(`Hosting is missing ${path} from the signed commit`);
-    }
+  if (hostingDeploy) {
+    for (const path of missingHostingPaths(hostingDeploy.commit, hostingLive)) fail(`Hosting is missing ${path} from the signed commit`);
   }
 
   // 3: inventory.
@@ -329,8 +446,17 @@ async function main() {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
-    console.error(error.message);
-    process.exitCode = 1;
-  });
+  const { values } = parseArgs({ options: { compare: { type: "string" }, commit: { type: "string" } } });
+  if (values.compare !== undefined) {
+    if (!/^[0-9a-f]{40}$/.test(values.commit ?? "")) throw new Error("--compare needs --commit <full sha>");
+    const problems = compareDirectory(values.compare, values.commit);
+    for (const problem of problems) console.error(`::error::${problem}`);
+    console.log(problems.length ? `${problems.length} live artifacts differ from ${values.commit}` : `Every live artifact matches ${values.commit}`);
+    process.exitCode = problems.length ? 1 : 0;
+  } else {
+    main().catch((error) => {
+      console.error(error.message);
+      process.exitCode = 1;
+    });
+  }
 }

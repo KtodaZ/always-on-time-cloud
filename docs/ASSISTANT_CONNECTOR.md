@@ -57,22 +57,35 @@ parameter (RFC 9207).
   They are cached for a day. Only `/oauth/authorize` fetches one; the token and revoke endpoints
   use the stored client and reject unknown ones. A failed fetch is remembered for 10 minutes, and
   fetches are capped per host and overall.
-- Only Claude and ChatGPT are named, and only when their `client_id` is a metadata document on
-  their own host: `claude.ai` (Claude) or `chatgpt.com` (ChatGPT), exactly. Every other client,
-  including any dynamically registered one, whatever `client_name` it declares, is shown as
-  "Unverified app" together with the host its codes are sent to (`clientHost`, the redirect URI's
-  host). The consent page warns about unverified apps.
+- Only Claude and ChatGPT are named, and only for the exact metadata document URLs they publish:
+
+  | `client_id` | Shown as | Redirect URIs must be |
+  | --- | --- | --- |
+  | `https://claude.ai/oauth/mcp-oauth-client-metadata` | Claude | on `claude.ai` |
+  | `https://claude.ai/oauth/claude-code-client-metadata` | Claude Code | loopback |
+  | `https://chatgpt.com/oauth/client.json`, `https://chatgpt.com/oauth/{callback_id}/client.json` | ChatGPT | on `chatgpt.com` |
+
+  A document at one of these URLs that lists any other redirect URI is refused. Every other client,
+  including other documents on those hosts and any dynamically registered client, whatever
+  `client_name` it declares, is shown as "Unverified app" together with the host its codes are
+  sent to (`clientHost`, the redirect URI's host). The consent page warns about unverified apps.
+- A metadata document `client_id` may not have a query string, and the document must be served with
+  a JSON content type. Grant types this server doesn't offer are ignored, and a document that lists
+  `none` among its `token_endpoint_auth_methods_supported` is used as a public client.
 - Errors and cancellation redirect back only to a verified client. For an unverified client, a bad
   authorization request shows an error page and Cancel shows "Cancelled", so the endpoint can't be
   used as an open redirect.
 - Redirect URIs must match exactly; `http` is allowed only for loopback hosts, where the port may
   differ.
-- The consent page asks the user to sign in with the Google account they use in the app. Approval
-  works only for an account that has turned on account sync.
+- The consent page asks the user to sign in with the Google account they use in the app, every
+  time: the sign-in is kept in memory only, so it never carries over from another visit or tab. It
+  asks the user to continue only if they started the connection from that assistant themselves just
+  now. Approval works only for an account that has turned on account sync.
 - Tokens are random and opaque; only their SHA-256 hashes are stored. Access tokens last 1 hour,
   refresh tokens 90 days and rotate on every use. Reusing a spent authorization code or refresh
   token within 30 seconds is refused (`invalid_grant`) without other effect, which covers a client
-  retrying a lost response; reusing it later revokes the connection.
+  retrying a lost response; reusing it later revokes the connection. A spent code only does that
+  when the client it was issued to presents it with the right PKCE verifier.
 - A connection (grant) is created when the code is exchanged. Connecting the same assistant again
   replaces its earlier connection. Connections idle for 90 days are removed.
 - Disconnecting the last assistant deletes the shared snapshot, device and activity documents.
@@ -212,12 +225,14 @@ To try the server with [MCP Inspector](https://github.com/modelcontextprotocol/i
 printf 'APNS_AUTH_KEY_P8=x\nFEEDBACK_DISCORD_WEBHOOK_URL=http://127.0.0.1:9/\nTOMTOM_API_KEY=x\nTRAVEL_ROUTE_API_KEY=x\n' > functions/.secret.local
 cp functions/.env.always-on-time-zombit-2026 functions/.env.local
 echo 'ASSISTANT_ORIGIN=http://127.0.0.1:5012' >> functions/.env.local
-npx firebase emulators:start --only auth,firestore,functions,hosting --project demo-account-sync
+node scripts/emulator-config.mjs
+npx firebase emulators:start --config firebase.emulators.json --only auth,firestore,functions,hosting --project demo-account-sync
 npx @modelcontextprotocol/inspector
 ```
 
 In Inspector choose Streamable HTTP and `http://127.0.0.1:5012/mcp`, then connect. The consent page
-signs in through the Auth emulator; create `accounts/{uid}` with `active: true, schemaVersion: 1`
+signs in through the Auth emulator, which the production Content-Security-Policy doesn't allow:
+`firebase.emulators.json` (written by `scripts/emulator-config.mjs`, not committed) adds it; create `accounts/{uid}` with `active: true, schemaVersion: 1`
 in the Emulator UI so the account counts as set up. Without a phone, tools report that no phone has
 shared its alarms; [`functions/testing/assistant-e2e.cjs`](../functions/testing/assistant-e2e.cjs)
 shows how to write a device and snapshot to stand in for one. In the emulator, FCM messages are
