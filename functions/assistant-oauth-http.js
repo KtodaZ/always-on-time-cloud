@@ -5,8 +5,12 @@
 // a legacy host (`legacyHosts`) get a 308 to the public origin, which keeps the method and body.
 
 const { OAuthError, authorizationServerMetadata, movedUrl, protectedResourceMetadata } = require("./assistant-oauth");
-const { ClientError, registerClient } = require("./assistant-oauth-clients");
-const { LIMITS, clientKeys, consume, createInstanceLimiters } = require("./assistant-limits");
+const { ClientError, registerClient, validateClientMetadata } = require("./assistant-oauth-clients");
+const { COLLECTIONS } = require("./assistant-data");
+const {
+  LIMITS, admitDirect, clientKeys, consume, countFailure, createInstanceLimiters, failuresExceeded,
+} = require("./assistant-limits");
+const { sha256Hex } = require("./assistant-records");
 const { errorFields, logEvent } = require("./assistant-log");
 
 const MAX_BODY_CHARS = 16 * 1024;
@@ -79,25 +83,73 @@ function basicAuth(req) {
   return { clientId: decode(decoded.slice(0, separator)), clientSecret: decode(decoded.slice(separator + 1)) };
 }
 
+const GRANT_VALUE = { authorization_code: /^aot_code_[A-Za-z0-9_-]{43}$/, refresh_token: /^aot_rt_[A-Za-z0-9_-]{43}$/ };
+const REQUEST_ID = /^[A-Za-z0-9_-]{20,100}$/;
+const MAX_CLIENT_ID_CHARS = 2048;
+const isClientId = (value) => typeof value === "string" && value.length > 0 && value.length <= MAX_CLIENT_ID_CHARS;
+
+/**
+ * What a token request presents, from checks that cost nothing: {clientId, type, value, hash}, or
+ * an OAuthError for a request that can't succeed.
+ */
+function presentedGrant(body, basic) {
+  const type = body.grant_type;
+  if (!Object.hasOwn(GRANT_VALUE, type)) {
+    return new OAuthError("unsupported_grant_type", "grant_type must be authorization_code or refresh_token");
+  }
+  const clientId = basic?.clientId ?? body.client_id;
+  if (!isClientId(clientId)) return new OAuthError("invalid_client", "client_id is missing", 401);
+  const value = type === "authorization_code" ? body.code : body.refresh_token;
+  if (typeof value !== "string" || !GRANT_VALUE[type].test(value)) {
+    return new OAuthError("invalid_grant", type === "authorization_code" ? "invalid authorization code" : "invalid refresh token");
+  }
+  return { clientId, type, value, hash: sha256Hex(value) };
+}
+
 function createOAuthHandler({
   oauth, db, now = Date.now, logger, usage = async () => {}, limiters = createInstanceLimiters(), legacyHosts = [],
 }) {
   const origin = oauth.urls.origin;
-  /**
-   * True when the request is over a limit: the caller's network hop and `globalCap` (in memory),
-   * then the per-caller `name` limit (Firestore). See clientKeys for what the keys can and can't prove.
-   */
-  const limited = async (req, name, globalCap) => {
-    const time = now();
-    const { client, hop } = clientKeys(req);
-    if (!limiters.hop(hop, time)) return true;
-    if (globalCap && !limiters[globalCap]("all", time)) return true;
-    return !(await consume(db, `${name}|${client}`, LIMITS[name], time));
+  const hosts = [new URL(origin).host, ...legacyHosts];
+  const consentUrl = oauth.urls.consent;
+  // Refused requests are counted in memory and written with the next usage update, so a refusal
+  // never costs a database write.
+  const deferUsage = (counts) => usage.defer?.(counts);
+  const caller = (req) => clientKeys(req, { hosts });
+  const refuse = (route, extra = {}) => {
+    deferUsage({ rateLimited: 1 });
+    logEvent(logger, "warn", "oauth.error", { path: route, status: 429, errorCode: "too_many_requests", ...extra });
   };
-  const tooMany = async (res, route) => {
-    await usage({ rateLimited: 1 });
-    logEvent(logger, "warn", "oauth.error", { path: route, status: 429, errorCode: "too_many_requests" });
+  const tooMany = (res, route) => {
+    refuse(route);
     return send(res, 429, { error: "too_many_requests", error_description: "Too many attempts. Wait a few minutes and try again." }, { ...CORS, "Retry-After": "600" });
+  };
+  /**
+   * For the consent steps, which run in the user's browser: a direct call within its budgets, the
+   * caller's Firestore limit `name` (keyed as clientKeys describes), and the failure budgets.
+   */
+  const browserLimited = async (from, name, failures, time) => {
+    if (!admitDirect(limiters, from, time)) return true;
+    if (!(await consume(db, `${name}|${from.client}`, LIMITS[name], time))) return true;
+    return failuresExceeded(limiters, failures, from, time);
+  };
+  /** Runs `work`; an OAuthError counts against the caller's `failures` budgets. */
+  const counting = async (failures, from, work) => {
+    try {
+      return await work();
+    } catch (error) {
+      if (error instanceof OAuthError) countFailure(limiters, failures, from, now());
+      throw error;
+    }
+  };
+  /** True when the presented code or refresh token exists, issued to this client (one read). */
+  const grantExists = async (grant) => {
+    const collection = grant.type === "authorization_code" ? COLLECTIONS.codes : COLLECTIONS.tokens;
+    const doc = await db.collection(collection).doc(grant.hash).get();
+    if (!doc.exists) return false;
+    const data = doc.data();
+    if (grant.type === "refresh_token" && data.kind !== "refresh") return false;
+    return data.clientId === grant.clientId;
   };
 
   const routes = {
@@ -106,13 +158,30 @@ function createOAuthHandler({
     "GET /.well-known/oauth-authorization-server": (req, res) => send(res, 200, authorizationServerMetadata(origin), CORS),
 
     "POST /oauth/register": async (req, res) => {
-      if (await limited(req, "register") || !(await consume(db, "registerGlobal|all", LIMITS.registerGlobal, now()))) {
-        await usage({ rateLimited: 1 });
-        logEvent(logger, "warn", "oauth.register", { kind: "dcr", outcome: "rate_limited" });
+      const from = caller(req);
+      const time = now();
+      const refused = () => {
+        refuse("/oauth/register");
         return send(res, 429, { error: "too_many_requests", error_description: "Too many registrations; try again later." }, CORS);
+      };
+      if (!admitDirect(limiters, from, time) || limiters.registerFailures.exceeded(from.client, time)) return refused();
+      const body = bodyOf(req);
+      // Only valid registrations count against the registration limits.
+      try {
+        validateClientMetadata(body, { kind: "dcr", clientId: "aot_client_check" });
+      } catch (error) {
+        if (!(error instanceof ClientError)) throw error;
+        limiters.registerFailures(from.client, time);
+        logEvent(logger, "info", "oauth.register", { kind: "dcr", outcome: "rejected", errorCode: error.error, reason: error.message });
+        return send(res, 400, { error: error.error, error_description: error.message }, CORS);
+      }
+      if (!(await consume(db, `register|${from.client}`, LIMITS.register, time)) ||
+          !(await consume(db, `registerGlobal|${from.scope}`, LIMITS.registerGlobal, time))) {
+        logEvent(logger, "warn", "oauth.register", { kind: "dcr", outcome: "rate_limited" });
+        return refused();
       }
       try {
-        const registered = await registerClient(db, bodyOf(req), { now: now() });
+        const registered = await registerClient(db, body, { now: time });
         logEvent(logger, "info", "oauth.register", {
           kind: "dcr", clientId: registered.client_id, client: registered.client_name, outcome: "ok",
         });
@@ -127,30 +196,85 @@ function createOAuthHandler({
     },
 
     "GET /oauth/authorize": async (req, res) => {
-      if (await limited(req, "authorize", "authorizeGlobal")) return errorPage(res, 429, "Too many attempts. Wait a few minutes and try again.");
-      const result = await oauth.authorize(queryOf(req));
+      const from = caller(req);
+      const time = now();
+      const query = queryOf(req);
+      if (!isClientId(query.client_id) || (query.redirect_uri !== undefined && (typeof query.redirect_uri !== "string" || query.redirect_uri.length > MAX_CLIENT_ID_CHARS))) {
+        if (!admitDirect(limiters, from, time)) return errorPage(res, 429, "Too many attempts. Wait a few minutes and try again.");
+        countFailure(limiters, "authorize", from, time);
+        return errorPage(res, 400, "This assistant could not be identified. Start connecting again from your assistant.");
+      }
+      if (await browserLimited(from, "authorize", "authorize", time)) {
+        refuse("/oauth/authorize");
+        return errorPage(res, 429, "Too many attempts. Wait a few minutes and try again.");
+      }
+      const result = await oauth.authorize(query);
+      if (result.page || !result.redirect.startsWith(`${consentUrl}?`)) countFailure(limiters, "authorize", from, now());
       if (result.page) return errorPage(res, result.page.status, result.page.message);
       return send(res, 302, undefined, { Location: result.redirect });
     },
 
     "POST /oauth/consent": async (req, res) => {
-      if (await limited(req, "consent", "consentGlobal")) return tooMany(res, "/oauth/consent");
-      return send(res, 200, await oauth.consentInfo(bodyOf(req)));
+      const from = caller(req);
+      const time = now();
+      const body = bodyOf(req);
+      if (typeof body.request !== "string" || !REQUEST_ID.test(body.request) || (body.idToken != null && typeof body.idToken !== "string")) {
+        if (!admitDirect(limiters, from, time)) return tooMany(res, "/oauth/consent");
+        countFailure(limiters, "consent", from, time);
+        throw new OAuthError("expired", "This connection request expired. Start connecting again from your assistant.", 404);
+      }
+      if (await browserLimited(from, "consent", "consent", time)) return tooMany(res, "/oauth/consent");
+      return send(res, 200, await counting("consent", from, () => oauth.consentInfo(body)));
     },
 
     "POST /oauth/approve": async (req, res) => {
-      if (await limited(req, "approve", "consentGlobal")) return tooMany(res, "/oauth/approve");
-      return send(res, 200, await oauth.decide(bodyOf(req)));
+      const from = caller(req);
+      const time = now();
+      const body = bodyOf(req);
+      if (typeof body.request !== "string" || !REQUEST_ID.test(body.request)) {
+        if (!admitDirect(limiters, from, time)) return tooMany(res, "/oauth/approve");
+        countFailure(limiters, "consent", from, time);
+        throw new OAuthError("expired", "This connection request expired. Start connecting again from your assistant.", 404);
+      }
+      if (await browserLimited(from, "approve", "consent", time)) return tooMany(res, "/oauth/approve");
+      return send(res, 200, await counting("consent", from, () => oauth.decide(body)));
     },
 
+    /**
+     * Limited per presented grant (client_id, grant type and the code or refresh token), not per
+     * network: assistants call from shared addresses. Failed requests count against the caller's
+     * and the overall failure budgets; once those are used up, a request is still served if its
+     * code or refresh token exists, so a valid refresh is never refused because of them.
+     */
     "POST /oauth/token": async (req, res) => {
-      if (await limited(req, "token", "tokenGlobal")) return tooMany(res, "/oauth/token");
-      return send(res, 200, await oauth.token(bodyOf(req), basicAuth(req)), { ...CORS, Pragma: "no-cache" });
+      const from = caller(req);
+      const time = now();
+      if (!admitDirect(limiters, from, time)) return tooMany(res, "/oauth/token");
+      const body = bodyOf(req);
+      const basic = basicAuth(req);
+      const grant = presentedGrant(body, basic);
+      if (grant instanceof OAuthError) {
+        countFailure(limiters, "token", from, time);
+        throw grant;
+      }
+      if (!limiters.tokenGrant(sha256Hex(`${grant.clientId}|${grant.type}|${grant.hash}`), time)) return tooMany(res, "/oauth/token");
+      if (failuresExceeded(limiters, "token", from, time) && !(await grantExists(grant))) return tooMany(res, "/oauth/token");
+      const tokens = await counting("token", from, () => oauth.token(body, basic));
+      return send(res, 200, tokens, { ...CORS, Pragma: "no-cache" });
     },
 
     "POST /oauth/revoke": async (req, res) => {
-      if (await limited(req, "token", "tokenGlobal")) return tooMany(res, "/oauth/revoke");
-      await oauth.revoke(bodyOf(req), basicAuth(req));
+      const from = caller(req);
+      const time = now();
+      // Not refused for other callers' failures: a disconnect must reach the server.
+      if (!admitDirect(limiters, from, time) || !limiters.revoke(from.client, time)) return tooMany(res, "/oauth/revoke");
+      const body = bodyOf(req);
+      const basic = basicAuth(req);
+      if (!isClientId(basic?.clientId ?? body.client_id)) {
+        countFailure(limiters, "token", from, time);
+        throw new OAuthError("invalid_client", "client_id is missing", 401);
+      }
+      await counting("token", from, () => oauth.revoke(body, basic));
       return send(res, 200, {}, CORS);
     },
   };
@@ -188,4 +312,4 @@ function createOAuthHandler({
   };
 }
 
-module.exports = { basicAuth, createOAuthHandler, send };
+module.exports = { basicAuth, createOAuthHandler, presentedGrant, send };

@@ -1,13 +1,16 @@
 "use strict";
 
-// Anonymous daily usage totals for the assistant connector: assistantUsage/{yyyy-mm-dd} holds only
-// counters (no user ids, no content). Each event is a single merged increment write.
+// Anonymous daily usage totals for the assistant connector: only counters (no user ids, no
+// content). Each event is a single merged increment write to one of SHARDS documents,
+// assistantUsage/{yyyy-mm-dd}/shards/{n}, so busy days don't contend on one document; the day's
+// totals are the day document (written before sharding) plus its shards.
 
 const { COLLECTIONS } = require("./assistant-data");
 
 const ASSISTANTS = ["claude", "chatgpt", "other"];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const SHARDS = 10;
 const day = (now) => new Date(now).toISOString().slice(0, 10);
 
 /** The UTC date of the Monday that starts `now`'s week, as yyyy-mm-dd. */
@@ -27,17 +30,33 @@ function nest(counts, increment) {
   return out;
 }
 
-function createUsage({ db, increment, now = Date.now, logger }) {
-  return async (counts) => {
-    const update = nest(counts, increment);
+/**
+ * `usage(counts)` writes counts (plus any deferred ones) to a random shard of today's totals.
+ * `usage.defer(counts)` only adds them up in memory, for refused requests that must not cost a
+ * write; they go out with the instance's next write.
+ */
+function createUsage({ db, increment, now = Date.now, logger, random = Math.random }) {
+  let deferred = {};
+  const usage = async (counts) => {
+    const pending = deferred;
+    deferred = {};
+    const merged = { ...pending };
+    for (const [path, amount] of Object.entries(counts ?? {})) merged[path] = (merged[path] ?? 0) + amount;
+    const update = nest(merged, increment);
     if (Object.keys(update).length === 0) return;
+    const shard = String(Math.floor(random() * SHARDS) % SHARDS);
     try {
-      await db.collection(COLLECTIONS.usage).doc(day(now())).set(update, { merge: true });
+      await db.collection(COLLECTIONS.usage).doc(day(now())).collection("shards").doc(shard).set(update, { merge: true });
     } catch (error) {
       // Counting must never break the request it counts.
       logger?.warn?.("Assistant usage counter write failed", { name: error?.name });
     }
   };
+  usage.defer = (counts) => {
+    nest(counts, (amount) => amount);
+    for (const [path, amount] of Object.entries(counts ?? {})) if (amount) deferred[path] = (deferred[path] ?? 0) + amount;
+  };
+  return usage;
 }
 
 const sum = (map) => Object.values(map ?? {}).reduce((total, value) => total + (Number.isFinite(value) ? value : 0), 0);
@@ -93,11 +112,18 @@ function formatWeeklySummary(days) {
   return `Assistants this week: ${parts.join(", ")}.`;
 }
 
-/** Reads the seven daily documents before `now` (UTC days) and formats them. Run it on Mondays. */
-async function weeklySummary(db, now) {
-  const ids = Array.from({ length: 7 }, (_, index) => day(now - (index + 1) * DAY_MS));
-  const docs = await Promise.all(ids.map((id) => db.collection(COLLECTIONS.usage).doc(id).get()));
-  return formatWeeklySummary(docs.filter((doc) => doc.exists).map((doc) => doc.data()));
+/** One UTC day's totals: the day document and its shards. */
+async function readDay(db, id) {
+  const ref = db.collection(COLLECTIONS.usage).doc(id);
+  const [doc, shards] = await Promise.all([ref.get(), ref.collection("shards").get()]);
+  return [...(doc.exists ? [doc.data()] : []), ...shards.docs.map((shard) => shard.data())];
 }
 
-module.exports = { ASSISTANTS, combineDays, createUsage, day, formatWeeklySummary, nest, week, weeklySummary };
+/** Reads the seven days before `now` (UTC days) and formats them. Run it on Mondays. */
+async function weeklySummary(db, now) {
+  const ids = Array.from({ length: 7 }, (_, index) => day(now - (index + 1) * DAY_MS));
+  const days = await Promise.all(ids.map((id) => readDay(db, id)));
+  return formatWeeklySummary(days.flat());
+}
+
+module.exports = { ASSISTANTS, SHARDS, combineDays, createUsage, day, formatWeeklySummary, nest, readDay, week, weeklySummary };

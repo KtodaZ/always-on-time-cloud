@@ -14,9 +14,16 @@ const { LEGACY_HOSTS } = require("../assistant-oauth");
 const { createRecordingMessaging } = require("../assistant-push");
 const { calendarKey, occurrenceKey, seriesKey } = require("../assistant-records");
 const { DESTINATIONS } = require("../assistant-snapshot");
-const { createUsage } = require("../assistant-usage");
+const { combineDays, createUsage } = require("../assistant-usage");
+const { createInstanceLimiters, createMemoryLimiter } = require("../assistant-limits");
 
 const T0 = Date.parse("2026-10-16T12:00:00Z");
+// Access tokens are aot_at_ and 43 base64url characters.
+const accessToken = (name) => `aot_at_${name.padEnd(43, "x")}`;
+const BOB = accessToken("bob");
+const FORGED = accessToken("forged");
+/** The day's usage totals across its shards. */
+const usageOf = (db, id = "2026-10-16") => combineDays([...db.documents].filter(([path]) => path.startsWith(`assistantUsage/${id}/shards/`)).map(([, data]) => data));
 const HOUR = 60 * 60 * 1000;
 const WORK = calendarKey("com.google", "alex@example.com", "alex@example.com");
 const OTHER = calendarKey("com.google", "alex@example.com", "en.usa#holiday@group.v.calendar.google.com");
@@ -55,7 +62,7 @@ function snapshotPayload({ appliedThrough = T0 - HOUR } = {}) {
   });
 }
 
-function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabilities = ["travel", "spokenAlarms", "pause"], payload = snapshotPayload, legacyHosts } = {}) {
+function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabilities = ["travel", "spokenAlarms", "pause"], payload = snapshotPayload, legacyHosts, limiters } = {}) {
   const db = new FakeFirestore();
   const clock = { time: T0 };
   db.now = () => clock.time;
@@ -97,17 +104,18 @@ function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabil
     usage: createUsage({ db, increment: (n) => ({ __increment: n }), now: () => clock.time }),
     accountEmails: async () => ["alex@example.com"],
     legacyHosts,
+    limiters,
     sdk: loadSdk(),
   });
   db.documents.set("accounts/alice", { active: true, schemaVersion: 1 });
-  const token = "aot_at_alice-test-token";
+  const token = accessToken("alice-test-token");
   const grant = { uid: "alice", clientId: "https://claude.ai/oauth/mcp-oauth-client-metadata", clientName: "Claude", assistant: "claude", scopes, setupConfirmedAt: null, lastUsedAt: new Date(T0) };
   db.documents.set("oauthGrants/g1", grant);
   db.documents.set(`oauthTokens/${createHash("sha256").update(token).digest("hex")}`, { kind: "access", grantId: "g1", uid: "alice", clientId: grant.clientId, expiresAt: new Date(T0 + HOUR) });
   // Bob is another account with his own connection and no phone.
   db.documents.set("oauthGrants/g2", { ...grant, uid: "bob" });
   db.documents.set("accounts/bob", { active: true, schemaVersion: 1 });
-  db.documents.set(`oauthTokens/${createHash("sha256").update("aot_at_bob").digest("hex")}`, { kind: "access", grantId: "g2", uid: "bob", clientId: grant.clientId, expiresAt: new Date(T0 + HOUR) });
+  db.documents.set(`oauthTokens/${createHash("sha256").update(BOB).digest("hex")}`, { kind: "access", grantId: "g2", uid: "bob", clientId: grant.clientId, expiresAt: new Date(T0 + HOUR) });
   if (phone) {
     db.documents.set("accounts/alice/assistantDevices/11111111-1111-4111-8111-111111111111", {
       platform: "android", deviceName: "Pixel 9", appVersion: "5.2.0", fcmToken: "fcm-token", capabilities, updatedAt: new Date(T0),
@@ -135,13 +143,22 @@ async function withServer(handler, run) {
     });
     return { status: response.status, headers: response.headers, body: await response.json() };
   };
+  /** A raw POST with any body and extra headers. */
+  const post = async (token, body, headers = {}) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, headers: response.headers, body: await response.json() };
+  };
   const call = async (token, name, args = {}) => {
     const { body } = await rpc(token, "tools/call", { name, arguments: args });
     assert.ok(body.result, JSON.stringify(body));
     return { ...body.result, text: body.result.content.map((item) => item.text).join("\n") };
   };
   try {
-    await run({ url, rpc, call });
+    await run({ url, rpc, call, post });
   } finally {
     server.close();
   }
@@ -153,7 +170,7 @@ test("requests without a valid token get 401 with the protected resource metadat
     const missing = await rpc(null, "tools/list");
     assert.equal(missing.status, 401);
     assert.match(missing.headers.get("www-authenticate"), /^Bearer resource_metadata="https:\/\/alwaysontime\.zombit\.io\/\.well-known\/oauth-protected-resource\/mcp"/);
-    const bad = await rpc("aot_at_forged", "tools/list");
+    const bad = await rpc(FORGED, "tools/list");
     assert.equal(bad.status, 401);
     assert.match(bad.headers.get("www-authenticate"), /error="invalid_token"/);
   });
@@ -244,7 +261,7 @@ test("setup test pings the phone, waits for its answer and confirms the connecti
     assert.ok(db.documents.get("oauthGrants/g1").setupConfirmedAt instanceof Date);
     assert.match((await call(token, "get_status")).text, /Setup confirmed/);
   });
-  const usage = db.documents.get("assistantUsage/2026-10-16");
+  const usage = usageOf(db);
   assert.equal(usage.setupTests.received, 1);
   assert.equal(usage.setupTests.noAnswer, 1);
   assert.equal(usage.tools.test_connection, 2);
@@ -288,7 +305,7 @@ test("travel alarms mention Plus for live traffic, and the Plus link is counted"
     const event = await call(token, "open_in_app", { destination: "event", key: DENTIST.slice(0, 12) });
     assert.equal(event.structuredContent.link, `https://alwaysontime.zombit.io/open/event/${DENTIST}`);
   });
-  assert.equal(db.documents.get("assistantUsage/2026-10-16").plusGate, 2);
+  assert.equal(usageOf(db).plusGate, 2);
 });
 
 test("a change from Google Calendar ids is validated, logged, pushed and confirmed", async () => {
@@ -430,7 +447,7 @@ test("undo restores the previous values once, and refuses after a newer change",
     await call(token, "undo", { changeId: fresh.structuredContent.changeId });
     assert.equal(db.documents.get(`accounts/alice/values/${DENTIST}`).payload, "null");
   });
-  assert.equal(db.documents.get("assistantUsage/2026-10-16").undos, 3);
+  assert.equal(usageOf(db).undos, 3);
 });
 
 test("refresh asks the phone to publish and returns the fresh copy", async () => {
@@ -464,15 +481,15 @@ test("alarm history lists recent alarms in the phone's time zone", async () => {
 test("tokens only reach their own account, and read-only connections cannot change anything", async () => {
   const { db, handler, token } = setup();
   await withServer(handler, async ({ call }) => {
-    const bob = await call("aot_at_bob", "list_upcoming_alarms");
+    const bob = await call(BOB, "list_upcoming_alarms");
     assert.equal(bob.structuredContent.needsPhone, true, "Bob's token never sees Alice's snapshot");
-    await call("aot_at_bob", "update_settings", { settings: { alarmVolume: 10 } });
+    await call(BOB, "update_settings", { settings: { alarmVolume: 10 } });
     assert.equal(db.documents.get("accounts/alice/values/p_alarm_volume"), undefined);
     assert.equal(db.documents.get("accounts/bob/values/p_alarm_volume").payload, "10");
     const alice = await call(token, "resume_alarms");
     const { changeId } = alice.structuredContent;
-    assert.equal((await call("aot_at_bob", "confirm_change", { changeId })).isError, true, "Bob cannot see Alice's change");
-    assert.equal((await call("aot_at_bob", "undo", { changeId })).isError, true, "or undo it");
+    assert.equal((await call(BOB, "confirm_change", { changeId })).isError, true, "Bob cannot see Alice's change");
+    assert.equal((await call(BOB, "undo", { changeId })).isError, true, "or undo it");
     assert.equal(db.documents.get("accounts/alice/values/p_alarms_paused_until").payload, "0");
   });
   const readOnly = setup({ scopes: ["alarms.read"] });
@@ -495,7 +512,7 @@ test("every tool call logs one line with its ids, and never titles, arguments or
     await call(token, "test_connection", { waitSeconds: 5 });
     await call(token, "refresh", { waitSeconds: 5 });
     await call(token, "set_series_alarms", { event: DENTIST, leadTimes: [10] });
-    await rpc("aot_at_forged", "tools/list");
+    await rpc(FORGED, "tools/list");
 
     const lines = toolLines();
     assert.deepEqual(lines.map((line) => line.tool), [
@@ -557,7 +574,7 @@ test("a grant with a logId logs it without any extra read, and a failed lookup n
     db.runTransaction = async () => {
       throw new Error("14 UNAVAILABLE: accounts/bob/assistant/log");
     };
-    const result = await call("aot_at_bob", "get_status", {});
+    const result = await call(BOB, "get_status", {});
     assert.ok(result.structuredContent);
     const line = logs.filter((entry) => entry.assistantEvent === "tool.call").at(-1);
     assert.equal(line.logId, null);
@@ -645,15 +662,85 @@ test("undo compares by meaning, so a phone re-encoding the same value doesn't bl
   });
 });
 
-test("callers without a valid token are limited before their token costs a read", async () => {
-  const { db, handler } = setup();
+test("missing or malformed tokens are refused without a read; failed tokens are limited but never block a valid one", async () => {
+  const { db, handler, token, logs } = setup();
   await withServer(handler, async ({ rpc }) => {
-    const statuses = [];
-    for (let i = 0; i < 31; i += 1) statuses.push((await rpc("aot_at_forged", "tools/list")).status);
-    assert.equal(statuses.filter((status) => status === 401).length, 30);
-    assert.equal(statuses.at(-1), 429);
     const reads = db.reads;
-    assert.equal((await rpc("aot_at_forged", "tools/list")).status, 429);
-    assert.equal(db.reads, reads, "no Firestore read once limited");
+    for (let i = 0; i < 40; i += 1) {
+      assert.equal((await rpc(null, "tools/list")).status, 401);
+      assert.equal((await rpc("aot_at_short", "tools/list")).status, 401);
+    }
+    assert.equal(db.reads, reads, "no Firestore read for missing or malformed tokens");
+    assert.ok(logs.filter((entry) => entry.assistantEvent === "oauth.token_rejected").length <= 30, "the log stays quiet during a flood");
+
+    const statuses = [];
+    for (let i = 0; i < 31; i += 1) statuses.push((await rpc(FORGED, "tools/list")).status);
+    assert.equal(statuses.at(-1), 429);
+    // Over the failure limit, a token that verifies is still served.
+    const listed = await rpc(token, "tools/list");
+    assert.equal(listed.status, 200);
+    assert.equal(listed.body.result.tools.length, TOOL_NAMES.length);
+  });
+});
+
+test("a direct call can't spend the failure budget of a caller that came through Hosting", async () => {
+  const { handler } = setup();
+  await withServer(handler, async ({ post }) => {
+    const hosting = { "x-forwarded-for": "198.51.100.20, 66.249.84.6", "x-forwarded-host": "alwaysontime.zombit.io", "fastly-client-ip": "198.51.100.20" };
+    // A direct caller claims to be that visitor: its hop isn't Google's front end, so it is keyed by its own address.
+    const forged = { "x-forwarded-for": "203.0.113.50", "x-forwarded-host": "alwaysontime.zombit.io", "fastly-client-ip": "198.51.100.20" };
+    const list = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+    const statuses = [];
+    for (let i = 0; i < 31; i += 1) statuses.push((await post(FORGED, list, forged)).status);
+    assert.equal(statuses.at(-1), 429);
+    assert.equal((await post(FORGED, list, hosting)).status, 401, "the real visitor still has its own budget");
+  });
+});
+
+test("JSON-RPC batches over five messages are refused before any read", async () => {
+  const { db, handler, token } = setup();
+  await withServer(handler, async ({ post }) => {
+    const ping = (id) => ({ jsonrpc: "2.0", id, method: "ping" });
+    const reads = db.reads;
+    const big = await post(token, Array.from({ length: 6 }, (_, i) => ping(i)));
+    assert.equal(big.status, 400);
+    assert.equal(big.body.error.code, -32600);
+    assert.equal((await post(token, [])).status, 400);
+    assert.equal(db.reads, reads);
+    const small = await post(token, [ping(1), ping(2)]);
+    assert.equal(small.status, 200);
+  });
+});
+
+test("every JSON-RPC message counts against the connection's allowance, and refusals cost no write", async () => {
+  const limiters = { ...createInstanceLimiters(), mcpMessages: createMemoryLimiter({ limit: 20, windowMs: 10 * 60 * 1000 }) };
+  const { db, handler, token } = setup({ limiters });
+  await withServer(handler, async ({ rpc }) => {
+    for (let i = 0; i < limiters.mcpMessages.limit; i += 1) assert.equal((await rpc(token, "ping")).status, 200);
+    const writes = db.writes;
+    const refused = await rpc(token, "tools/list");
+    assert.equal(refused.status, 429);
+    assert.equal(refused.headers.get("retry-after"), "600");
+    assert.equal(db.writes, writes, "a refused request writes nothing");
+    // Another connection is unaffected.
+    assert.equal((await rpc(BOB, "ping")).status, 200);
+  });
+});
+
+test("tool calls over the limit are refused without a usage write and counted with the next one", async () => {
+  const limiters = createInstanceLimiters();
+  const { db, handler, token } = setup({ limiters });
+  await withServer(handler, async ({ call }) => {
+    await call(token, "get_settings");
+    for (let i = 1; i < limiters.toolCalls.limit; i += 1) limiters.toolCalls("g1", T0);
+    const writes = db.writes;
+    const refused = await call(token, "get_settings");
+    assert.equal(refused.isError, true);
+    assert.match(refused.text, /Too many requests/);
+    assert.equal(db.writes, writes, "no database write for a refused call");
+    assert.equal(usageOf(db).rateLimited, undefined);
+    // Bob's next call writes Alice's refused count along with its own.
+    await call(BOB, "get_settings");
+    assert.equal(usageOf(db).rateLimited, 1);
   });
 });

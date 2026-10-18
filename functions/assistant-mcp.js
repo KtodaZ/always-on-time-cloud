@@ -4,7 +4,7 @@
 // bearer tokens. Each request builds a server bound to the token's account, so a tool can only
 // ever read or write the signed-in user's data.
 
-const { clientKeys, createInstanceLimiters } = require("./assistant-limits");
+const { admitDirect, clientKeys, createInstanceLimiters } = require("./assistant-limits");
 const { COLLECTIONS } = require("./assistant-data");
 const { errorFields, logEvent } = require("./assistant-log");
 const { LAST_USED_RESOLUTION_MS, SCOPES, grantLogId, movedUrl, urls, verifyAccessToken } = require("./assistant-oauth");
@@ -14,6 +14,9 @@ const { INSTRUCTIONS, TOOLS, noPhone } = require("./assistant-tools");
 const { day, week } = require("./assistant-usage");
 
 const SLOW_MS = 5000;
+// JSON-RPC batches are refused above this many messages (MCP 2025-06-18 dropped batching).
+const MAX_BATCH = 5;
+const ACCESS_TOKEN = /^aot_at_[A-Za-z0-9_-]{43}$/;
 const SERVER_VERSION = "1.0.0";
 
 const CORS = {
@@ -43,9 +46,12 @@ const bearer = (req) => {
  */
 function createMcpHandler(deps) {
   const { db, logger, now = Date.now, usage = async () => {} } = deps;
+  // Refused requests are counted in memory and written with the next usage update (no write of their own).
+  const deferUsage = (counts) => usage.defer?.(counts);
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const u = urls(deps.origin);
   const limiters = deps.limiters ?? createInstanceLimiters();
+  const hosts = [new URL(u.origin).host, ...(deps.legacyHosts ?? [])];
   const challenge = (extra = "") => `Bearer resource_metadata="${u.resourceMetadata}", scope="${SCOPES.join(" ")}"${extra}`;
 
   /** Records last use at most hourly, and counts the connection once per day and week. */
@@ -98,6 +104,7 @@ function createMcpHandler(deps) {
     let response;
     let outcome = "ok";
     let failure = {};
+    let refused = false;
     try {
       const needed = tool.scope === "write" ? "alarms.write" : "alarms.read";
       if (!ctx.grant.scopes.includes(needed)) {
@@ -107,6 +114,7 @@ function createMcpHandler(deps) {
       }
       if (!limiters.toolCalls(ctx.grant.grantId, started)) {
         ctx.count("rateLimited");
+        refused = true;
         throw new ToolError("Too many requests in a short time. Wait a few minutes and try again.");
       }
       const out = await tool.handler(ctx, args);
@@ -118,7 +126,7 @@ function createMcpHandler(deps) {
         response = { content: [{ type: "text", text: out.text }], structuredContent: out.data };
       } else if (error instanceof ToolError) {
         // The message can quote an event title, so only the outcome is logged.
-        outcome = "tool_error";
+        outcome = refused ? "rate_limited" : "tool_error";
         ctx.count(`errors.${tool.name}`);
         response = { content: [{ type: "text", text: error.message }], structuredContent: { error: error.message, ...error.data }, isError: true };
       } else {
@@ -129,6 +137,14 @@ function createMcpHandler(deps) {
       }
     }
     const durationMs = now() - started;
+    if (refused) {
+      // Logged once per window; counted without a database write.
+      if (limiters.toolCalls.count(ctx.grant.grantId, started) === limiters.toolCalls.limit + 1) {
+        logEvent(logger, "warn", "tool.call", { tool: tool.name, outcome, logId: ctx.logId, grantId: ctx.grant.grantId });
+      }
+      deferUsage(ctx.counts);
+      return response;
+    }
     if (!tool.waits && durationMs > SLOW_MS) ctx.count(`slow.${tool.name}`);
     // One line per call (assistant-log.js keeps it to ids, never arguments or results).
     logEvent(logger, outcome === "unexpected_error" ? "error" : "info", "tool.call", {
@@ -153,6 +169,11 @@ function createMcpHandler(deps) {
       res.end();
       return;
     }
+    const tooMany = (reason) => {
+      deferUsage({ rateLimited: 1 });
+      logEvent(logger, "warn", "oauth.token_rejected", { reason: "rate_limited", kind: reason });
+      return sendJson(res, 429, { error: "too_many_requests", error_description: "Too many unauthenticated requests; try again later." }, { "Retry-After": "60" });
+    };
     // Not a redirect: MCP clients drop the Authorization header when a redirect changes the host,
     // and a token or resource for the old URL can't be used on this one, so the assistant has to
     // be set up again with the new URL. The JSON-RPC error says so.
@@ -163,25 +184,44 @@ function createMcpHandler(deps) {
         message: `Always On Time's connector moved to ${u.mcp}. Remove this connector from your assistant and add it again with that URL.`,
       }, id: null });
     }
-    const token = bearer(req);
-    // Callers without a valid token are limited in memory, and once over the limit they are
-    // refused before their token costs a database read.
-    const { client } = clientKeys(req);
     const time = now();
-    const tooMany = () => {
-      logEvent(logger, "warn", "oauth.token_rejected", { reason: "rate_limited" });
-      return sendJson(res, 429, { error: "too_many_requests", error_description: "Too many unauthenticated requests; try again later." }, { "Retry-After": "60" });
-    };
-    if (limiters.unauthorized.exceeded(client, time) || limiters.unauthorizedGlobal.exceeded("all", time)) return tooMany();
-    let rejected = token ? null : "missing";
-    const grant = token ? await verifyAccessToken(db, token, { now: time, onReject: (reason) => { rejected = reason; } }) : null;
+    const from = clientKeys(req, { hosts });
+    if (!admitDirect(limiters, from, time)) return tooMany("direct");
+    // Batches are refused before any database read.
+    const messages = Array.isArray(req.body) ? req.body.length : 1;
+    if (Array.isArray(req.body) && (messages === 0 || messages > MAX_BATCH)) {
+      return sendJson(res, 400, { jsonrpc: "2.0", error: { code: -32600, message: `Send at most ${MAX_BATCH} JSON-RPC messages per request.` }, id: null });
+    }
+    const token = bearer(req);
+    const unauthorized = (reason) => sendJson(res, 401, { error: "invalid_token", error_description: "Sign in to Always On Time to use this connector." }, {
+      "WWW-Authenticate": challenge(reason === "missing" ? "" : ", error=\"invalid_token\""),
+    });
+    // A missing or malformed token is refused without a database read. They cost nothing, so they
+    // are only counted to keep the log quiet during a flood.
+    if (!token || !ACCESS_TOKEN.test(token)) {
+      const reason = token ? "malformed" : "missing";
+      if (limiters.unauthorized(from.client, time) && limiters.unauthorizedGlobal(from.scope, time)) {
+        logEvent(logger, "info", "oauth.token_rejected", { reason });
+      }
+      return unauthorized(reason);
+    }
+    // A well-formed token is always verified first, so failed attempts by others never lock out
+    // a token that works; only a failed verification counts against the failure limits.
+    let rejected = null;
+    const grant = await verifyAccessToken(db, token, { now: time, onReject: (reason) => { rejected = reason; } });
     if (!grant) {
-      const counted = [limiters.unauthorized(client, time), limiters.unauthorizedGlobal("all", time)];
-      if (!counted.every(Boolean)) return tooMany();
+      const counted = [limiters.unauthorized(from.client, time), limiters.unauthorizedGlobal(from.scope, time)];
+      if (!counted.every(Boolean)) return tooMany(rejected ?? "invalid");
       logEvent(logger, "info", "oauth.token_rejected", { reason: rejected ?? "invalid" });
-      return sendJson(res, 401, { error: "invalid_token", error_description: "Sign in to Always On Time to use this connector." }, {
-        "WWW-Authenticate": challenge(token ? ", error=\"invalid_token\"" : ""),
-      });
+      return unauthorized(rejected ?? "invalid");
+    }
+    // Every JSON-RPC message counts against the connection's allowance, initialize and tools/list included.
+    if (!limiters.mcpMessages(grant.grantId, time, messages)) {
+      deferUsage({ rateLimited: 1 });
+      if (limiters.mcpMessages.count(grant.grantId, time) - messages < limiters.mcpMessages.limit) {
+        logEvent(logger, "warn", "mcp.rate_limited", { logId: grant.logId, grantId: grant.grantId, reason: "messages" });
+      }
+      return sendJson(res, 429, { jsonrpc: "2.0", error: { code: -32000, message: "Too many requests in a short time. Wait a few minutes and try again." }, id: null }, { "Retry-After": "600" });
     }
     if (req.method !== "POST") {
       // Stateless server: no server-initiated streams or sessions to resume or end.
