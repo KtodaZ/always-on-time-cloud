@@ -1,2 +1,469 @@
-:root{color-scheme:light dark;font-family:system-ui,sans-serif;color:#202124;background:#fafaf8}*{box-sizing:border-box}body{margin:0}main{max-width:620px;margin:8vh auto;padding:28px 20px}h1{font-size:2rem;letter-spacing:-.02em;margin:28px 0 20px}p{line-height:1.6;margin:20px 0}a{color:#3656a3;text-underline-offset:3px}button{min-height:48px;border:1px solid currentColor;border-radius:28px;padding:12px 20px;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:20px}label{display:flex;align-items:start;gap:12px;line-height:1.5}input{width:24px;height:24px;flex-shrink:0}button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid #5477bd;outline-offset:4px}.google{display:inline-flex;align-items:center;gap:10px;background:white;color:#1f1f1f;border-color:#747775;font-size:14px;font-weight:500}.google img{height:24px;width:24px}.secondary{font-size:.875rem;color:#5f6368}.warning{border-left:4px solid #b3261e;padding:4px 0 4px 14px}[hidden]{display:none!important}@media(prefers-color-scheme:dark){:root{color:#ecebea;background:#171819}a{color:#a8c7fa}.warning{border-color:#f2b8b5}.secondary{color:#bbbfc5}}
-.disclosure dt{font-weight:600;margin-top:16px}.disclosure dd{margin:4px 0 0;line-height:1.5}a.button{display:inline-flex;align-items:center;min-height:48px;border:1px solid currentColor;border-radius:28px;padding:12px 20px;text-decoration:none}button.primary{background:#3656a3;border-color:#3656a3;color:#fff;font-weight:600;padding:12px 28px}button.link{min-height:0;border:0;border-radius:0;padding:0;background:none;color:#3656a3;text-decoration:underline;text-underline-offset:3px}@media(prefers-color-scheme:dark){button.primary{background:#a8c7fa;border-color:#a8c7fa;color:#0b1d3f}button.link{color:#a8c7fa}}
+/* Always On Time account pages: assistant consent (/connect/), account deletion and the App Link
+   fallback (/open/). Colours are the app's locked neutrals and its default Slate accent; type is the
+   Zombit Studios site's (Newsreader headings, Geist text), self-hosted under the SIL OFL (fonts/OFL.txt).
+   Every page's Content-Security-Policy allows only same-origin styles, fonts and images. */
+
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/geist-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Newsreader";
+  src: url("/fonts/newsreader-latin.woff2") format("woff2");
+  font-weight: 200 800;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  color-scheme: light dark;
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Newsreader", Georgia, "Times New Roman", serif;
+
+  /* App neutrals (ui/theme/Color.kt). */
+  --surface: #fbfbfc;
+  --backdrop: #eef0f4;
+  --sheet: #fbfbfc;
+  --inset: #f0f1f5;
+  --ink: #1a1b20;
+  --ink-soft: #44464f;
+  --outline: #74777f;
+  --rule: #dadce3;
+  /* Slate, the app's default accent (ui/theme/AccentThemes.kt). */
+  --accent: #3d5ca8;
+  --on-accent: #ffffff;
+  --accent-container: #dce4f8;
+  --on-accent-container: #001945;
+  /* Status roles. */
+  --warning: #7d5800;
+  --warning-container: #ffdea6;
+  --on-warning-container: #271900;
+  --error: #b3261e;
+  --on-error: #ffffff;
+  --error-container: #f9dedc;
+  --on-error-container: #410e0b;
+  --success: #2e6b34;
+  /* The app's monogram marks for assistants (it ships no official logos). */
+  --claude: #e9cdb8;
+  --on-claude: #5b3017;
+  --chatgpt: #c6e5d9;
+  --on-chatgpt: #0f3d2e;
+  --placeholder: #e3e5ee;
+
+  --shadow: 0 1px 2px rgb(16 18 24 / 0.04), 0 24px 48px -30px rgb(16 18 24 / 0.32);
+  background: var(--surface);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #111318;
+    --backdrop: #0c0d11;
+    --sheet: #17191e;
+    --inset: #1f2228;
+    --ink: #e4e1e9;
+    --ink-soft: #c4c6d0;
+    --outline: #8e9099;
+    --rule: #2f3238;
+    --accent: #b1c5ff;
+    --on-accent: #001945;
+    --accent-container: #234578;
+    --on-accent-container: #d8e2ff;
+    --warning: #ffba3c;
+    --warning-container: #4a3300;
+    --on-warning-container: #ffdea6;
+    --error: #f2b8b5;
+    --on-error: #601410;
+    --error-container: #8c1d18;
+    --on-error-container: #f9dedc;
+    --success: #96d896;
+    --placeholder: #34363d;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 24px 48px -28px rgb(0 0 0 / 0.7);
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  font: 400 1rem/1.55 var(--font-sans);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-synthesis-weight: none;
+}
+
+::selection { background: color-mix(in oklab, var(--accent) 26%, transparent); color: var(--ink); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@supports (scrollbar-color: auto) { html { scrollbar-color: var(--outline) transparent; } }
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: from-font;
+  text-underline-offset: 0.2em;
+}
+a:hover { text-decoration-thickness: 2px; }
+strong { font-weight: 600; color: var(--ink); }
+
+/* ---- Page shell: full bleed on phones, one sheet from 640px ---- */
+main {
+  --page: var(--surface);
+  width: 100%;
+  max-width: 35rem;
+  margin: 0 auto;
+  padding: 28px 20px 8px;
+}
+.site-footer {
+  width: 100%;
+  max-width: 35rem;
+  margin: 0 auto;
+  padding: 24px 20px 32px;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+.site-footer a { color: inherit; }
+
+@media (min-width: 640px) {
+  :root { background: var(--backdrop); }
+  main {
+    --page: var(--sheet);
+    margin-top: clamp(32px, 9vh, 96px);
+    padding: 40px 44px 36px;
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+    border-radius: 24px;
+    box-shadow: var(--shadow);
+  }
+  .site-footer { padding: 20px 45px 40px; }
+}
+
+/* ---- Who is asking: assistant mark, connector, app icon ---- */
+.parties {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 28px;
+}
+.app-icon {
+  display: block;
+  width: 56px;
+  height: 56px;
+  border-radius: 22%;
+  box-shadow: 0 0 0 1px rgb(16 18 24 / 0.08), 0 6px 16px -10px rgb(60 40 160 / 0.6);
+}
+.badge {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--placeholder);
+  color: var(--ink-soft);
+  font: 500 1.75rem/1 var(--font-display);
+}
+.badge svg { width: 26px; height: 26px; }
+.badge[data-kind="claude"] { background: var(--claude); color: var(--on-claude); }
+.badge[data-kind="chatgpt"] { background: var(--chatgpt); color: var(--on-chatgpt); }
+.badge[data-kind="unverified"] { background: var(--warning); color: var(--warning-container); }
+.badge:not([data-kind="unverified"]) svg { display: none; }
+.badge[data-kind="loading"] { animation: breathe 1.4s ease-in-out infinite; }
+
+.connector {
+  display: flex;
+  gap: 6px;
+  padding: 0 4px;
+}
+.connector i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--outline);
+  opacity: 0.55;
+}
+/* The one authored motion: while approving, a pulse travels from the assistant to the app. */
+main[data-busy="approve"] .connector i { animation: travel 1.1s cubic-bezier(0.16, 1, 0.3, 1) infinite; }
+main[data-busy="approve"] .connector i:nth-child(2) { animation-delay: 0.12s; }
+main[data-busy="approve"] .connector i:nth-child(3) { animation-delay: 0.24s; }
+main[data-busy="approve"] .connector i:nth-child(4) { animation-delay: 0.36s; }
+main[data-state="approved"] .connector i { background: var(--success); opacity: 1; }
+main[data-state="cancelled"] .badge { opacity: 0.5; }
+main[data-state="error"] .badge, main[data-state="error"] .connector,
+main[data-state="info"] .badge, main[data-state="info"] .connector { display: none; }
+
+@keyframes travel {
+  0%, 100% { opacity: 0.35; transform: none; }
+  40% { opacity: 1; transform: scale(1.35); background: var(--accent); }
+}
+@keyframes breathe {
+  50% { opacity: 0.55; }
+}
+
+/* A seal on the app icon says how the request ended. */
+.app-mark { position: relative; display: block; }
+.seal {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  display: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px var(--page);
+}
+.seal svg { display: none; width: 14px; height: 14px; }
+main[data-state="approved"] .seal { display: grid; background: var(--success); color: var(--page); }
+main[data-state="approved"] .seal-ok { display: block; }
+main[data-state="cancelled"] .seal { display: grid; background: var(--outline); color: var(--page); }
+main[data-state="cancelled"] .seal-cancel { display: block; }
+main[data-state="error"] .seal { display: grid; background: var(--error); color: var(--page); }
+main[data-state="error"] .seal-error { display: block; }
+
+/* A page without the header (the server's "Couldn't connect" page) still carries the icon. */
+main:not(:has(.parties))::before {
+  content: "";
+  display: block;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 28px;
+  border-radius: 22%;
+  background: url("/icon.webp") center / cover;
+}
+
+/* ---- Type ---- */
+h1 {
+  margin: 0 0 10px;
+  font: 400 2rem/1.12 var(--font-display);
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+  color: var(--ink);
+}
+@media (min-width: 640px) { h1 { font-size: 2.25rem; } }
+main > p, .lede { margin: 0 0 16px; color: var(--ink-soft); }
+.lede { font-size: 1.0625rem; text-wrap: pretty; }
+main > h1 + p { font-size: 1.0625rem; }
+
+.who { margin: 0; color: var(--ink); }
+.details { margin-top: 24px; }
+
+/* ---- Notices ---- */
+.callout {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 12px;
+  margin: 16px 0 0;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--inset);
+  color: var(--ink-soft);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+.callout > svg { width: 20px; height: 20px; margin-top: 1px; color: var(--ink-soft); }
+.callout p { margin: 0; }
+.callout p + p, .callout p + .button { margin-top: 12px; }
+.callout.warning { background: var(--warning-container); color: var(--on-warning-container); }
+.callout.warning > svg { color: var(--warning); }
+.callout.warning strong { color: inherit; overflow-wrap: anywhere; }
+@media (prefers-color-scheme: dark) { .callout.warning > svg { color: var(--warning); } }
+.details > .callout.warning:first-child { margin: 0 0 16px; }
+
+/* ---- What the assistant can do ---- */
+.scopes {
+  margin: 24px 0 0;
+  padding: 24px 0 0;
+  border-top: 1px solid var(--rule);
+}
+.scope {
+  position: relative;
+  min-height: 36px;
+  padding-left: 52px;
+}
+.scope + .scope { margin-top: 18px; }
+.scope dt { font-weight: 600; font-size: 0.9375rem; line-height: 1.4; }
+.scope dt svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 36px;
+  height: 36px;
+  padding: 8px;
+  border-radius: 11px;
+  background: var(--inset);
+  color: var(--ink-soft);
+}
+.scope.write dt svg { background: var(--accent-container); color: var(--on-accent-container); }
+.scope dd { margin: 3px 0 0; font-size: 0.9375rem; line-height: 1.5; color: var(--ink-soft); }
+
+.fine {
+  margin: 24px 0 0;
+  padding: 20px 0 0;
+  border-top: 1px solid var(--rule);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+.fine dt { font-weight: 600; color: var(--ink); }
+.fine dd { margin: 2px 0 0; }
+.fine dd + dt { margin-top: 12px; }
+
+/* ---- Signed-in account ---- */
+.account {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 12px;
+  margin: 24px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+}
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent-container);
+  color: var(--on-accent-container);
+}
+.avatar svg { width: 20px; height: 20px; }
+.account p { margin: 0; font-size: 0.875rem; line-height: 1.35; color: var(--ink-soft); }
+.account strong { display: block; font-size: 0.9375rem; overflow-wrap: anywhere; }
+.account .link { grid-column: 2; justify-self: start; margin: 2px 0 -8px -10px; }
+@media (min-width: 480px) {
+  .account { grid-template-columns: 36px minmax(0, 1fr) auto; padding-right: 8px; }
+  .account .link { grid-column: auto; margin: 0; }
+}
+
+/* ---- Status line ---- */
+.status { margin: 16px 0 0; font-size: 0.9375rem; color: var(--ink-soft); }
+.status:empty { margin: 0; }
+.status[data-tone="error"] { color: var(--error); font-weight: 500; }
+.status[data-tone="success"] { color: var(--success); font-weight: 500; }
+.sr-only, main[data-state="approved"] .status, main[data-state="cancelled"] .status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---- Buttons ---- */
+.actions {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 10px;
+  margin: 24px 0 0;
+}
+.actions > * { width: 100%; }
+@media (min-width: 640px) {
+  .actions:not(.stack) { flex-direction: row; }
+  .actions:not(.stack) > * { flex: 1 1 0; }
+}
+
+button, .button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 52px;
+  margin: 0;
+  padding: 0 24px;
+  border: 1px solid var(--outline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font: 600 1rem/1.2 var(--font-sans);
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color 160ms ease-out, border-color 160ms ease-out, opacity 160ms ease-out;
+}
+button:hover:not(:disabled), .button:hover { background: color-mix(in oklab, var(--ink) 6%, transparent); text-decoration: none; }
+button:active:not(:disabled), .button:active { background: color-mix(in oklab, var(--ink) 11%, transparent); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button[aria-busy="true"]:disabled { opacity: 1; cursor: progress; }
+button[aria-busy="true"]::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.primary, a.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.primary:hover:not(:disabled), a.primary:hover { background: color-mix(in oklab, var(--accent) 88%, var(--ink)); }
+.primary:active:not(:disabled) { background: color-mix(in oklab, var(--accent) 80%, var(--ink)); }
+.danger { background: var(--error); border-color: var(--error); color: var(--on-error); }
+.danger:hover:not(:disabled) { background: color-mix(in oklab, var(--error) 88%, var(--ink)); }
+
+/* Google's sign-in button (light and dark themes from its branding guidelines). */
+.google { background: #ffffff; border-color: #747775; color: #1f1f1f; font-weight: 500; }
+.google:hover:not(:disabled) { background: #f2f2f2; }
+.google img { width: 20px; height: 20px; }
+@media (prefers-color-scheme: dark) {
+  .google { background: #131314; border-color: #8e918f; color: #e3e3e3; }
+  .google:hover:not(:disabled) { background: #222224; }
+}
+
+button.link {
+  min-height: 44px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--accent);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+/* ---- Small print ---- */
+.secondary {
+  margin: 24px 0 0;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+/* ---- Confirmation checkbox (account deletion) ---- */
+label.confirm {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 12px;
+  margin: 16px 0 0;
+  padding: 14px 16px;
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+label.confirm:has(input:checked) { border-color: var(--error); background: color-mix(in oklab, var(--error-container) 30%, transparent); }
+label.confirm input { width: 22px; height: 22px; margin: 0; accent-color: var(--error); cursor: pointer; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* Finished and error states drop the sign-in note; the footer keeps the privacy link. */
+main[data-state="approved"] #sign-in-note, main[data-state="cancelled"] #sign-in-note,
+main[data-state="error"] #sign-in-note, main[data-state="info"] #sign-in-note { display: none; }
+.actions:not(:has(> :not([hidden]))) { display: none; }
