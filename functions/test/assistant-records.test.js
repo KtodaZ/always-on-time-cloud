@@ -159,3 +159,14 @@ test("payloads are validated with the app's limits before anything is written", 
   }
   assert.throws(() => encodePayload("p_alarm_volume", "loud"), RecordError);
 });
+
+test("the Firestore rules accept exactly the synced preferences and the server's snapshot size", () => {
+  const fs = require("node:fs");
+  const { PREFERENCE_NAMES } = require("../assistant-records");
+  const rules = fs.readFileSync(path.join(__dirname, "../../firestore.rules"), "utf8");
+  const ids = /recordId\.matches\('\^\(p_\(([a-z_|]+)\)\|\[cse\]_\[a-f0-9\]\{64\}\)\$'\)/.exec(rules);
+  assert.ok(ids, "isRecordId lists the preferences");
+  assert.deepEqual(ids[1].split("|").sort(), [...PREFERENCE_NAMES].sort());
+  const { MAX_SNAPSHOT_CHARS } = require("../assistant-data");
+  assert.match(rules, new RegExp(`data\\.payload is string && data\\.payload\\.size\\(\\) <= ${MAX_SNAPSHOT_CHARS};`));
+});

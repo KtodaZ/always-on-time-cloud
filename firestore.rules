@@ -8,7 +8,7 @@ service cloud.firestore {
         'id', 'path', 'contentType', 'sizeBytes', 'downloadUrl'
       ])
       && attachment.keys().hasAll([
-        'id', 'path', 'contentType', 'sizeBytes', 'downloadUrl'
+        'id', 'path', 'contentType', 'sizeBytes'
       ])
       && attachment.id is string
       && attachment.id.size() > 0
@@ -32,9 +32,12 @@ service cloud.firestore {
       && attachment.sizeBytes is int
       && attachment.sizeBytes > 0
       && attachment.sizeBytes <= 5 * 1024 * 1024
-      && attachment.downloadUrl is string
-      && attachment.downloadUrl.size() > 0
-      && attachment.downloadUrl.size() <= 2048;
+      // Older app versions also send a download URL; newer ones don't.
+      && (!attachment.keys().hasAny(['downloadUrl']) || (
+        attachment.downloadUrl is string
+        && attachment.downloadUrl.size() > 0
+        && attachment.downloadUrl.size() <= 2048
+      ));
   }
 
   function isValidFeedbackDiagnosticLog(log, feedbackId) {
@@ -72,6 +75,11 @@ service cloud.firestore {
       return isGoogleAccount(uid)
         && get(/databases/$(database)/documents/accounts/$(uid)).data.active == true;
     }
+    // Synced record ids: the app's preference allowlist (PortablePreferences.kt, mirrored in
+    // functions/assistant-records.js PREFERENCE_NAMES and checked by a test) or a hashed key.
+    function isRecordId(recordId) {
+      return recordId.matches('^(p_(dynamic_color|apply_accent_to_app|vibration_enabled|gradual_volume_enabled|spoken_alarm_include_event_name|spoken_alarm_include_time_until_event|spoken_alarm_include_location|spoken_alarm_include_helpful_reminder|respect_dnd|override_dnd_for_priority|ignore_all_day_events|auto_detect_meeting_urls|override_system_volume|smart_snooze_suggestions|default_lead_time_minutes|alarm_volume|snooze_duration_minutes|alarm_duration_seconds|max_snoozes|spoken_alarm_speech_rate_hundredths|theme_preference|accent_id|default_lead_times_csv|alert_type|vibration_pattern|spoken_alarm_meeting_type_preference|spoken_alarm_repetition|rsvp_filter|alarms_paused_until)|[cse]_[a-f0-9]{64})$');
+    }
     match /accounts/{uid} {
       allow read: if isGoogleAccount(uid);
       allow create: if isGoogleAccount(uid)
@@ -81,7 +89,7 @@ service cloud.firestore {
       match /values/{recordId} {
         allow read: if activeAccount(uid);
         allow create, update: if activeAccount(uid)
-          && recordId.matches('^(p_[a-z_]+|[cse]_[a-f0-9]{64})$')
+          && isRecordId(recordId)
           && request.resource.data.keys().hasOnly(['payload'])
           && request.resource.data.payload is string && request.resource.data.payload.size() <= 16384;
         allow delete: if false;
@@ -114,7 +122,8 @@ service cloud.firestore {
           && data.platform in ['android', 'ios']
           && data.deviceName is string && data.deviceName.size() <= 100
           && data.appVersion is string && data.appVersion.size() <= 40
-          && (!data.keys().hasAny(['fcmToken']) || (data.fcmToken is string && data.fcmToken.size() <= 4096))
+          && (!data.keys().hasAny(['fcmToken']) || (data.fcmToken is string && data.fcmToken.size() <= 4096
+            && data.fcmToken.matches('^[A-Za-z0-9_:-]+$')))
           && data.capabilities is list && data.capabilities.size() <= 20
           && data.capabilities.hasOnly(['travel', 'spokenAlarms', 'plus', 'pause'])
           && (!data.keys().hasAny(['lastPing']) || (
@@ -130,6 +139,8 @@ service cloud.firestore {
           && data.schemaVersion == 1
           && data.publishedAt == request.time
           && (!data.keys().hasAny(['requestId']) || (data.requestId is string && data.requestId.size() <= 64))
+          // The phone trims its snapshot to fit this (AssistantSnapshot.MAX_PAYLOAD_CHARS); the
+          // server checks the same limit (MAX_SNAPSHOT_CHARS) before parsing one.
           && data.payload is string && data.payload.size() <= 800000;
       }
       match /assistant/{document} {

@@ -42,12 +42,15 @@ const DEVICE = '0f8fad5b-d9cb-469f-a165-70867728950e';
 
     await assertSucceeds(setDoc(doc(alice, devicePath), device()));
     await assertSucceeds(setDoc(doc(alice, devicePath), device({ lastPing: { id: 'ping_abc', receivedAt: Timestamp.fromMillis(Date.now() - 1000) } })));
+    // FCM registration tokens: an installation id, a colon, then base64url.
+    await assertSucceeds(setDoc(doc(alice, devicePath), device({ fcmToken: `cX9k-Qd_RzW3aBcDeFgHiJ:APA91b${'Ab-_9'.repeat(30)}` })));
     // iOS phones have no FCM token yet, and Swift writes UUIDs in upper case.
     const { fcmToken, ...ios } = device({ platform: 'ios' });
     await assertSucceeds(setDoc(doc(alice, `accounts/alice/assistantDevices/${DEVICE.toUpperCase()}`), ios));
     const badDevices = [
       device({ platform: 'windows' }), device({ deviceName: 'x'.repeat(101) }), device({ appVersion: 'x'.repeat(41) }),
-      device({ fcmToken: 'x'.repeat(4097) }), device({ capabilities: ['root'] }), device({ capabilities: 'travel' }),
+      device({ fcmToken: 'x'.repeat(4097) }), device({ fcmToken: '' }), device({ fcmToken: 'token with spaces' }),
+      device({ fcmToken: 'tok/en' }), device({ fcmToken: 5 }), device({ capabilities: ['root'] }), device({ capabilities: 'travel' }),
       device({ updatedAt: Timestamp.fromMillis(Date.now() - 60000) }), device({ extra: true }),
       device({ lastPing: { id: 'x'.repeat(65), receivedAt: Timestamp.now() } }), device({ lastPing: { id: 'p' } }),
       (({ deviceName, ...rest }) => rest)(device())

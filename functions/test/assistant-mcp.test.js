@@ -106,6 +106,7 @@ function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabil
   db.documents.set(`oauthTokens/${createHash("sha256").update(token).digest("hex")}`, { kind: "access", grantId: "g1", uid: "alice", clientId: grant.clientId, expiresAt: new Date(T0 + HOUR) });
   // Bob is another account with his own connection and no phone.
   db.documents.set("oauthGrants/g2", { ...grant, uid: "bob" });
+  db.documents.set("accounts/bob", { active: true, schemaVersion: 1 });
   db.documents.set(`oauthTokens/${createHash("sha256").update("aot_at_bob").digest("hex")}`, { kind: "access", grantId: "g2", uid: "bob", clientId: grant.clientId, expiresAt: new Date(T0 + HOUR) });
   if (phone) {
     db.documents.set("accounts/alice/assistantDevices/11111111-1111-4111-8111-111111111111", {

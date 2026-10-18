@@ -6,7 +6,9 @@
 const { randomBytes } = require("node:crypto");
 const z = require("zod");
 
-const { UNDO_DAYS, readDevices, readValues, refs, toMillis } = require("./assistant-data");
+const {
+  UNDO_DAYS, readAppliedThrough, readDevices, readSnapshotTimes, readValues, refs, toMillis,
+} = require("./assistant-data");
 const { deviceName } = require("./assistant-push");
 const { PAUSED_UNTIL } = require("./assistant-records");
 const { describePause, parseStored } = require("./assistant-settings");
@@ -14,12 +16,33 @@ const {
   DESTINATIONS, ToolError, appLink, basedOn, basis, cleanText, formatTime, isoLocal, relativeAge, resolveCalendar, resolveEvent,
 } = require("./assistant-snapshot");
 const {
-  hasPlus, latestSnapshot, loadSnapshots, names, noPhone, push, result, sleepUntil, trace,
+  deviceSnapshot, hasPlus, latestSnapshot, names, noPhone, push, result, sleepUntil, trace,
 } = require("./assistant-tool-context");
 const { changeIdInput } = require("./assistant-tools-write");
 
 const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const CAPABILITIES = ["travel", "spokenAlarms", "plus", "pause"];
+
+/**
+ * Polls how far each phone has applied the account's values. Each poll reads only the snapshots'
+ * publish times; a snapshot's payload is read again only after its phone published a new one, and
+ * then only its valuesAppliedThrough is extracted (never the whole payload parsed).
+ */
+function appliedTracker(ctx) {
+  const known = new Map();
+  return async () => {
+    const out = [];
+    for (const { deviceId, publishedAt } of await readSnapshotTimes(ctx.db, ctx.uid)) {
+      let entry = known.get(deviceId);
+      if (!entry || entry.publishedAt !== publishedAt) {
+        entry = { publishedAt, appliedThrough: await readAppliedThrough(ctx.db, ctx.uid, deviceId) };
+        known.set(deviceId, entry);
+      }
+      if (entry.appliedThrough !== null) out.push({ deviceId, valuesAppliedThrough: entry.appliedThrough });
+    }
+    return out;
+  };
+}
 
 const TOOLS = [
   {
@@ -30,25 +53,26 @@ const TOOLS = [
     annotations: READ,
     scope: "read",
     async handler(ctx) {
-      const [devices, snapshots, values] = await Promise.all([
-        readDevices(ctx.db, ctx.uid), loadSnapshots(ctx), readValues(ctx.db, ctx.uid, [`p_${PAUSED_UNTIL}`]),
+      // Only the newest snapshot is read in full; the others' publish times are enough here.
+      const [devices, times, latest, values] = await Promise.all([
+        readDevices(ctx.db, ctx.uid), readSnapshotTimes(ctx.db, ctx.uid), latestSnapshot(ctx), readValues(ctx.db, ctx.uid, [`p_${PAUSED_UNTIL}`]),
       ]);
       const now = ctx.now();
-      const latest = snapshots[0] ?? null;
       const timeZone = latest?.timeZone ?? "UTC";
-      const ids = new Set([...devices.map((device) => device.id), ...snapshots.map((snapshot) => snapshot.deviceId)]);
+      const ids = new Set([...devices.map((device) => device.id), ...times.map((item) => item.deviceId)]);
       const phones = [...ids].map((id) => {
         const device = devices.find((item) => item.id === id) ?? { id };
-        const snapshot = snapshots.find((item) => item.deviceId === id);
+        const isLatest = latest?.deviceId === id;
+        const shared = isLatest ? latest.builtAt : times.find((item) => item.deviceId === id)?.publishedAt ?? null;
         return {
           deviceId: id,
-          name: cleanText(device.deviceName, 100) || snapshot?.device || "phone",
+          name: cleanText(device.deviceName, 100) || (isLatest ? latest.device : null) || "phone",
           platform: device.platform === "android" || device.platform === "ios" ? device.platform : null,
           appVersion: cleanText(device.appVersion, 40) || null,
           capabilities: Array.isArray(device.capabilities) ? device.capabilities.filter((item) => CAPABILITIES.includes(item)) : [],
           canReceiveMessages: Boolean(device.fcmToken),
-          lastSharedAt: snapshot ? isoLocal(snapshot.builtAt, timeZone) : null,
-          lastSharedMillis: snapshot?.builtAt ?? null,
+          lastSharedAt: shared ? isoLocal(shared, timeZone) : null,
+          lastSharedMillis: shared,
         };
       });
       const setupConfirmed = Boolean(ctx.grant.setupConfirmedAt);
@@ -99,9 +123,11 @@ const TOOLS = [
       const writtenAt = toMillis(activity.data().writtenAt);
       if (writtenAt === null) throw new Error("activity entry without writtenAt");
       const deadline = ctx.now() + (args.waitSeconds ?? 10) * 1000;
+      const phones = await readDevices(ctx.db, ctx.uid);
+      const poll = appliedTracker(ctx);
       let snapshots = [];
       await sleepUntil(ctx, deadline, async () => {
-        snapshots = await loadSnapshots(ctx);
+        snapshots = await poll();
         return snapshots.length > 0 && snapshots.every((snapshot) => snapshot.valuesAppliedThrough >= writtenAt);
       });
       const applied = snapshots.filter((snapshot) => snapshot.valuesAppliedThrough >= writtenAt);
@@ -109,15 +135,16 @@ const TOOLS = [
       const outcome = !snapshots.length || !applied.length ? "pending" : waiting.length ? "partial" : "confirmed";
       ctx.count(`confirms.${outcome}`);
       trace(ctx, { status: outcome });
-      const devices = (list) => list.map((snapshot) => snapshot.device).join(", ");
+      const label = (snapshot) => deviceName(phones.find((device) => device.id === snapshot.deviceId) ?? {});
+      const devices = (list) => list.map(label).join(", ");
       let text;
       if (outcome === "confirmed") text = `Confirmed on ${devices(applied)}.`;
       else if (outcome === "partial") text = `Confirmed on ${devices(applied)}; ${devices(waiting)} will apply it when it's online.`;
       else text = "Saved; the phone will apply it when it's online (opening Always On Time syncs it right away).";
       return result(text, {
         outcome,
-        appliedOn: applied.map((snapshot) => snapshot.device),
-        waitingOn: waiting.map((snapshot) => snapshot.device),
+        appliedOn: applied.map(label),
+        waitingOn: waiting.map(label),
       });
     },
   },
@@ -194,13 +221,14 @@ const TOOLS = [
       const sent = await push(ctx, "publish", { requestId }, devices);
       if (sent.limited) throw new ToolError("Too many messages to the phone recently; wait a few minutes and try again.");
       const deadline = ctx.now() + (args.waitSeconds ?? 10) * 1000;
-      let snapshots = [];
-      const fresh = sent.sent.length ? await sleepUntil(ctx, deadline, async () => {
-        snapshots = await loadSnapshots(ctx);
-        return snapshots.find((snapshot) => snapshot.requestId === requestId) ?? null;
+      // Polls only the publish times until the answering snapshot appears, then reads that one.
+      const answered = sent.sent.length ? await sleepUntil(ctx, deadline, async () => {
+        const times = await readSnapshotTimes(ctx.db, ctx.uid);
+        return times.find((item) => item.requestId === requestId) ?? null;
       }) : null;
-      if (!snapshots.length) snapshots = await loadSnapshots(ctx);
-      const snapshot = fresh ?? snapshots[0];
+      let fresh = answered ? await deviceSnapshot(ctx, answered.deviceId) : null;
+      if (fresh && fresh.requestId !== requestId) fresh = null;
+      const snapshot = fresh ?? await latestSnapshot(ctx);
       if (!snapshot) return noPhone(ctx);
       trace(ctx, { status: fresh ? "fresh" : "stale" });
       const alarms = snapshot.events.reduce((total, event) => total + event.alarms.filter((alarm) => alarm.status === "on").length, 0);

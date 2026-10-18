@@ -9,6 +9,10 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
     "assistantMcp",
     "assistantOauth",
     "calculateTravelRoute",
+    "capAssistantDevices",
+    "capAssistantSnapshots",
+    "capSyncedHistory",
+    "deleteOrphanFeedbackUploads",
     "deleteSyncedAccount",
     "deliverIosPushDispatch",
     "iosGoogleWebhook",
@@ -18,6 +22,7 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
     "pruneAssistantConnections",
     "pruneSyncedHistory",
     "publishFeedbackNotification",
+    "resumeAccountDeletions",
     "revokeAssistantConnection",
     "scheduleIosPushes",
     "sendAssistantUsageSummary",
@@ -70,4 +75,22 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
   assert.equal(functions.pruneAssistantConnections.__endpoint.secretEnvironmentVariables, undefined);
   assert.deepEqual(functions.sendAssistantUsageSummary.__endpoint.secretEnvironmentVariables, [{ key: "FEEDBACK_DISCORD_WEBHOOK_URL" }]);
   assert.equal(functions.sendAssistantUsageSummary.__endpoint.scheduleTrigger.schedule, "every monday 09:00");
+
+  // Storage caps: each trigger fires only on new documents in its own account collection.
+  for (const [name, document] of [
+    ["capSyncedHistory", "accounts/{uid}/history/{recordId}"],
+    ["capAssistantDevices", "accounts/{uid}/assistantDevices/{deviceId}"],
+    ["capAssistantSnapshots", "accounts/{uid}/assistantSnapshots/{deviceId}"],
+  ]) {
+    const endpoint = functions[name].__endpoint;
+    assert.equal(endpoint.eventTrigger.eventType, "google.cloud.firestore.document.v1.created", name);
+    assert.deepEqual(endpoint.eventTrigger.eventFilterPathPatterns, { document }, name);
+    assert.equal(endpoint.secretEnvironmentVariables, undefined, name);
+  }
+  for (const name of ["deleteOrphanFeedbackUploads", "resumeAccountDeletions"]) {
+    assert.ok(functions[name].__endpoint.scheduleTrigger, name);
+    assert.equal(functions[name].__endpoint.secretEnvironmentVariables, undefined, name);
+  }
+  // Deleting a large account can take minutes; a stopped deletion is resumed.
+  assert.equal(functions.deleteSyncedAccount.__endpoint.timeoutSeconds, 540);
 });

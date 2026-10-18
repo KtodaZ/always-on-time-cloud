@@ -2,9 +2,10 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
-    // Firebase's downloadUrl requires Storage read permission for the uploading client. Scope
-    // that permission to the anonymous user segment. The resulting download URL is a bearer link
-    // stored only in the feedback document, which clients cannot read.
+    // Older app versions ask for a download URL after each upload, which needs read permission
+    // for the uploader, and drop the image if that fails. Scope it to the uploader's own folder.
+    // Remove it once app versions that no longer ask are widespread. Uploads no feedback document
+    // references are deleted after a day (functions/storage-limits.js).
     match /feedback/{userId}/{feedbackId}/{attachmentId} {
       allow read: if request.auth != null && request.auth.uid == userId;
       // Create only: each attachment is a new object, so nothing can be overwritten or reused.

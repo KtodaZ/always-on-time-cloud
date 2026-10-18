@@ -1,23 +1,36 @@
 # Feedback
 
 The Android app's **Leave feedback** form writes one document to the `feedback` collection. It
-signs in with Firebase Anonymous Authentication only to authorize the write; that identifier is
-not stored in the document.
+needs a Firebase user only to authorize the uploads and the write. The document has no user field,
+but attachment paths contain that user's ID (`feedback/{uid}/…`, both in Cloud Storage and in the
+document's attachment entries):
+
+- App versions up to now use whichever Firebase user the app has: an anonymous one, or, when the
+  user has signed in with Google for account sync, that account's ID (signing in keeps the earlier
+  anonymous ID), so attachments can be linked to a synced account.
+- Newer versions always use a separate anonymous identity for feedback, unrelated to account sync.
 
 ## What is stored
 
 - `feedback/{id}` in Firestore: the message (up to 5,000 characters), a required contact email,
   app version, platform, server timestamp, and metadata for up to three images and one optional
-  diagnostics file.
+  diagnostics file (path, type, size; older app versions also store each image's download URL).
 - `feedback/{uid}/{id}/{attachmentId}` in Cloud Storage: images (raster types, 5 MB each) and the
   optional redacted diagnostics text file (5 MB).
 
 [`firestore.rules`](../firestore.rules) only lets a client create a document with exactly those
 fields; nobody can read, update or delete feedback through client SDKs.
 [`storage.rules`](../storage.rules) lets only the uploader create its own objects (never overwrite
-them), and other app users cannot read them. The developer reads feedback with admin credentials.
-Attachments are deleted automatically 180 days after upload by a lifecycle rule on the Storage
-bucket, within the privacy policy's limit of 24 months for feedback records.
+them), and other app users cannot read them. The uploader can still read its own objects because
+older app versions ask for a download URL after each upload and drop the image if they can't get
+one; that permission goes once versions that don't ask are widespread. The developer reads
+feedback with admin credentials.
+
+Uploads that no feedback document references a day later (an abandoned or failed submission) are
+deleted by `deleteOrphanFeedbackUploads` ([`storage-limits.js`](../functions/storage-limits.js)),
+which runs every 6 hours. Attachments are deleted automatically 180 days after upload by a
+lifecycle rule on the Storage bucket, within the privacy policy's limit of 24 months for feedback
+records.
 
 ## Developer alert
 

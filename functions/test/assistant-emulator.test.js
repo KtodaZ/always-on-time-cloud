@@ -23,6 +23,8 @@ test("connector writes, connections and cleanup work on real Firestore", { skip 
   const db = getFirestore(app);
   const uid = `emulator-${Date.now()}`;
   try {
+    // Changes land only in an active account.
+    await refs.account(db, uid).set({ active: true, schemaVersion: 1 });
     // writtenAt is the same server timestamp as the values' updatedAt, which phones report back.
     const write = (build) => recordChange(db, uid, {
       recordIds: ["p_alarm_volume", "p_max_snoozes"], build, assistant: "Claude", tool: "update_settings", summary: "Changed settings", now: Date.now(),
@@ -43,7 +45,6 @@ test("connector writes, connections and cleanup work on real Firestore", { skip 
     assert.deepEqual(second.records.p_alarm_volume, { before: "20", after: "90" });
 
     // A full OAuth connection and revocation, with queries inside transactions.
-    await refs.account(db, uid).set({ active: true, schemaVersion: 1 });
     const verifier = "x".repeat(50);
     const challenge = createHash("sha256").update(verifier).digest("base64url");
     const oauth = createOAuth({

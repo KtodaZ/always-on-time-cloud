@@ -92,19 +92,47 @@ function describePause(until, timeZone) {
 
 // ---- Alerts ------------------------------------------------------------------------------------
 
-const ALERTS = ["paused", "calendar_unwatched", "alarms_off", "alerts_reduced"];
+// Most serious first. Phones word the first four specially and any other value generically
+// ("changed how your alarms ring"), always with an undo action.
+const ALERTS = ["paused", "calendar_unwatched", "alarms_off", "alerts_reduced", "alarms_filtered", "alarms_shortened", "alarms_early"];
 // How much of an alarm the user notices, by alert type (AlertType.kt): sound and vibration, a
 // silent vibration, or a screen notification only. Unset means the app default, sound and vibration.
 const ALERT_TYPE_RANK = { sound_and_vibration: 2, vibration_only: 1, visual_only: 0 };
 const DEFAULT_ALERT_TYPE = "sound_and_vibration";
 const DEFAULT_ALARM_VOLUME = 80;
 const QUIET_VOLUME = 20;
+// The app's defaults for settings an alert compares against (UserPreferencesRepository.kt).
+const DEFAULTS = {
+  p_respect_dnd: false, p_override_system_volume: false, p_ignore_all_day_events: true, p_rsvp_filter: "not_declined",
+  p_alarm_duration_seconds: 60,
+};
+// A ring this short (seconds; 0 rings until dismissed) is easy to miss.
+const SHORT_ALARM_SECONDS = 15;
+// A lead time over a day moves an alarm far from its event.
+const EARLY_LEAD_MINUTES = 1440;
+const LEAD_TIME_FIELDS = ["leadTimes", "addedLeadTimes"];
 
-/** The `enabled` an override record sets (calendars keep it under `overrides`), or null. */
-function enabledOf(recordId, value) {
+/** The Override a record holds (calendars keep it under `overrides`), or null. */
+function overrideOf(recordId, value) {
   const override = recordId.startsWith("c_") ? value?.overrides : value;
-  return override && typeof override === "object" ? override.enabled ?? null : null;
+  return override && typeof override === "object" && !Array.isArray(override) ? override : null;
 }
+
+/** The `enabled` an override record sets, or null. */
+const enabledOf = (recordId, value) => overrideOf(recordId, value)?.enabled ?? null;
+
+/** Every lead time (minutes) a record sets: override lists, or the app default preferences. */
+function leadTimesOf(recordId, value) {
+  if (recordId === "p_default_lead_times_csv") {
+    const list = typeof value === "string" ? parseStored(value) : null;
+    return Array.isArray(list) ? list : [];
+  }
+  if (recordId === "p_default_lead_time_minutes") return Number.isInteger(value) ? [value] : [];
+  const override = /^[cse]_/.test(recordId) ? overrideOf(recordId, value) : null;
+  return LEAD_TIME_FIELDS.flatMap((field) => (Array.isArray(override?.[field]) ? override[field] : []));
+}
+
+const lower = (value) => (typeof value === "string" ? value.toLowerCase() : value);
 
 /**
  * Which alert, if any, an activity entry gets: a change that could stop alarms from ringing or
@@ -116,6 +144,12 @@ function changeAlert(records, current = {}) {
   const before = (id) => parseStored(records[id] ? records[id].before : current[id]);
   const after = (id) => parseStored(records[id] ? records[id].after : current[id]);
   const changed = Object.keys(records);
+  const overrides = changed.filter((id) => /^[cse]_/.test(id));
+  /** A preference this change set to `value` that was effectively something else before. */
+  const became = (id, value) => Boolean(records[id]) && after(id) === value && (before(id) ?? DEFAULTS[id]) !== value;
+  /** An override field this change turned to `value` (compared case-insensitively) from something else. */
+  const overrideBecame = (field, value) => overrides.some((id) =>
+    lower(overrideOf(id, after(id))?.[field]) === value && lower(overrideOf(id, before(id))?.[field]) !== value);
   const pause = `p_${PAUSED_UNTIL}`;
   if (records[pause]) {
     const until = after(pause);
@@ -124,7 +158,7 @@ function changeAlert(records, current = {}) {
   if (changed.some((id) => id.startsWith("c_") && after(id)?.selected === false && before(id)?.selected !== false)) {
     return "calendar_unwatched";
   }
-  if (changed.some((id) => /^[cse]_/.test(id) && enabledOf(id, after(id)) === false && enabledOf(id, before(id)) !== false)) {
+  if (overrides.some((id) => enabledOf(id, after(id)) === false && enabledOf(id, before(id)) !== false)) {
     return "alarms_off";
   }
   if (records.p_alarm_volume) {
@@ -136,6 +170,26 @@ function changeAlert(records, current = {}) {
   if (records.p_vibration_enabled && after("p_vibration_enabled") === false && before("p_vibration_enabled") !== false &&
       (after("p_alert_type") ?? DEFAULT_ALERT_TYPE) === "vibration_only") {
     return "alerts_reduced";
+  }
+  // Silent during Do Not Disturb, or at the phone's own alarm volume.
+  if (became("p_respect_dnd", true) || became("p_override_system_volume", false)) return "alerts_reduced";
+  if (overrides.some((id) => overrideOf(id, before(id))?.ringThroughDnd === true && overrideOf(id, after(id))?.ringThroughDnd !== true)) {
+    return "alerts_reduced";
+  }
+  // Whole groups of events stop ringing: everything not accepted, or all-day events.
+  if (became("p_rsvp_filter", "accepted_only") || overrideBecame("rsvpFilter", "accepted_only")) return "alarms_filtered";
+  if (became("p_ignore_all_day_events", true) || overrideBecame("ignoreAllDay", true)) return "alarms_filtered";
+  if (records.p_alarm_duration_seconds) {
+    const seconds = after("p_alarm_duration_seconds");
+    const was = before("p_alarm_duration_seconds") ?? DEFAULTS.p_alarm_duration_seconds;
+    if (Number.isInteger(seconds) && seconds > 0 && seconds <= SHORT_ALARM_SECONDS && (was === 0 || seconds < was)) return "alarms_shortened";
+  }
+  const early = (id, value) => leadTimesOf(id, value).filter((minutes) => Number.isInteger(minutes) && minutes > EARLY_LEAD_MINUTES);
+  if (changed.some((id) => {
+    const was = new Set(early(id, before(id)));
+    return early(id, after(id)).some((minutes) => !was.has(minutes));
+  })) {
+    return "alarms_early";
   }
   return null;
 }
