@@ -19,7 +19,9 @@ The run has three jobs:
 1. **test** runs the tests and checks the targets, with no cloud identity.
 2. **deploy** refuses to run unless its commit is still the head of `main` (so an old run cannot
    roll production back), installs packages without install scripts, and deploys.
-3. **sign** installs no packages; it downloads what is now live and signs it.
+3. **sign** installs no packages; it downloads what is now live, checks that each file matches the
+   repository at the deployed commit (and hosting's headers, redirects and rewrites match
+   `firebase.json`), and signs it only if they all do.
 
 Secrets stay in Secret Manager and are bound to functions at deploy time:
 
@@ -55,7 +57,9 @@ It fails if:
 1. any live function archive or settings, rules file, index setting or hosting file lacks a
    signature from the Deploy workflow on `main`;
 2. any of those differs from the repository at the commit its signature names, or a file in
-   `account-web/` is missing from hosting;
+   `account-web/` is missing from hosting; every hosting file and hosting's headers, redirects and
+   rewrites must also come from the newest Deploy run that deployed hosting, and those settings must
+   match `firebase.json` at its commit, so an older signed release can't be put back;
 3. the project has something the signatures do not cover: a Cloud Run service that is not one of
    the functions, another hosting site, a preview channel, or another Firestore database; or
 4. Google Cloud's Admin Activity audit log shows a deploy of functions, rules, indexes, schedules or
@@ -120,9 +124,20 @@ to requests from the three hosting domains above. The custom domain is connected
 custom domain, plus the DNS records it shows); the Verify report lists that as a configuration
 change, not a deploy.
 
+## Security headers
+
+`firebase.json` gives every page a Content-Security-Policy that limits where scripts load from and
+forbids framing (`frame-ancestors 'none'`, plus `X-Frame-Options: DENY`): the consent and deletion
+pages, `/open/**`, and every top-level path, including not-found pages. Rules never overlap, because
+how Hosting combines two policies for one path isn't documented. Hosting adds
+`Strict-Transport-Security` itself. The production policies list no local address; the
+[local testing](ASSISTANT_CONNECTOR.md#local-testing) config adds the Auth emulator.
+
 ## Repository protections
 
-`main` cannot be force-pushed or deleted. Actions are pinned to commit hashes and updated by
-Dependabot, workflow tokens default to read-only, and secret scanning with push protection, CodeQL
-and [OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/KtodaZ/always-on-time-cloud)
-run on the repository.
+`main` cannot be force-pushed or deleted, and the `production` environment accepts deployments
+from `main` only. Actions must be pinned to full commit hashes (enforced in the repository's Actions
+settings) and are updated by Dependabot, workflow tokens default to read-only, and secret scanning
+with push protection, CodeQL and
+[OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/KtodaZ/always-on-time-cloud) run
+on the repository.

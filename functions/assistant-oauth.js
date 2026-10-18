@@ -6,7 +6,8 @@
 // - Authorization codes, access tokens and refresh tokens are 256-bit random strings, stored only
 //   as SHA-256 hashes. Codes last 10 minutes and work once; access tokens last an hour; refresh
 //   tokens rotate on every use. Presenting a used code or refresh token again within 30 seconds
-//   is refused (a client retrying a lost response); later, it revokes the whole connection.
+//   is refused (a client retrying a lost response); later, it revokes the whole connection. A used
+//   code only does that when its own client presents it with the right PKCE verifier.
 // - Clients from unverified hosts never get an error redirect: problems show an error page, so
 //   this server can't be used to bounce users to an arbitrary site.
 // - A grant (oauthGrants/{grantId}) is one assistant connection. The account's
@@ -350,6 +351,10 @@ function createOAuth(deps) {
       const doc = await transaction.get(codeRef);
       if (!doc.exists) return { error: "invalid authorization code" };
       const data = doc.data();
+      // Client and PKCE come first: only the client holding the code's verifier can set off the
+      // reuse revocation below, so a leaked spent code alone cannot end someone's connection.
+      if (data.clientId !== client.clientId) return { error: "authorization code was issued to another client" };
+      if (base64urlSha256(verifier) !== data.codeChallenge) return { error: "PKCE verification failed" };
       const usedAt = toMillis(data.usedAt);
       if (usedAt !== null) {
         return time - usedAt < REUSE_GRACE_MS
@@ -357,11 +362,9 @@ function createOAuth(deps) {
           : { error: "authorization code was already used; the connection was revoked", revoke: data.grantId };
       }
       if (toMillis(data.expiresAt) <= time) return { error: "authorization code expired" };
-      if (data.clientId !== client.clientId) return { error: "authorization code was issued to another client" };
       if (data.redirectUriProvided || body.redirect_uri !== undefined) {
         if (body.redirect_uri !== data.redirectUri) return { error: "redirect_uri does not match" };
       }
-      if (base64urlSha256(verifier) !== data.codeChallenge) return { error: "PKCE verification failed" };
       // A reconnect of the same assistant replaces its previous connection.
       const existing = await transaction.get(collection("grants").where("uid", "==", data.uid));
       const replaced = existing.docs.filter((grantDoc) => grantDoc.data().clientId === client.clientId).map((grantDoc) => grantDoc.id);

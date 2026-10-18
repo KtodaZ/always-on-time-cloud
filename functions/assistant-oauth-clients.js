@@ -7,9 +7,10 @@
 // and small size and time limits. Only /oauth/authorize fetches; failures are remembered for ten
 // minutes and fetches are capped per host and overall.
 //
-// A client's own name is self-asserted, so it is never shown. Clients whose metadata document is
-// served from a host in BRANDED_CLIENT_HOSTS get that brand; every other client is an
-// "Unverified app", identified to the user by its redirect host.
+// A client's own name is self-asserted, so it is never shown. Only the exact metadata document URLs
+// in BRANDED_CLIENTS get a brand, and only when every redirect URI stays on that brand's host (or on
+// loopback for Claude Code); every other client is an "Unverified app", identified to the user by
+// its redirect host.
 
 const dns = require("node:dns");
 const https = require("node:https");
@@ -29,14 +30,19 @@ const CLIENT_IDLE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const METADATA_FAILURE_CACHE_MS = 10 * 60 * 1000;
 const MAX_REDIRECT_URIS = 10;
 
-// Hosts whose Client ID Metadata Documents name a known assistant (exact host of the client_id URL):
-// claude.ai serves Claude's (https://claude.ai/oauth/...; Claude Code's is
-// claude.ai/oauth/claude-code-client-metadata) and chatgpt.com serves ChatGPT's
-// (https://chatgpt.com/oauth/client.json or /oauth/{callback_id}/client.json).
-const BRANDED_CLIENT_HOSTS = {
-  "claude.ai": { name: "Claude", assistant: "claude" },
-  "chatgpt.com": { name: "ChatGPT", assistant: "chatgpt" },
-};
+// Known assistants, by the Client ID Metadata Document URLs they publish (checked against the live
+// documents and the providers' connector documentation on 2026-10-17):
+// - Claude on claude.ai, Desktop, mobile and Cowork: https://claude.ai/oauth/mcp-oauth-client-metadata,
+//   returning to https://claude.ai/api/mcp/auth_callback.
+// - Claude Code: https://claude.ai/oauth/claude-code-client-metadata, returning to a loopback port.
+// - ChatGPT: https://chatgpt.com/oauth/client.json for servers that send `iss` (this one), else
+//   https://chatgpt.com/oauth/{callback_id}/client.json; both return to chatgpt.com.
+// `redirects` says where every redirect URI of a branded client must point.
+const BRANDED_CLIENTS = [
+  { host: "claude.ai", path: /^\/oauth\/mcp-oauth-client-metadata$/, name: "Claude", assistant: "claude", redirects: "host" },
+  { host: "claude.ai", path: /^\/oauth\/claude-code-client-metadata$/, name: "Claude Code", assistant: "claude", redirects: "loopback" },
+  { host: "chatgpt.com", path: /^\/oauth\/(?:[A-Za-z0-9_-]{1,128}\/)?client\.json$/, name: "ChatGPT", assistant: "chatgpt", redirects: "host" },
+];
 const UNVERIFIED_NAME = "Unverified app";
 const MAX_URL_LENGTH = 2048;
 
@@ -84,10 +90,10 @@ function parseClientIdUrl(text) {
     throw new ClientError("invalid_client", "client_id is not a valid URL");
   }
   const segments = url.pathname.split("/");
-  if (url.protocol !== "https:" || url.username || url.password || url.hash || text.includes("#") ||
+  if (url.protocol !== "https:" || url.username || url.password || url.hash || text.includes("#") || url.search || text.includes("?") ||
       url.port !== "" || url.pathname === "/" || segments.includes(".") || segments.includes("..") ||
       net.isIP(url.hostname.replace(/^\[|\]$/g, "")) !== 0 || !url.hostname.includes(".") || url.href !== text) {
-    throw new ClientError("invalid_client", "client_id must be a plain https URL with a path on a public host name");
+    throw new ClientError("invalid_client", "client_id must be a plain https URL with a path and no query on a public host name");
   }
   return url;
 }
@@ -151,7 +157,7 @@ async function fetchClientMetadata(clientId, { lookup, get = httpsGet } = {}) {
   if (response.status !== 200) throw new ClientError("invalid_client", `client metadata document returned HTTP ${response.status}`);
   if (response.body.length > CIMD_MAX_BYTES) throw new ClientError("invalid_client", "client metadata document is too large");
   const type = String(response.headers?.["content-type"] ?? "");
-  if (type && !/^application\/([a-z.+-]*\+)?json\b/i.test(type)) throw new ClientError("invalid_client", "client metadata document is not JSON");
+  if (!/^application\/([a-z.+-]*\+)?json\b/i.test(type)) throw new ClientError("invalid_client", "client metadata document is not JSON");
   try {
     return JSON.parse(response.body.toString("utf8"));
   } catch {
@@ -188,14 +194,24 @@ function redirectMatches(registered, requested) {
 /** A self-declared client name, for logs and the registration response only: one clean line, no markup. */
 const cleanName = (value) => cleanText(typeof value === "string" ? value.replace(/[<>]/g, "") : "", 100);
 
-/** The brand for a metadata-document client served from an allowlisted host, else null. */
+/** The BRANDED_CLIENTS entry for a metadata-document client_id, else null. */
 function brandOf(kind, clientId) {
   if (kind !== "cimd") return null;
+  let url;
   try {
-    return BRANDED_CLIENT_HOSTS[new URL(clientId).hostname] ?? null;
+    url = new URL(clientId);
   } catch {
     return null;
   }
+  if (url.href !== clientId || url.search || url.hash || url.port || url.username || url.password) return null;
+  return BRANDED_CLIENTS.find((brand) => url.hostname === brand.host && brand.path.test(url.pathname)) ?? null;
+}
+
+/** Whether a branded client's redirect URI points where that brand's callbacks live. */
+function brandRedirectAllowed(brand, uri) {
+  const url = new URL(uri);
+  if (brand.redirects === "loopback") return url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname);
+  return url.protocol === "https:" && url.hostname === brand.host && url.port === "";
 }
 
 /** Validates client metadata (from a document or a registration request) into the stored form. */
@@ -211,18 +227,25 @@ function validateClientMetadata(metadata, { kind, clientId }) {
       !redirectUris.every(isValidRedirectUri)) {
     throw new ClientError("invalid_redirect_uri", "redirect_uris must list 1-10 https (or loopback http) URLs");
   }
-  const grantTypes = metadata.grant_types ?? ["authorization_code"];
-  if (!Array.isArray(grantTypes) || !grantTypes.includes("authorization_code") ||
-      !grantTypes.every((type) => type === "authorization_code" || type === "refresh_token")) {
+  const supportedGrant = (type) => type === "authorization_code" || type === "refresh_token";
+  let grantTypes = metadata.grant_types ?? ["authorization_code"];
+  // A metadata document describes the client everywhere it is used (Claude's also lists a JWT
+  // bearer grant), so grants this server doesn't offer are left out rather than refused.
+  if (kind === "cimd" && Array.isArray(grantTypes)) grantTypes = grantTypes.filter(supportedGrant);
+  if (!Array.isArray(grantTypes) || !grantTypes.includes("authorization_code") || !grantTypes.every(supportedGrant)) {
     throw new ClientError("invalid_client_metadata", "grant_types may only be authorization_code and refresh_token");
   }
   const responseTypes = metadata.response_types ?? ["code"];
   if (!Array.isArray(responseTypes) || !responseTypes.every((type) => type === "code")) {
     throw new ClientError("invalid_client_metadata", "response_types may only be code");
   }
-  // Metadata documents cannot hold a shared secret, so those clients are public (PKCE only).
+  // Metadata documents cannot hold a shared secret, so those clients are public (PKCE only). A
+  // document may prefer another method but list "none" among the ones it supports (ChatGPT does);
+  // the client then uses "none", the only one both sides support.
   const allowed = kind === "cimd" ? ["none"] : ["none", "client_secret_post", "client_secret_basic"];
-  const authMethod = metadata.token_endpoint_auth_method ?? (kind === "cimd" ? "none" : "client_secret_basic");
+  let authMethod = metadata.token_endpoint_auth_method ?? (kind === "cimd" ? "none" : "client_secret_basic");
+  if (kind === "cimd" && Array.isArray(metadata.token_endpoint_auth_methods_supported) &&
+      metadata.token_endpoint_auth_methods_supported.includes("none")) authMethod = "none";
   if (!allowed.includes(authMethod)) {
     throw new ClientError("invalid_client_metadata", `token_endpoint_auth_method must be one of ${allowed.join(", ")}`);
   }
@@ -235,10 +258,15 @@ function validateClientMetadata(metadata, { kind, clientId }) {
     }
   }
   const brand = brandOf(kind, clientId);
+  if (brand && !redirectUris.every((uri) => brandRedirectAllowed(brand, uri))) {
+    throw new ClientError("invalid_redirect_uri", brand.redirects === "loopback"
+      ? `${brand.name} redirect_uris must be loopback addresses`
+      : `${brand.name} redirect_uris must be on ${brand.host}`);
+  }
   return {
     kind,
     clientId,
-    // What the user sees: the brand for an allowlisted metadata host, otherwise "Unverified app".
+    // What the user sees: the brand for a known metadata document URL, otherwise "Unverified app".
     clientName: brand ? brand.name : UNVERIFIED_NAME,
     declaredName: cleanName(metadata.client_name) || null,
     verified: Boolean(brand),
@@ -363,12 +391,13 @@ function authenticateClient(client, secret) {
 }
 
 module.exports = {
-  BRANDED_CLIENT_HOSTS,
+  BRANDED_CLIENTS,
   CIMD_MAX_BYTES,
   ClientError,
   METADATA_FAILURE_CACHE_MS,
   UNVERIFIED_NAME,
   authenticateClient,
+  brandOf,
   clientDocId,
   fetchClientMetadata,
   getClient,

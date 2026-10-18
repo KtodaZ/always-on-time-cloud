@@ -42,4 +42,4 @@ jobs:
       - name: Security rules and Firestore store tests
         run: npx firebase emulators:exec --only firestore,storage --project demo-account-sync 'node functions/testing/storage-rules.cjs && node functions/testing/account-sync-rules.cjs && node functions/testing/assistant-rules.cjs && npm --prefix functions test'
       - name: Account deletion and assistant connector end to end
-        run: npx firebase emulators:exec --only auth,firestore,functions,hosting --project demo-account-sync 'node functions/testing/account-delete.cjs && node functions/testing/assistant-e2e.cjs'
+        run: npx firebase emulators:exec --only auth,firestore,functions,hosting --project demo-account-sync 'node functions/testing/hosting-headers.cjs && node functions/testing/account-delete.cjs && node functions/testing/assistant-e2e.cjs'
