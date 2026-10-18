@@ -105,6 +105,8 @@ Responses: `201 {"installId": "..."}` when created; `200 {"installId": "..."}` w
 re-enables the install); `409` if the `installId` exists with a different secret.
 
 Rate limit: 20 registration attempts per client network per hour (IPv4 address or IPv6 /64).
+New installs are also capped overall per hour; an install that is already registered can always
+register again.
 
 ### 3.2 Update: `PUT /v1/installations/{installId}`
 
@@ -280,7 +282,8 @@ NSE handling rules:
 
 `scheduleIosPushes` runs every minute. Each install stores `nextWakeAtMs`, the next time anything
 could be due, and the scheduler only reads installs whose time has passed plus subscriptions whose
-renewal is due.
+renewal is due. Installs also store `priorityWakeAtMs`, the next precheck or pending change; the
+scheduler visits those installs first, so heartbeats and renewals can't delay them.
 
 - Coalescing: at most one push per install per 2 minutes, counted from the last push APNs
   accepted. While a push is in flight the install is claimed (the claim expires after 2 minutes if

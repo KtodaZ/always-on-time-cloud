@@ -20,6 +20,9 @@ const MAX_SUBSCRIPTION_HORIZON_MS = 366 * 24 * 60 * 60 * 1000;
 const MAX_GRAPH_NOTIFICATIONS = 1000;
 const MAX_GRAPH_SUBSCRIPTIONS_PER_REQUEST = 100;
 const REGISTRATION_RATE = Object.freeze({ limit: 20, windowMs: 60 * 60 * 1000 });
+// New installs per hour from all networks together, so a registration flood stays bounded.
+// Existing installs re-registering (a new APNs token) don't count.
+const NEW_INSTALL_RATE = Object.freeze({ limit: 2000, windowMs: 60 * 60 * 1000 });
 const INSTALL_RATE = Object.freeze({ limit: 60, windowMs: 60 * 1000 });
 const SCHEDULER_BATCH_LIMIT = 1000;
 const SCHEDULER_CONCURRENCY = 16;
@@ -332,6 +335,10 @@ function createIosPushService({
       throw new HttpError(400, "installId (22 chars) and installSecret (43 chars) must be random base64url values");
     }
     const fields = validateRegistration(body);
+    if (!await store.getInstall(body.installId) &&
+        !await store.consumeRateLimit("registration:new-installs", NEW_INSTALL_RATE, nowMs)) {
+      throw new HttpError(429, "registration rate limit exceeded");
+    }
     let outcome;
     try {
       outcome = await store.registerInstall(body.installId, { installSecretHash: sha256Hex(body.installSecret), ...fields }, nowMs);
@@ -592,7 +599,9 @@ function createIosPushService({
 
   /**
    * One scheduler pass: prune expired records, then visit every install whose `nextWakeAtMs`
-   * has passed or that has a renewal due. Stops starting new installs after `deadlineMs`.
+   * has passed or that has a renewal due. Installs with an alarm precheck or calendar change due
+   * (`priorityWakeAtMs`) go first, so many installs that only want heartbeats or renewals can't
+   * delay them. Stops starting new installs after `deadlineMs`.
    */
   async function scheduledPushes({ deadlineMs = Infinity } = {}) {
     const nowMs = now();
@@ -601,11 +610,12 @@ function createIosPushService({
     } catch (error) {
       logger.warn("Pruning expired iOS push records failed", { error: errorName(error) });
     }
-    const [dueInstallIds, renewalsDue] = await Promise.all([
+    const [priorityInstallIds, dueInstallIds, renewalsDue] = await Promise.all([
+      store.listPriorityInstallIdsDue(nowMs, SCHEDULER_BATCH_LIMIT),
       store.listInstallIdsDue(nowMs, SCHEDULER_BATCH_LIMIT),
       store.listRenewalsDue(nowMs, SCHEDULER_BATCH_LIMIT),
     ]);
-    const work = new Map(dueInstallIds.map((installId) => [installId, []]));
+    const work = new Map([...priorityInstallIds, ...dueInstallIds].map((installId) => [installId, []]));
     for (const subscription of renewalsDue) {
       if (!work.has(subscription.installId)) work.set(subscription.installId, []);
       work.get(subscription.installId).push(subscription.key);
@@ -636,6 +646,7 @@ module.exports = {
   MAX_ALARMS_PER_INSTALL,
   MAX_API_BODY_BYTES,
   MAX_WEBHOOK_BODY_BYTES,
+  NEW_INSTALL_RATE,
   REGISTRATION_RATE,
   clientNetworkKey,
   createIosPushService,

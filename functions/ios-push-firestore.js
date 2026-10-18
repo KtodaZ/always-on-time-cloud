@@ -3,7 +3,6 @@
 const crypto = require("node:crypto");
 const {
   COALESCE_MS,
-  computeNextWakeAtMs,
   duePrecheckStages,
   failureBackoffMs,
   initialRenewDueAtMs,
@@ -11,6 +10,7 @@ const {
   planPush,
   renewRetryAtMs,
   canSendNow,
+  wakeFields,
 } = require("./ios-push-schedule");
 
 const COLLECTIONS = Object.freeze({
@@ -73,7 +73,7 @@ function mergeAlarms(previous, next) {
 
 function withNextWake(install, patch, nowMs) {
   const next = { ...install, ...patch };
-  return { ...patch, nextWakeAtMs: computeNextWakeAtMs(next, nowMs) };
+  return { ...patch, ...wakeFields(next, nowMs) };
 }
 
 /**
@@ -107,7 +107,7 @@ function registrationPatch({ apnsToken, apnsEnvironment, heartbeat }, nowMs) {
 
 /**
  * Firestore persistence for the relay. All state transitions that affect push timing run in
- * transactions and recompute `nextWakeAtMs`, which the scheduler queries.
+ * transactions and recompute `nextWakeAtMs` and `priorityWakeAtMs`, which the scheduler queries.
  */
 class FirestorePushStore {
   constructor(db) {
@@ -165,7 +165,7 @@ class FirestorePushStore {
         rateWindowStartMs: null,
         rateCount: 0,
       };
-      transaction.set(ref, { ...install, nextWakeAtMs: computeNextWakeAtMs(install, nowMs) });
+      transaction.set(ref, { ...install, ...wakeFields(install, nowMs) });
       return "created";
     });
   }
@@ -327,6 +327,16 @@ class FirestorePushStore {
     return snapshot.docs.map((document) => document.id);
   }
 
+  /** Installs with an alarm precheck or calendar change due (see computePriorityWakeAtMs). */
+  async listPriorityInstallIdsDue(nowMs, limit) {
+    const snapshot = await this.db.collection(COLLECTIONS.installs)
+      .where("priorityWakeAtMs", "<=", nowMs)
+      .orderBy("priorityWakeAtMs")
+      .limit(limit)
+      .get();
+    return snapshot.docs.map((document) => document.id);
+  }
+
   async listRenewalsDue(nowMs, limit) {
     const snapshot = await this.db.collection(COLLECTIONS.subscriptions)
       .where("renewDueAtMs", "<=", nowMs)
@@ -441,7 +451,9 @@ class FirestorePushStore {
           if (snapshot.exists) transaction.update(subscriptionSnapshot.ref, { renewDueAtMs: null });
           else transaction.delete(subscriptionSnapshot.ref);
         }
-        if (snapshot.exists && snapshot.data().nextWakeAtMs !== null) transaction.update(ref, { nextWakeAtMs: null });
+        if (snapshot.exists && (snapshot.data().nextWakeAtMs !== null || (snapshot.data().priorityWakeAtMs ?? null) !== null)) {
+          transaction.update(ref, { nextWakeAtMs: null, priorityWakeAtMs: null });
+        }
         return { status: "idle" };
       }
       const install = snapshot.data();
@@ -459,8 +471,8 @@ class FirestorePushStore {
       }
       const plan = planPush(install, nowMs, { renewals });
       if (!plan) {
-        const nextWakeAtMs = computeNextWakeAtMs(install, nowMs);
-        if (nextWakeAtMs !== install.nextWakeAtMs) transaction.update(ref, { nextWakeAtMs });
+        const wake = wakeFields(install, nowMs);
+        if (wake.nextWakeAtMs !== install.nextWakeAtMs || wake.priorityWakeAtMs !== (install.priorityWakeAtMs ?? null)) transaction.update(ref, wake);
         return { status: "idle" };
       }
       transaction.update(ref, withNextWake(install, { pushClaimId: claimId, pushClaimedAtMs: nowMs }, nowMs));
@@ -558,6 +570,7 @@ class FirestorePushStore {
         disabledAtMs: nowMs,
         disabledReason: reason,
         nextWakeAtMs: null,
+        priorityWakeAtMs: null,
       });
       return true;
     });
