@@ -609,7 +609,7 @@ test("HTTP routes serve discovery, register, authorize, token and revoke with OA
     assert.deepEqual([again.status, (await again.json()).error], [400, "invalid_grant"]);
     const unsupported = await fetch(`${base}/oauth/token`, form({ grant_type: "password", client_id: clientId }));
     assert.equal((await unsupported.json()).error, "unsupported_grant_type");
-    const badClient = await fetch(`${base}/oauth/token`, form({ grant_type: "refresh_token", client_id: "aot_client_x", refresh_token: "x" }));
+    const badClient = await fetch(`${base}/oauth/token`, form({ grant_type: "refresh_token", client_id: "aot_client_x", refresh_token: `aot_rt_${"x".repeat(43)}` }));
     assert.deepEqual([badClient.status, (await badClient.json()).error], [401, "invalid_client"]);
     const revoked = await fetch(`${base}/oauth/revoke`, form({ token: tokens.refresh_token, client_id: clientId }));
     assert.equal(revoked.status, 200);
@@ -713,7 +713,7 @@ test("a revocation leaves connector data alone if an assistant connected again m
   assert.ok(db.documents.has("accounts/alice/assistantSnapshots/d1"));
 });
 
-test("the token endpoint is limited per caller and a direct caller can't escape its hop", async () => {
+test("a direct caller can't escape its hop, whatever client address it claims", async () => {
   const { db, oauth } = setup();
   const { createInstanceLimiters, createMemoryLimiter } = require("../assistant-limits");
   const limiters = { ...createInstanceLimiters(), hop: createMemoryLimiter({ limit: 150, windowMs: 10 * 60 * 1000 }) };
@@ -721,13 +721,12 @@ test("the token endpoint is limited per caller and a direct caller can't escape 
   await withServer(handler, async (base) => {
     const token = (headers) => fetch(`${base}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
       body: new URLSearchParams({ grant_type: "refresh_token", client_id: "aot_client_x", refresh_token: "x" }).toString() });
-    const statuses = [];
-    for (let i = 0; i < 121; i += 1) statuses.push((await token({ "x-forwarded-for": "198.51.100.7" })).status);
-    assert.equal(statuses.filter((status) => status === 429).length, 1);
-    // Forging Fastly-Client-IP spreads requests over per-caller buckets, but the unforgeable hop
-    // (the last X-Forwarded-For entry) still caps them.
+    // Forging Fastly-Client-IP and X-Forwarded-Host doesn't make a direct call look like Hosting
+    // traffic: the unforgeable hop (the last X-Forwarded-For entry) is its key and caps it.
     const forged = [];
-    for (let i = 0; i < 160; i += 1) forged.push((await token({ "fastly-client-ip": `203.0.113.${i}`, "x-forwarded-for": "1.2.3.4, 192.0.2.50" })).status);
+    for (let i = 0; i < 160; i += 1) {
+      forged.push((await token({ "fastly-client-ip": `203.0.113.${i}`, "x-forwarded-host": "alwaysontime.zombit.io", "x-forwarded-for": "1.2.3.4, 192.0.2.50" })).status);
+    }
     assert.equal(forged.filter((status) => status === 429).length, 10);
   });
 });

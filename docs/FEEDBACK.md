@@ -45,6 +45,11 @@ repository. A webhook can post to its channel but cannot read it. Cloud Function
 least once, so a retry can produce a duplicate alert; the Firestore document is the source of
 truth.
 
+Alerts are capped per hour: past the cap, one alert says feedback is arriving quickly, and the
+next hour's first alert says how many arrived without one. The count is kept in
+`feedbackAlerts/{hour}` (a number only, deleted by a TTL policy). A refusal from Discord (any 4xx,
+including rate limiting) is logged and not retried; server errors are retried for up to an hour.
+
 To change the webhook, set a new secret version and redeploy the function:
 
 ```sh

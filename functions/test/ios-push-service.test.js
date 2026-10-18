@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const { COLLECTIONS, FirestorePushStore, sha256Hex, subscriptionDocumentId } = require("../ios-push-firestore");
-const { clientNetworkKey, createIosPushService, parseApiRoute } = require("../ios-push-service");
+const { NEW_INSTALL_RATE, clientNetworkKey, createIosPushService, parseApiRoute } = require("../ios-push-service");
 const { FakeFirestore } = require("../testing/fake-firestore");
 
 const MINUTE = 60 * 1000;
@@ -817,7 +817,7 @@ test("scheduler reads only due installs and stops at its deadline", async () => 
   const readsBefore = h.db.reads;
   const idle = await h.service.scheduledPushes();
   assert.equal(idle.installs, 0);
-  assert.ok(h.db.reads - readsBefore <= 6, `an idle pass costs only its queries (${h.db.reads - readsBefore} reads)`);
+  assert.ok(h.db.reads - readsBefore <= 7, `an idle pass costs only its queries (${h.db.reads - readsBefore} reads)`);
 
   h.advance(20 * MINUTE);
   const partial = await h.service.scheduledPushes({ deadlineMs: h.now });
@@ -825,6 +825,53 @@ test("scheduler reads only due installs and stops at its deadline", async () => 
   assert.equal(partial.skipped, 6);
   const full = await h.service.scheduledPushes();
   assert.equal(full.sent, 6);
+});
+
+test("installs with an alarm due go first, so a flood of heartbeat-only installs can't delay them", async () => {
+  let h;
+  // Each push takes long enough that the pass runs out of time after the first few.
+  h = harness({ apns: () => { h.advance(MINUTE); return { status: 200 }; } });
+  const flood = Array.from({ length: 40 }, (_, index) => `Flood${String(index).padStart(17, "0")}`);
+  for (const [index, id] of flood.entries()) {
+    const response = await h.api("POST", "/v1/installations", {
+      auth: null,
+      headers: { "x-forwarded-for": `203.0.113.${index}` },
+      body: { installId: id, installSecret: SECRET, apnsToken: APNS_TOKEN, environment: "development", heartbeat: HEARTBEAT },
+    });
+    assert.equal(response.status, 201);
+  }
+  await h.register();
+  const trigger = h.now + 60 * MINUTE;
+  await h.api("PUT", `/v1/installations/${INSTALL_ID}/alarms`, { body: { alarms: [{ id: "alarm-1", triggerAtMs: trigger }] } });
+  assert.equal(h.install().priorityWakeAtMs, trigger - 20 * MINUTE);
+  assert.equal(h.install(flood[0]).priorityWakeAtMs, null, "heartbeats alone are not a priority");
+  // Every flood install has been due longer than the alarm's precheck.
+  h.setNow(trigger - 19 * MINUTE);
+  const pass = await h.service.scheduledPushes({ deadlineMs: h.now + 30 * 1000 });
+  assert.ok(pass.skipped > 0, "the pass ran out of time");
+  assert.ok(h.pushes.some((push) => push.kind === "precheck"), "the precheck still went out");
+  assert.equal(h.install().priorityWakeAtMs, trigger - 8 * MINUTE, "the next stage is the next priority");
+});
+
+test("new installs are capped overall; installs already registered can always re-register", async () => {
+  const h = harness();
+  assert.equal((await h.register()).status, 201);
+  h.db.documents.set(`${COLLECTIONS.rateLimits}/${sha256Hex("registration:new-installs")}`, {
+    windowStartMs: h.now, count: NEW_INSTALL_RATE.limit, expiresAt: new Date(h.now + NEW_INSTALL_RATE.windowMs),
+  });
+  const other = await h.api("POST", "/v1/installations", {
+    auth: null,
+    headers: { "x-forwarded-for": "192.0.2.99" },
+    body: { installId: "ZyXwVuTsRqPoNmLkJiHgFe", installSecret: SECRET, apnsToken: APNS_TOKEN, environment: "development", heartbeat: HEARTBEAT },
+  });
+  assert.equal(other.status, 429);
+  assert.equal((await h.register({ apnsToken: "cd".repeat(32) })).status, 200);
+  h.advance(NEW_INSTALL_RATE.windowMs);
+  assert.equal((await h.api("POST", "/v1/installations", {
+    auth: null,
+    headers: { "x-forwarded-for": "192.0.2.99" },
+    body: { installId: "ZyXwVuTsRqPoNmLkJiHgFe", installSecret: SECRET, apnsToken: APNS_TOKEN, environment: "development", heartbeat: HEARTBEAT },
+  })).status, 201);
 });
 
 test("persisted state never contains calendar content, raw secrets, or provider tokens", async () => {

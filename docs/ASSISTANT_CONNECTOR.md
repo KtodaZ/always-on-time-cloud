@@ -128,20 +128,29 @@ explains that and links to the app.
 
 | Limit | Where counted | Applies to |
 | --- | --- | --- |
-| Per caller: register 30/h, authorize 60, consent 120, approve 30, token and revoke 120 per 10 min | Firestore, shared | OAuth endpoints |
-| Per network hop: 300 per 10 min | memory, per instance | OAuth endpoints |
-| Overall: authorize 300, consent and approve 600, token and revoke 600 per 10 min; registrations 500/h (Firestore) | memory, per instance | OAuth endpoints |
-| Metadata document fetches: 20 per host, 100 overall per 10 min | memory, per instance | `/oauth/authorize` |
-| Tool calls: 120 per connection per 10 min; pushes 40 per connection per 10 min | memory; Firestore | `/mcp` |
-| Calls without a valid token: 30 per caller, 600 overall per minute, checked before any database read | memory, per instance | `/mcp` |
+| Per caller: register 30/h (valid registrations only), authorize 60, consent 120, approve 30 per 10 min | Firestore, shared | OAuth endpoints |
+| Per presented grant (client, grant type and the code or refresh token) | memory, per instance | `/oauth/token` |
+| Failed requests, per caller and overall | memory, per instance | OAuth endpoints |
+| Registrations overall: 500/h (Firestore) | Firestore, shared | `/oauth/register` |
+| Metadata document fetches: 20 per host, 100 overall per 10 min; Claude's and ChatGPT's hosts are exempt | memory, per instance | `/oauth/authorize` |
+| JSON-RPC messages per connection (every method), tool calls 120 per connection per 10 min; pushes 40 per connection per 10 min | memory; Firestore | `/mcp` |
+| Failed tokens: per caller and overall, counted only after the token fails to verify | memory, per instance | `/mcp` |
+| Direct calls to the function URLs: per network hop and overall | memory, per instance | all endpoints |
 
 In-memory limits hold per instance; with at most 10 instances they hold at ten times their value
-overall. Callers are identified as follows. Google's front end appends the connecting address to
-`X-Forwarded-For`, so its last entry (the hop) can't be forged: for a direct call to the
-function's own URL it is the caller, and through Hosting it is the CDN, shared by many users. The
-per-caller key is `Fastly-Client-IP` (the visitor as Hosting's CDN reports it), else the hop; a
-direct caller can forge it, so it only keeps one honest client from using up the shared budget.
-No header identifies a person reliably here, so the overall caps are what bound abuse.
+overall. Overall caps count failed requests only, after checks that cost nothing, so ordinary use
+never fills them. A request that proves valid is never refused because of other callers'
+failures: an MCP request with a token that verifies, or a token request whose code or refresh
+token exists. Missing or malformed MCP tokens are refused without a database read, large JSON-RPC
+batches are refused, and refused requests are counted without a database write.
+
+Callers are identified as follows. Google's front end appends the connecting address to
+`X-Forwarded-For`, so its last entry (the hop) can't be forged. A request whose hop is a Google
+front-end address and whose `X-Forwarded-Host` is this service's host came through Hosting; its
+caller is the visitor in `Fastly-Client-IP`. Any other request is a direct call to the function's
+own URL (Cloud Run ingress settings can't close that URL, because Hosting itself calls it): it is
+keyed by its hop, never by headers it sent, and direct calls have their own overall budgets, so
+they can't use up the budgets of traffic that came through Hosting.
 
 ## What is stored
 
@@ -154,7 +163,7 @@ No header identifies a person reliably here, so the overall caps are what bound 
 | Token and code hashes | `oauthTokens`, `oauthCodes`, `oauthRequests` | Expiry (TTL) |
 | Registered assistant clients (public metadata) | `oauthClients` | 90 days unused (TTL) |
 | Rate limit counts (document ID is a hash of the connection or IP and the time window) | `assistantRateLimits` | About an hour (TTL) |
-| Anonymous daily totals: connections, tool calls and errors, setup tests, undos | `assistantUsage` | Kept; no user identifiers |
+| Anonymous daily totals: connections, tool calls and errors, setup tests, undos (each day split over a few shard documents) | `assistantUsage` | Kept; no user identifiers |
 | Request logs: action, the account's `logId` (never its uid or email), random ids (grant, change, request, ping, record, device), outcome, duration | Cloud Logging `_Default` bucket | 30 days; account deletion deletes the `logId` and the records those ids pointed to, so remaining entries can't be tied to the person |
 
 The Google account email is read from Firebase Auth only to match Google Calendar IDs to calendar

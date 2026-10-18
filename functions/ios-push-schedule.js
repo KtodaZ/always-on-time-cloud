@@ -163,6 +163,32 @@ function computeNextWakeAtMs(install, nowMs) {
 }
 
 /**
+ * When the scheduler next needs to look at this install for an alarm about to ring or a calendar
+ * change (not heartbeats), or null. The scheduler visits these installs first, so a flood of
+ * installs that only want heartbeats can't delay the pushes that keep alarms right.
+ */
+function computePriorityWakeAtMs(install, nowMs) {
+  if (!install || install.enabled !== true) return null;
+  const candidates = [];
+  if (Number.isSafeInteger(install.pendingChangeAtMs)) candidates.push(nowMs);
+  for (const alarm of install.alarms ?? []) {
+    if (!Number.isSafeInteger(alarm?.triggerAtMs) || alarm.triggerAtMs <= nowMs) continue;
+    for (const { stage, leadMs } of PRECHECK_STAGES) {
+      if (alarm.sent?.[stage]) continue;
+      const { startMs, endMs } = stageWindow(alarm.triggerAtMs, leadMs);
+      if (endMs >= nowMs) candidates.push(Math.max(startMs, nowMs));
+    }
+  }
+  if (candidates.length === 0) return null;
+  return Math.max(Math.min(...candidates), pushBlockedUntil(install));
+}
+
+/** Both scheduler fields for an install document. */
+function wakeFields(install, nowMs) {
+  return { nextWakeAtMs: computeNextWakeAtMs(install, nowMs), priorityWakeAtMs: computePriorityWakeAtMs(install, nowMs) };
+}
+
+/**
  * Chooses the single push to send for an install now, or null. `renewals` are subscription
  * records whose renewal prompt is due. A precheck stage opening within the coalescing window
  * upgrades a due heartbeat to a priority-10 precheck, because no separate push could follow.
@@ -231,6 +257,7 @@ module.exports = {
   RENEW_RETRY_MS,
   canSendNow,
   computeNextWakeAtMs,
+  computePriorityWakeAtMs,
   duePrecheckStages,
   failureBackoffMs,
   initialRenewDueAtMs,
@@ -241,4 +268,5 @@ module.exports = {
   nextActiveTime,
   planPush,
   renewRetryAtMs,
+  wakeFields,
 };

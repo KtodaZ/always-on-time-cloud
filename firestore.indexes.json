@@ -26,6 +26,12 @@
       "indexes": []
     },
     {
+      "collectionGroup": "feedbackAlerts",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
       "collectionGroup": "assistantActivity",
       "fieldPath": "expiresAt",
       "ttl": true,
