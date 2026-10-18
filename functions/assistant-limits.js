@@ -95,9 +95,12 @@ function createMemoryLimiter({ limit, windowMs }) {
   return limiter;
 }
 
-// Hosts whose Client ID Metadata Documents name a known assistant (assistant-oauth-clients.js
-// BRANDED_CLIENT_HOSTS). Read lazily: that module loads this one.
-const isBrandedHost = (host) => Object.hasOwn(require("./assistant-oauth-clients").BRANDED_CLIENT_HOSTS, host);
+// Hosts that serve a known assistant's Client ID Metadata Document (assistant-oauth-clients.js
+// BRANDED_CLIENTS). Read lazily: that module loads this one.
+function isBrandedHost(host) {
+  const brands = require("./assistant-oauth-clients").BRANDED_CLIENTS;
+  return Array.isArray(brands) && brands.some((brand) => brand.host === host);
+}
 
 /**
  * One in-memory limiter per INSTANCE_LIMITS entry, for a handler instance.

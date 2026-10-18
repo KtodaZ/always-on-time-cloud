@@ -186,10 +186,14 @@ test("metadata fetches for Claude and ChatGPT are never refused by the shared fe
   }
   await assert.rejects(getClient(db, "https://many0.example/new", { now: T0, fetchMetadata: ok, fetch: true, limiters }), /too many client metadata fetches/);
   let fetched = 0;
-  const claude = await getClient(db, CLAUDE_ID, { now: T0, fetchMetadata: async (url) => { fetched += 1; return ok(url); }, fetch: true, limiters });
+  const claude = await getClient(db, CLAUDE_ID, {
+    now: T0, fetchMetadata: async (url) => { fetched += 1; return { client_id: url, redirect_uris: [CLAUDE_REDIRECT] }; }, fetch: true, limiters,
+  });
   assert.equal(fetched, 1);
   assert.equal(claude.clientName, "Claude");
-  const chatgpt = await getClient(db, "https://chatgpt.com/oauth/client.json", { now: T0, fetchMetadata: ok, fetch: true, limiters });
+  const chatgpt = await getClient(db, "https://chatgpt.com/oauth/client.json", {
+    now: T0, fetchMetadata: async (url) => ({ client_id: url, redirect_uris: ["https://chatgpt.com/connector/oauth/cb"] }), fetch: true, limiters,
+  });
   assert.equal(chatgpt.clientName, "ChatGPT");
   // The overall budget wasn't spent by the branded fetches either.
   const fresh = createInstanceLimiters();
