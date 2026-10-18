@@ -1,5 +1,7 @@
 "use strict";
 
+const { createHash } = require("node:crypto");
+
 // Route proxy for the Android app. The phone sends a structured trip; this builds the TomTom or
 // Google request with a server-held key, so no routing key ships in the app. The provider's
 // status and body go back unchanged (minus the key), and the app parses them as before.
@@ -21,6 +23,13 @@ const MAX_BODY_CHARS = 200_000;
 // The app allows 60 calls a local day on Premium and 30 otherwise. The server counts UTC days,
 // which can straddle two local ones, so its ceiling sits above the app's.
 const DAILY_CALLS_PER_INSTALL = 80;
+// The install id is chosen by the caller, so two limits don't depend on it: calls per client
+// network per hour (an IPv4 address or IPv6 /64; generous, since carrier NAT puts many phones
+// behind one address), and calls per provider per UTC day for everyone together, below the
+// providers' own daily quotas (Google Routes has a project quota as well).
+const HOURLY_CALLS_PER_NETWORK = 100;
+const DAILY_CALLS_PER_PROVIDER = Object.freeze({ tomtom: 2400, google: 1400 });
+const HOUR_MS = 60 * MINUTE_MS;
 const PROVIDER_TIMEOUT_MS = 10_000;
 
 class RouteRequestError extends Error {
@@ -143,36 +152,63 @@ function scrub(body, apiKey) {
   return apiKey ? text.split(apiKey).join("[key]") : text;
 }
 
+const sha256Hex = (text) => createHash("sha256").update(text, "utf8").digest("hex");
+
 /**
- * Counts one call against the install's allowance for the UTC day, in a transaction so
- * concurrent calls cannot both take the last one. Throws resource-exhausted past the ceiling.
+ * Counts one call against the install's allowance for the UTC day, the client network's for the
+ * hour and the provider's overall allowance for the UTC day, in one transaction so concurrent
+ * calls cannot both take the last one and a refused call counts nowhere. Throws
+ * resource-exhausted past any ceiling.
+ *
+ * All three counters live in travelRouteUsage (covered by its TTL policy). Install documents are
+ * keyed by the install id, which can't contain "~" or "."; the network and provider counters can,
+ * so they never collide. The network is stored only as a hash.
  */
-async function spendInstallAllowance(db, installId, now = Date.now(), limit = DAILY_CALLS_PER_INSTALL) {
+async function spendRouteAllowance(db, { installId, network = null, provider }, now = Date.now(), limits = {}) {
+  const installLimit = limits.install ?? DAILY_CALLS_PER_INSTALL;
+  const networkLimit = limits.network ?? HOURLY_CALLS_PER_NETWORK;
+  const providerLimit = limits.provider ?? DAILY_CALLS_PER_PROVIDER[provider];
   const day = new Date(now).toISOString().slice(0, 10);
-  const ref = db.collection("travelRouteUsage").doc(installId);
+  const hour = now - (now % HOUR_MS);
+  const collection = db.collection("travelRouteUsage");
+  const installRef = collection.doc(installId);
+  const networkRef = network ? collection.doc(`~network.${sha256Hex(network)}`) : null;
+  const providerRef = collection.doc(`~provider.${provider}.${day}`);
   await db.runTransaction(async (transaction) => {
-    const snapshot = await transaction.get(ref);
-    const stored = snapshot.exists ? snapshot.data() : null;
-    const count = stored?.day === day ? stored.count : 0;
-    if (count >= limit) {
-      throw new RouteRequestError("resource-exhausted", "Daily route allowance used");
-    }
-    // expiresAt lets a Firestore TTL policy drop idle installs.
-    transaction.set(ref, { day, count: count + 1, expiresAt: new Date(now + 2 * DAY_MS) });
+    const [install, net, total] = await Promise.all([
+      transaction.get(installRef),
+      networkRef ? transaction.get(networkRef) : null,
+      transaction.get(providerRef),
+    ]);
+    const installCount = install.exists && install.data().day === day ? install.data().count : 0;
+    const networkCount = net?.exists && net.data().hour === hour ? net.data().count : 0;
+    const providerCount = total.exists ? total.data().count ?? 0 : 0;
+    if (installCount >= installLimit) throw new RouteRequestError("resource-exhausted", "Daily route allowance used");
+    if (networkRef && networkCount >= networkLimit) throw new RouteRequestError("resource-exhausted", "Route allowance for this network used; try again later");
+    if (providerCount >= providerLimit) throw new RouteRequestError("resource-exhausted", "Route service busy; try again later");
+    // expiresAt lets a Firestore TTL policy drop idle counters.
+    transaction.set(installRef, { day, count: installCount + 1, expiresAt: new Date(now + 2 * DAY_MS) });
+    if (networkRef) transaction.set(networkRef, { hour, count: networkCount + 1, expiresAt: new Date(hour + 2 * HOUR_MS) });
+    transaction.set(providerRef, { count: providerCount + 1, expiresAt: new Date(now + 2 * DAY_MS) });
   });
+}
+
+/** The install's allowance alone (kept for callers and tests that only need that). */
+async function spendInstallAllowance(db, installId, now = Date.now(), limit = DAILY_CALLS_PER_INSTALL) {
+  return spendRouteAllowance(db, { installId, provider: "tomtom" }, now, { install: limit, provider: Infinity });
 }
 
 /**
  * Runs one routed call. [fetchImpl] and [keys] are injected so tests need no network or secrets.
  * Resolves to the provider's { status, body }; throws RouteRequestError for refused requests.
  */
-async function routeTrip({ data, db, keys, fetchImpl = fetch, logger, now = Date.now() }) {
+async function routeTrip({ data, db, keys, fetchImpl = fetch, logger, network = null, now = Date.now() }) {
   const request = parseRouteRequest(data, now);
   const apiKey = request.provider === "tomtom" ? keys.tomtom() : keys.google();
   if (!apiKey) {
     throw new RouteRequestError("failed-precondition", `${request.provider} routing is not configured`);
   }
-  await spendInstallAllowance(db, request.installId, now);
+  await spendRouteAllowance(db, { installId: request.installId, network, provider: request.provider }, now);
   let response;
   let body;
   try {
@@ -202,10 +238,13 @@ async function routeTrip({ data, db, keys, fetchImpl = fetch, logger, now = Date
 
 module.exports = {
   DAILY_CALLS_PER_INSTALL,
+  DAILY_CALLS_PER_PROVIDER,
+  HOURLY_CALLS_PER_NETWORK,
   RouteRequestError,
   googleBody,
   parseRouteRequest,
   routeTrip,
   spendInstallAllowance,
+  spendRouteAllowance,
   tomTomUrl,
 };

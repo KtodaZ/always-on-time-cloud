@@ -6,6 +6,8 @@ const test = require("node:test");
 const { FakeFirestore } = require("../testing/fake-firestore");
 const {
   DAILY_CALLS_PER_INSTALL,
+  DAILY_CALLS_PER_PROVIDER,
+  HOURLY_CALLS_PER_NETWORK,
   googleBody,
   parseRouteRequest,
   routeTrip,
@@ -126,6 +128,42 @@ test("each install gets a daily ceiling that resets the next UTC day", async () 
   assert.equal(fetch.calls.length, DAILY_CALLS_PER_INSTALL);
   await routeTrip({ data: trip(), db, keys, fetchImpl: fetch.impl, now: NOW + 86_400_000 });
   await routeTrip({ data: trip({ installId: "another-install" }), db, keys, fetchImpl: fetch.impl, now: NOW });
+});
+
+test("rotating install ids doesn't escape the per-network and per-provider ceilings", async () => {
+  const db = new FakeFirestore();
+  const fetch = fakeFetch();
+  const install = (i) => `rotated-${String(i).padStart(4, "0")}`;
+  for (let i = 0; i < HOURLY_CALLS_PER_NETWORK; i += 1) {
+    await routeTrip({ data: trip({ installId: install(i) }), db, keys, fetchImpl: fetch.impl, network: "v4:203.0.113.9", now: NOW });
+  }
+  await assert.rejects(
+    routeTrip({ data: trip({ installId: install(9999) }), db, keys, fetchImpl: fetch.impl, network: "v4:203.0.113.9", now: NOW }),
+    { code: "resource-exhausted" },
+  );
+  assert.equal(fetch.calls.length, HOURLY_CALLS_PER_NETWORK);
+  // Another network, or the same one an hour later, still gets through.
+  await routeTrip({ data: trip({ installId: install(9999) }), db, keys, fetchImpl: fetch.impl, network: "v4:198.51.100.1", now: NOW });
+  await routeTrip({ data: trip({ installId: install(9998) }), db, keys, fetchImpl: fetch.impl, network: "v4:203.0.113.9", now: NOW + 3_600_000 });
+  // The network is stored only as a hash.
+  assert.ok(![...db.documents.keys()].some((path) => path.includes("203.0.113.9")));
+  assert.ok(!JSON.stringify([...db.documents.values()]).includes("203.0.113.9"));
+
+  // Everyone together stays under the provider's daily ceiling; a refused call counts nowhere.
+  const google = trip({ provider: "google" });
+  db.documents.set(`travelRouteUsage/~provider.google.2026-10-13`, { count: DAILY_CALLS_PER_PROVIDER.google - 1 });
+  await routeTrip({ data: { ...google, installId: "fresh-install-1" }, db, keys, fetchImpl: fetch.impl, network: "v4:192.0.2.1", now: NOW });
+  const before = fetch.calls.length;
+  await assert.rejects(
+    routeTrip({ data: { ...google, installId: "fresh-install-2" }, db, keys, fetchImpl: fetch.impl, network: "v4:192.0.2.2", now: NOW }),
+    { code: "resource-exhausted" },
+  );
+  assert.equal(fetch.calls.length, before);
+  assert.equal(db.documents.has("travelRouteUsage/fresh-install-2"), false);
+  // TomTom has its own ceiling, and the next UTC day starts over.
+  await routeTrip({ data: { ...trip(), installId: "fresh-install-3" }, db, keys, fetchImpl: fetch.impl, network: "v4:192.0.2.3", now: NOW });
+  await routeTrip({ data: { ...google, installId: "fresh-install-4" }, db, keys, fetchImpl: fetch.impl, network: "v4:192.0.2.4", now: NOW + 86_400_000 });
+  assert.ok(DAILY_CALLS_PER_PROVIDER.google < 1500, "below the Routes API project quota");
 });
 
 test("a missing key or unreachable provider is refused without leaking details", async () => {
