@@ -92,7 +92,8 @@ service cloud.firestore {
           && isRecordId(recordId)
           && request.resource.data.keys().hasOnly(['payload'])
           && request.resource.data.payload is string && request.resource.data.payload.size() <= 16384;
-        allow delete: if false;
+        // Phones delete an occurrence's record once its event has ended; other records stay.
+        allow delete: if activeAccount(uid) && recordId.matches('^e_[a-f0-9]{64}$');
       }
       match /history/{recordId} {
         allow read: if activeAccount(uid);

@@ -20,6 +20,9 @@ Existing account sync: `accounts/{uid}` (`active`, `schemaVersion`),
 kept; creating more deletes the oldest by `createdAt`). Values the
 connector writes also carry `updatedAt`, a server timestamp from the same commit as the change's
 `writtenAt` (the Android SDK doesn't expose `updateTime`). Phones write `payload` only, which drops it.
+Phones may also delete occurrence records (`e_`) of their own active account: they do so three days
+after the event ends. A missing record means "not set", and `undo` refuses to bring back an
+occurrence record that a phone deleted.
 
 Connector data:
 

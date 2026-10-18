@@ -662,6 +662,24 @@ test("undo compares by meaning, so a phone re-encoding the same value doesn't bl
   });
 });
 
+test("undo doesn't bring back an occurrence record a phone deleted after the event ended", async () => {
+  const { db, handler, token } = setup();
+  db.documents.set(`accounts/alice/values/${DENTIST}`, { payload: '{"leadTimes":[45],"enabled":true}' });
+  await withServer(handler, async ({ call }) => {
+    const reset = await call(token, "set_event_alarms", { event: DENTIST, mode: "reset" });
+    const set = await call(token, "set_event_alarms", { event: DENTIST, leadTimes: [15] });
+    assert.equal(db.documents.get(`accounts/alice/values/${DENTIST}`).payload, '{"leadTimes":[15],"enabled":true}');
+    // The phone deletes the record three days after the event ends (firestore.rules allows e_ deletes).
+    db.documents.delete(`accounts/alice/values/${DENTIST}`);
+    for (const changeId of [set.structuredContent.changeId, reset.structuredContent.changeId]) {
+      const undone = await call(token, "undo", { changeId });
+      assert.equal(undone.isError, true);
+      assert.match(undone.text, /event has ended/);
+    }
+    assert.equal(db.documents.has(`accounts/alice/values/${DENTIST}`), false);
+  });
+});
+
 test("missing or malformed tokens are refused without a read; failed tokens are limited but never block a valid one", async () => {
   const { db, handler, token, logs } = setup();
   await withServer(handler, async ({ rpc }) => {
