@@ -131,7 +131,9 @@ test("token requests are limited per presented grant, and malformed ones cost no
     assert.equal(statuses.at(-1), 429);
     assert.equal(statuses.filter((status) => status === 429).length, 1);
   });
-  assert.ok(presentedGrant({ grant_type: "refresh_token", client_id: "c", refresh_token: `aot_rt_${"x".repeat(43)}` }).hash);
+  assert.equal(presentedGrant({ grant_type: "refresh_token", client_id: "c", refresh_token: `aot_rt_${"x".repeat(43)}` }).id,
+    createHash("sha256").update(`aot_rt_${"x".repeat(43)}`).digest("hex"));
+  assert.equal(presentedGrant({ grant_type: "refresh_token", client_id: "c", refresh_token: "aot_rt_x" }), null);
 });
 
 test("overall OAuth caps count failures only, so valid traffic never fills them", async () => {

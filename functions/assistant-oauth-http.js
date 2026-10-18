@@ -4,13 +4,14 @@
 // rewrites /oauth/** and /.well-known/oauth-* on the public origin to this handler. The same paths on
 // a legacy host (`legacyHosts`) get a 308 to the public origin, which keeps the method and body.
 
+const { createHash } = require("node:crypto");
+
 const { OAuthError, authorizationServerMetadata, movedUrl, protectedResourceMetadata } = require("./assistant-oauth");
 const { ClientError, registerClient, validateClientMetadata } = require("./assistant-oauth-clients");
 const { COLLECTIONS } = require("./assistant-data");
 const {
   LIMITS, admitDirect, clientKeys, consume, countFailure, createInstanceLimiters, failuresExceeded,
 } = require("./assistant-limits");
-const { sha256Hex } = require("./assistant-records");
 const { errorFields, logEvent } = require("./assistant-log");
 
 const MAX_BODY_CHARS = 16 * 1024;
@@ -89,21 +90,25 @@ const MAX_CLIENT_ID_CHARS = 2048;
 const isClientId = (value) => typeof value === "string" && value.length > 0 && value.length <= MAX_CLIENT_ID_CHARS;
 
 /**
- * What a token request presents, from checks that cost nothing: {clientId, type, value, hash}, or
- * an OAuthError for a request that can't succeed.
+ * What a token request presents, from checks that cost nothing: {clientId, type, id}, where id is
+ * the document ID of the code or refresh token (its SHA-256, as assistant-oauth.js stores it; they
+ * are 256-bit random values, so a fast hash is the right one). Null for a request that can't succeed.
  */
 function presentedGrant(body, basic) {
   const type = body.grant_type;
-  if (!Object.hasOwn(GRANT_VALUE, type)) {
+  const clientId = basic?.clientId ?? body.client_id;
+  const value = type === "authorization_code" ? body.code : body.refresh_token;
+  if (!Object.hasOwn(GRANT_VALUE, type) || !isClientId(clientId) || typeof value !== "string" || !GRANT_VALUE[type].test(value)) return null;
+  return { clientId, type, id: createHash("sha256").update(value).digest("hex") };
+}
+
+/** The OAuth error for a token request presentedGrant refused. */
+function presentedGrantError(body, basic) {
+  if (!Object.hasOwn(GRANT_VALUE, body.grant_type)) {
     return new OAuthError("unsupported_grant_type", "grant_type must be authorization_code or refresh_token");
   }
-  const clientId = basic?.clientId ?? body.client_id;
-  if (!isClientId(clientId)) return new OAuthError("invalid_client", "client_id is missing", 401);
-  const value = type === "authorization_code" ? body.code : body.refresh_token;
-  if (typeof value !== "string" || !GRANT_VALUE[type].test(value)) {
-    return new OAuthError("invalid_grant", type === "authorization_code" ? "invalid authorization code" : "invalid refresh token");
-  }
-  return { clientId, type, value, hash: sha256Hex(value) };
+  if (!isClientId(basic?.clientId ?? body.client_id)) return new OAuthError("invalid_client", "client_id is missing", 401);
+  return new OAuthError("invalid_grant", body.grant_type === "authorization_code" ? "invalid authorization code" : "invalid refresh token");
 }
 
 function createOAuthHandler({
@@ -145,7 +150,7 @@ function createOAuthHandler({
   /** True when the presented code or refresh token exists, issued to this client (one read). */
   const grantExists = async (grant) => {
     const collection = grant.type === "authorization_code" ? COLLECTIONS.codes : COLLECTIONS.tokens;
-    const doc = await db.collection(collection).doc(grant.hash).get();
+    const doc = await db.collection(collection).doc(grant.id).get();
     if (!doc.exists) return false;
     const data = doc.data();
     if (grant.type === "refresh_token" && data.kind !== "refresh") return false;
@@ -253,11 +258,12 @@ function createOAuthHandler({
       const body = bodyOf(req);
       const basic = basicAuth(req);
       const grant = presentedGrant(body, basic);
-      if (grant instanceof OAuthError) {
+      if (!grant) {
         countFailure(limiters, "token", from, time);
-        throw grant;
+        throw presentedGrantError(body, basic);
       }
-      if (!limiters.tokenGrant(sha256Hex(`${grant.clientId}|${grant.type}|${grant.hash}`), time)) return tooMany(res, "/oauth/token");
+      const grantKey = createHash("sha256").update(`${grant.clientId}|${grant.type}|${grant.id}`).digest("hex");
+      if (!limiters.tokenGrant(grantKey, time)) return tooMany(res, "/oauth/token");
       if (failuresExceeded(limiters, "token", from, time) && !(await grantExists(grant))) return tooMany(res, "/oauth/token");
       const tokens = await counting("token", from, () => oauth.token(body, basic));
       return send(res, 200, tokens, { ...CORS, Pragma: "no-cache" });
