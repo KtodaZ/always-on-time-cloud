@@ -24,9 +24,11 @@ class ToolError extends Error {
 // ---- Third-party text ------------------------------------------------------------------------------
 
 const MAX_TEXT = 200;
-// Format characters (bidi controls, zero-width characters) are removed; control characters and
-// line or paragraph separators become spaces.
-const FORMAT_CHARS = /\p{Cf}/gu;
+// Format characters (bidi controls, zero-width characters, tag characters) and other invisible
+// characters (variation selectors, fillers, the combining grapheme joiner: Unicode's
+// Default_Ignorable_Code_Point) are removed; control characters and line or paragraph separators
+// become spaces.
+const FORMAT_CHARS = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 const BREAKING_CHARS = /[\p{Cc}\p{Zl}\p{Zp}]/gu;
 
 /** One line of plain text: no control, format or bidi characters, collapsed whitespace, at most `max` characters. */

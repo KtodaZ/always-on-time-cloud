@@ -31,7 +31,7 @@ const auth = require('firebase-admin/auth').getAuth();
     body: JSON.stringify({ data: {} })
   }).then(response => response.json());
   assert.equal(response.result?.deleted ?? response.data?.deleted, true, JSON.stringify(response));
-  assert.equal((await root.get()).data().active, false);
+  assert.deepEqual((await root.get()).data(), { active: false, schemaVersion: 1 }, 'only the marker is left, no longer pending');
   assert.equal((await root.collection('values').get()).size, 0);
   assert.equal((await root.collection('history').get()).size, 0);
   for (const name of ['assistant', 'assistantDevices', 'assistantSnapshots', 'assistantActivity']) {

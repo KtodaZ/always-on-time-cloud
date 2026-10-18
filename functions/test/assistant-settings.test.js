@@ -53,3 +53,43 @@ test("alerts flag only changes that could stop alarms from ringing or being hear
   assert.equal(changeAlert({ p_vibration_enabled: rec(null, "false") }, { p_alert_type: '"vibration_only"' }), "alerts_reduced");
   assert.equal(changeAlert({ p_vibration_enabled: rec(null, "false") }, { p_alert_type: null }), null, "sound still plays");
 });
+
+test("alerts also flag changes that silence alarms in Do Not Disturb, filter events, shorten or move rings", () => {
+  const rec = (before, after) => ({ before, after });
+  const c = `c_${"c".repeat(64)}`;
+  const s = `s_${"5".repeat(64)}`;
+  const e = `e_${"e".repeat(64)}`;
+  // Do Not Disturb and system volume (defaults: ring through DND, at the app's own volume).
+  assert.equal(changeAlert({ p_respect_dnd: rec(null, "true") }), "alerts_reduced");
+  assert.equal(changeAlert({ p_respect_dnd: rec("true", "false") }), null);
+  assert.equal(changeAlert({ p_override_system_volume: rec("true", "false") }), "alerts_reduced");
+  assert.equal(changeAlert({ p_override_system_volume: rec(null, "false") }), null, "already the default");
+  assert.equal(changeAlert({ [c]: rec('{"overrides":{"ringThroughDnd":true}}', '{"overrides":{}}') }), "alerts_reduced");
+  assert.equal(changeAlert({ [c]: rec('{"overrides":{"ringThroughDnd":true}}', "null") }), "alerts_reduced");
+  assert.equal(changeAlert({ [c]: rec(null, '{"overrides":{"ringThroughDnd":true}}') }), null);
+  // Filters that stop whole groups of events from ringing, app-wide or per calendar.
+  assert.equal(changeAlert({ p_rsvp_filter: rec(null, '"accepted_only"') }), "alarms_filtered");
+  assert.equal(changeAlert({ p_rsvp_filter: rec('"accepted_only"', '"all_events"') }), null);
+  assert.equal(changeAlert({ [c]: rec('{"overrides":{"rsvpFilter":"not_declined"}}', '{"overrides":{"rsvpFilter":"accepted_only"}}') }), "alarms_filtered");
+  assert.equal(changeAlert({ [c]: rec('{"overrides":{"rsvpFilter":"ACCEPTED_ONLY"}}', '{"overrides":{"rsvpFilter":"accepted_only"}}') }), null, "same filter, older spelling");
+  assert.equal(changeAlert({ p_ignore_all_day_events: rec("false", "true") }), "alarms_filtered");
+  assert.equal(changeAlert({ p_ignore_all_day_events: rec(null, "true") }), null, "already the default");
+  assert.equal(changeAlert({ [c]: rec("{}", '{"overrides":{"ignoreAllDay":true}}') }), "alarms_filtered");
+  // A very short ring (0 rings until dismissed; unset is 60 seconds).
+  assert.equal(changeAlert({ p_alarm_duration_seconds: rec(null, "5") }), "alarms_shortened");
+  assert.equal(changeAlert({ p_alarm_duration_seconds: rec("0", "15") }), "alarms_shortened");
+  assert.equal(changeAlert({ p_alarm_duration_seconds: rec("5", "10") }), null, "longer than before");
+  assert.equal(changeAlert({ p_alarm_duration_seconds: rec(null, "30") }), null);
+  assert.equal(changeAlert({ p_alarm_duration_seconds: rec("60", "0") }), null, "until dismissed");
+  // Lead times over a day, on an event, series, calendar or the app default.
+  assert.equal(changeAlert({ [e]: rec(null, '{"leadTimes":[2880],"enabled":true}') }), "alarms_early");
+  assert.equal(changeAlert({ [s]: rec('{"leadTimes":[10]}', '{"leadTimes":[0,1441]}') }), "alarms_early");
+  assert.equal(changeAlert({ [c]: rec("{}", '{"overrides":{"addedLeadTimes":[10080]}}') }), "alarms_early");
+  assert.equal(changeAlert({ p_default_lead_times_csv: rec(null, '"[0,4320]"') }), "alarms_early");
+  assert.equal(changeAlert({ p_default_lead_time_minutes: rec(null, "1500") }), "alarms_early");
+  assert.equal(changeAlert({ [e]: rec('{"leadTimes":[2880]}', '{"leadTimes":[0,2880]}') }), null, "the early alarm was already there");
+  assert.equal(changeAlert({ [e]: rec(null, '{"leadTimes":[1440,60]}') }), null, "a day before is usual");
+  // The most serious alert wins.
+  assert.equal(changeAlert({ p_respect_dnd: rec(null, "true"), p_rsvp_filter: rec(null, '"accepted_only"') }), "alerts_reduced");
+  assert.equal(changeAlert({ [e]: rec(null, '{"leadTimes":[2880],"enabled":false}') }), "alarms_off");
+});

@@ -25,6 +25,8 @@ const {
 const MAX_LIST = 100;
 const MAX_EVENTS = 20;
 const MAX_HISTORY = 50;
+// How many of the newest history entries one call reads, before filtering by days and title.
+const HISTORY_READ_LIMIT = MAX_HISTORY * 4;
 const MAX_RANGE_DAYS = SNAPSHOT_WINDOW_DAYS + 1;
 
 const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -301,7 +303,9 @@ const TOOLS = [
       const days = args.days ?? 7;
       const snapshot = await latestSnapshot(ctx);
       const timeZone = snapshot?.timeZone ?? "UTC";
-      const page = await refs.history(ctx.db, ctx.uid).where("createdAt", ">=", now - days * DAY_MS).get();
+      // At most the newest HISTORY_READ_LIMIT entries in the window; the title filter runs here.
+      const page = await refs.history(ctx.db, ctx.uid).where("createdAt", ">=", now - days * DAY_MS)
+        .orderBy("createdAt", "desc").limit(HISTORY_READ_LIMIT).get();
       let entries = page.docs.map((doc) => parseStored(doc.data().payload))
         .filter((entry) => entry && typeof entry === "object" && Number.isFinite(entry.scheduledTime))
         .map((entry) => ({

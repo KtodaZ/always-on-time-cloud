@@ -134,7 +134,7 @@ No header identifies a person reliably here, so the overall caps are what bound 
 
 | Data | Where | Lifetime |
 | --- | --- | --- |
-| Snapshot of upcoming events and alarms (titles, times, calendar names), device model label, FCM token | `accounts/{uid}/assistantSnapshots`, `assistantDevices` | Until the last assistant disconnects, sign-out or account deletion |
+| Snapshot of upcoming events and alarms (titles, times, calendar names), device model label, FCM token | `accounts/{uid}/assistantSnapshots`, `assistantDevices` (at most 10 phones; older ones are removed) | Until the last assistant disconnects, sign-out or account deletion |
 | Change log (summary, before/after settings) | `accounts/{uid}/assistantActivity` | 30 days, or until the last assistant disconnects |
 | Connection: assistant name, whether it is verified, the host its codes go to, scopes, created/last used, the account's `logId` | `oauthGrants` | Until revoked, or 90 days idle |
 | `logId`: a random pseudonym that names the account in request logs | `accounts/{uid}/assistant/log` | Until account deletion |

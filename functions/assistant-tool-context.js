@@ -6,7 +6,7 @@
 // verified access token or callable caller.
 
 const { LIMITS, consume } = require("./assistant-limits");
-const { COLLECTIONS, readDevices, readSnapshots, recordChange } = require("./assistant-data");
+const { COLLECTIONS, readDevices, readLatestSnapshot, readSnapshot, recordChange } = require("./assistant-data");
 const { deliveryFields, errorFields, logEvent } = require("./assistant-log");
 const { deviceName, sendToDevices } = require("./assistant-push");
 const { RecordError } = require("./assistant-records");
@@ -56,14 +56,16 @@ function result(text, data = {}) {
 /** Ids and outcomes for this call's debugging log line (assistant-log.js). */
 const trace = (ctx, fields) => Object.assign(ctx.trace, fields);
 
-async function loadSnapshots(ctx) {
-  const snapshots = (await readSnapshots(ctx.db, ctx.uid)).filter((item) => item.payload && item.publishedAt);
-  return snapshots.map(normalizeSnapshot);
+const usable = (snapshot) => (snapshot && snapshot.payload && snapshot.publishedAt ? normalizeSnapshot(snapshot) : null);
+
+/** The newest snapshot, normalized, or null (none, or its payload can't be read). Only that snapshot is read. */
+async function latestSnapshot(ctx) {
+  return usable(await readLatestSnapshot(ctx.db, ctx.uid));
 }
 
-/** The newest snapshot, or null. */
-async function latestSnapshot(ctx) {
-  return (await loadSnapshots(ctx))[0] ?? null;
+/** One phone's snapshot, normalized, or null. */
+async function deviceSnapshot(ctx, deviceId) {
+  return usable(await readSnapshot(ctx.db, ctx.uid, deviceId));
 }
 
 function noPhone(ctx) {
@@ -165,8 +167,8 @@ module.exports = {
   createToolContext,
   hasCapability,
   hasPlus,
+  deviceSnapshot,
   latestSnapshot,
-  loadSnapshots,
   names,
   noPhone,
   push,

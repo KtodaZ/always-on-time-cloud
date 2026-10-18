@@ -25,11 +25,13 @@ function clone(value) {
 }
 
 class DocumentSnapshot {
-  constructor(db, path) {
+  /** `fields`: a query's select() projection; other fields are left out, as Firestore does. */
+  constructor(db, path, fields = null) {
     this.ref = new DocumentReference(db, path);
     this.id = this.ref.id;
     this.exists = db.documents.has(path);
-    this._data = clone(db.documents.get(path));
+    const data = clone(db.documents.get(path));
+    this._data = fields && data ? Object.fromEntries(Object.entries(data).filter(([key]) => fields.includes(key))) : data;
     this.updateTime = this.exists ? new Date(db.updateTimes.get(path) ?? 0) : undefined;
   }
 
@@ -137,13 +139,26 @@ function compare(actual, operator, expected) {
 }
 
 class Query {
-  constructor(db, path, { filters = [], order = null, direction = "asc", maximum = null } = {}) {
+  constructor(db, path, { filters = [], order = null, direction = "asc", maximum = null, fields = null } = {}) {
     this.db = db;
     this.path = path;
     this.filters = filters;
     this.order = order;
     this.direction = direction;
     this.maximum = maximum;
+    this.fields = fields;
+  }
+
+  select(...fields) {
+    return new Query(this.db, this.path, { ...this, fields });
+  }
+
+  /** The count() aggregation: `(await query.count().get()).data().count`. */
+  count() {
+    return { get: async () => {
+      const { size } = await new Query(this.db, this.path, { ...this, fields: [] }).get();
+      return { data: () => ({ count: size }) };
+    } };
   }
 
   where(field, operator, value) {
@@ -177,7 +192,7 @@ class Query {
     }
     if (this.maximum !== null) matches = matches.slice(0, this.maximum);
     this.db.reads += Math.max(matches.length, 1);
-    return new QuerySnapshot(matches.map(([path]) => new DocumentSnapshot(this.db, path)));
+    return new QuerySnapshot(matches.map(([path]) => new DocumentSnapshot(this.db, path, this.fields)));
   }
 }
 

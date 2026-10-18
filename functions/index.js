@@ -10,6 +10,7 @@ initializeApp();
 // iOS relay push service: device registration API, provider webhooks, and the push scheduler.
 Object.assign(exports, require("./ios-push-functions"));
 Object.assign(exports, require("./account-sync-functions"));
+Object.assign(exports, require("./storage-limits-functions"));
 Object.assign(exports, require("./travel-route-functions"));
 Object.assign(exports, require("./assistant-functions"));
 

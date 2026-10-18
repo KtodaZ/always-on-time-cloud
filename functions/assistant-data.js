@@ -7,7 +7,7 @@ const { randomBytes } = require("node:crypto");
 
 const { FieldValue } = require("firebase-admin/firestore");
 
-const { encodePayload, samePayload } = require("./assistant-records");
+const { RecordError, encodePayload, samePayload } = require("./assistant-records");
 
 const COLLECTIONS = {
   clients: "oauthClients",
@@ -102,25 +102,74 @@ async function readDevices(db, uid) {
   return page.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 }
 
-/** The latest snapshots (at most MAX_SNAPSHOTS), newest first. A payload that does not parse is reported, not thrown. */
-async function readSnapshots(db, uid) {
-  const page = await refs.snapshots(db, uid).orderBy("publishedAt", "desc").limit(MAX_SNAPSHOTS).get();
-  const snapshots = page.docs.map((doc) => {
-    const data = doc.data();
-    let payload = null;
-    try {
-      payload = typeof data.payload === "string" ? JSON.parse(data.payload) : null;
-    } catch {
-      payload = null;
-    }
-    return {
-      deviceId: doc.id,
-      publishedAt: toMillis(data.publishedAt),
-      requestId: data.requestId ?? null,
-      payload: payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null,
-    };
-  });
-  return snapshots.sort((a, b) => (b.publishedAt ?? 0) - (a.publishedAt ?? 0));
+// The largest snapshot payload the rules accept (firestore.rules isValidSnapshot), which the phone
+// trims its snapshot to fit. A stored payload over it is treated as unreadable and never parsed.
+const MAX_SNAPSHOT_CHARS = 800000;
+
+/** A snapshot's payload string parsed into an object, or null when missing, oversized or not a JSON object. */
+function parseSnapshotPayload(text) {
+  if (typeof text !== "string" || text.length > MAX_SNAPSHOT_CHARS) return null;
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+}
+
+function snapshotFrom(doc) {
+  const data = doc.data();
+  return {
+    deviceId: doc.id,
+    publishedAt: toMillis(data.publishedAt),
+    requestId: typeof data.requestId === "string" ? data.requestId : null,
+    payload: parseSnapshotPayload(data.payload),
+  };
+}
+
+/**
+ * The most recently published snapshot, with its payload parsed (null when it can't be read), or
+ * null when there is none. Only that one document is read and parsed.
+ */
+async function readLatestSnapshot(db, uid) {
+  const page = await refs.snapshots(db, uid).orderBy("publishedAt", "desc").limit(1).get();
+  return page.docs[0] ? snapshotFrom(page.docs[0]) : null;
+}
+
+/** One phone's snapshot, parsed like readLatestSnapshot, or null when it has none. */
+async function readSnapshot(db, uid, deviceId) {
+  const doc = await refs.snapshots(db, uid).doc(deviceId).get();
+  return doc.exists ? snapshotFrom(doc) : null;
+}
+
+/**
+ * The latest snapshots (at most MAX_SNAPSHOTS), newest first, without their payloads: deviceId,
+ * publishedAt and requestId only. Cheap enough to poll.
+ */
+async function readSnapshotTimes(db, uid) {
+  const page = await refs.snapshots(db, uid).orderBy("publishedAt", "desc").limit(MAX_SNAPSHOTS).select("publishedAt", "requestId").get();
+  return page.docs.map((doc) => ({
+    deviceId: doc.id,
+    publishedAt: toMillis(doc.data().publishedAt),
+    requestId: typeof doc.data().requestId === "string" ? doc.data().requestId : null,
+  })).filter((item) => item.publishedAt !== null);
+}
+
+// The payload's top-level "valuesAppliedThrough" (docs/ASSISTANT_PROTOCOL.md "Snapshot"). Inside a
+// JSON string every quote is escaped, so this can only match an object key.
+const APPLIED_THROUGH = /"valuesAppliedThrough"\s*:\s*(\d{1,16})\s*[,}]/;
+
+/**
+ * One snapshot's valuesAppliedThrough (0 when it has none), found without parsing the payload, or
+ * null when the snapshot is gone or its payload is unreadable.
+ */
+async function readAppliedThrough(db, uid, deviceId) {
+  const doc = await refs.snapshots(db, uid).doc(deviceId).get();
+  const text = doc.exists ? doc.data().payload : null;
+  if (typeof text !== "string" || text.length > MAX_SNAPSHOT_CHARS) return null;
+  const match = APPLIED_THROUGH.exec(text);
+  return match ? Number(match[1]) : 0;
 }
 
 /** Current payload strings for the given record ids (missing documents are null). */
@@ -177,8 +226,10 @@ const MAX_ATTEMPTS = 5;
  * Records read but not returned by `build` are left alone.
  *
  * Every write is guarded by the update time it was read at (or must create the document), so a
- * concurrent change makes the commit fail and the change is rebuilt. The activity's `writtenAt` and
- * the values' `updatedAt` are the same server timestamp (the commit time), which phones report back.
+ * concurrent change makes the commit fail and the change is rebuilt. The account document is
+ * guarded the same way and must be active, so a change can't land once account deletion started.
+ * The activity's `writtenAt` and the values' `updatedAt` are the same server timestamp (the commit
+ * time), which phones report back.
  */
 async function recordChange(db, uid, { recordIds, build, assistant, tool, summary, now, afterWrite, alert }) {
   const values = refs.values(db, uid);
@@ -189,7 +240,8 @@ async function recordChange(db, uid, { recordIds, build, assistant, tool, summar
       snapshots.set(ref.path, doc);
       return doc;
     };
-    const docs = await Promise.all(recordIds.map((id) => read(values.doc(id))));
+    const [root, ...docs] = await Promise.all([refs.account(db, uid).get(), ...recordIds.map((id) => read(values.doc(id)))]);
+    if (!root.exists || root.data().active !== true) throw new RecordError("the account is no longer active");
     const current = Object.fromEntries(docs.map((doc, index) => [recordIds[index], doc.exists ? doc.data().payload ?? null : null]));
     const next = await build(current, read);
     const records = {};
@@ -225,6 +277,9 @@ async function recordChange(db, uid, { recordIds, build, assistant, tool, summar
       else batch.create(doc.ref, value);
     }
     if (afterWrite) afterWrite(batch, (ref) => snapshots.get(ref.path));
+    // Commit only while the account is still the active one read above, as ensureLogId does: if
+    // account deletion has written its tombstone since, this fails and the retry stops the change.
+    batch.update(root.ref, { active: true }, { lastUpdateTime: root.updateTime });
     try {
       await batch.commit();
     } catch (error) {
@@ -245,16 +300,21 @@ module.exports = {
   HISTORY_DAYS,
   MAX_DEVICES,
   MAX_SNAPSHOTS,
+  MAX_SNAPSHOT_CHARS,
   SNAPSHOT_WINDOW_DAYS,
   UNDO_DAYS,
   deleteCollection,
   deleteConnectorData,
   ensureLogId,
   isChangeId,
+  parseSnapshotPayload,
   randomId,
+  readAppliedThrough,
   readDevices,
+  readLatestSnapshot,
   readLogId,
-  readSnapshots,
+  readSnapshot,
+  readSnapshotTimes,
   readValues,
   recordChange,
   refs,

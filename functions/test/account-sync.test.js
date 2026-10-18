@@ -1,7 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { FakeFirestore } = require('../testing/fake-firestore');
-const { requireRecentGoogleAccount, deleteAccountData, pruneAccountHistory, HISTORY_WINDOW_MS } = require('../account-sync');
+const {
+  requireRecentGoogleAccount, deleteAccountData, pruneAccountHistory, resumeAccountDeletions, DELETION_RESUME_AFTER_MS, HISTORY_WINDOW_MS
+} = require('../account-sync');
 
 test('deletion requires a Google-linked account and recent authentication', () => {
   const now = 1000000;
@@ -31,11 +33,13 @@ test('deletion blocks stale writes, then deletes data, assistant connections and
   const deleted = [];
   await deleteAccountData(db, { deleteUser: async uid => {
     // The tombstone and data deletion happen before the identity goes.
-    assert.deepEqual(db.documents.get('accounts/user'), { active: false, schemaVersion: 1 });
+    assert.deepEqual(db.documents.get('accounts/user'), { active: false, schemaVersion: 1, deletionPending: true, deletionStartedAt: now });
+    assert.deepEqual(Object.keys(db.dump()).sort(), ['accounts/user', 'oauthGrants/g2', 'oauthTokens/t2']);
     deleted.push(uid);
-  } }, 'user');
+  } }, 'user', now);
   assert.deepEqual(deleted, ['user']);
   assert.deepEqual(Object.keys(db.dump()).sort(), ['accounts/user', 'oauthGrants/g2', 'oauthTokens/t2']);
+  assert.deepEqual(db.documents.get('accounts/user'), { active: false, schemaVersion: 1 }, 'no longer pending');
   assert.ok(!JSON.stringify(db.dump()).includes('log_abcdefghijklmnop'), 'no copy of the logId survives');
 });
 
@@ -52,4 +56,53 @@ test('history pruning uses fourteen-day cutoff and batches until empty', async (
     batch: () => ({ delete: ref => deleted.push(ref), commit: async () => {} }) };
   assert.equal(await pruneAccountHistory(db, 2000000000), 2);
   assert.deepEqual(deleted, ['a', 'b']);
+});
+
+test('deletion revokes assistant access before deleting synced data', async () => {
+  const db = new FakeFirestore();
+  db.documents.set('accounts/user', { active: true, schemaVersion: 1 });
+  db.documents.set('accounts/user/values/p_alarm_volume', { payload: '50' });
+  db.documents.set('oauthGrants/g1', { uid: 'user', clientId: 'c' });
+  db.documents.set('oauthTokens/t1', { grantId: 'g1', uid: 'user' });
+  const recursiveDelete = db.recursiveDelete.bind(db);
+  db.recursiveDelete = async ref => {
+    if (ref.path === 'accounts/user/values') {
+      assert.equal(db.documents.has('oauthGrants/g1'), false, 'grants go first');
+      assert.equal(db.documents.has('oauthTokens/t1'), false, 'tokens go first');
+    }
+    return recursiveDelete(ref);
+  };
+  await deleteAccountData(db, { deleteUser: async () => {} }, 'user');
+  assert.equal(db.documents.has('accounts/user/values/p_alarm_volume'), false);
+});
+
+test('a deletion that stopped partway is finished later, and an already deleted identity is fine', async () => {
+  const db = new FakeFirestore();
+  const now = 5000000000;
+  db.documents.set('accounts/stopped', { active: false, schemaVersion: 1, deletionPending: true, deletionStartedAt: now - DELETION_RESUME_AFTER_MS - 1 });
+  db.documents.set('accounts/stopped/history/h1', { payload: '{}', createdAt: now });
+  db.documents.set('accounts/stopped/assistant/log', { logId: 'log_x' });
+  db.documents.set('oauthGrants/g1', { uid: 'stopped', clientId: 'c' });
+  // Still running in its callable: left alone for now.
+  db.documents.set('accounts/running', { active: false, schemaVersion: 1, deletionPending: true, deletionStartedAt: now - 1000 });
+  db.documents.set('accounts/running/values/p_alarm_volume', { payload: '50' });
+  db.documents.set('accounts/done', { active: false, schemaVersion: 1 });
+  const deleted = [];
+  const auth = { deleteUser: async uid => {
+    deleted.push(uid);
+    throw Object.assign(new Error('gone'), { code: 'auth/user-not-found' });
+  } };
+  assert.equal(await resumeAccountDeletions(db, auth, now), 1);
+  assert.deepEqual(deleted, ['stopped']);
+  assert.deepEqual(db.documents.get('accounts/stopped'), { active: false, schemaVersion: 1 });
+  assert.equal(db.documents.has('accounts/stopped/history/h1'), false);
+  assert.equal(db.documents.has('accounts/stopped/assistant/log'), false);
+  assert.equal(db.documents.has('oauthGrants/g1'), false);
+  assert.ok(db.documents.has('accounts/running/values/p_alarm_volume'));
+  assert.equal(await resumeAccountDeletions(db, auth, now + DELETION_RESUME_AFTER_MS), 1);
+  assert.equal(db.documents.has('accounts/running/values/p_alarm_volume'), false);
+  // Other Auth errors leave the account pending for the next run.
+  db.documents.set('accounts/flaky', { active: false, schemaVersion: 1, deletionPending: true, deletionStartedAt: 0 });
+  await assert.rejects(resumeAccountDeletions(db, { deleteUser: async () => { throw new Error('unavailable'); } }, now), /unavailable/);
+  assert.equal(db.documents.get('accounts/flaky').deletionPending, true);
 });

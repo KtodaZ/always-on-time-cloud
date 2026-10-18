@@ -15,7 +15,9 @@ deletes everything under "Connector data" below.
 ## Firestore layout
 
 Existing account sync: `accounts/{uid}` (`active`, `schemaVersion`),
-`accounts/{uid}/values/{recordId}` (`payload` string) and `accounts/{uid}/history/{id}`. Values the
+`accounts/{uid}/values/{recordId}` (`payload` string; the rules accept only the record ids under
+"Record keys and payloads") and `accounts/{uid}/history/{id}` (the newest 5,000 per account are
+kept; creating more deletes the oldest by `createdAt`). Values the
 connector writes also carry `updatedAt`, a server timestamp from the same commit as the change's
 `writtenAt` (the Android SDK doesn't expose `updateTime`). Phones write `payload` only, which drops it.
 
@@ -44,20 +46,25 @@ ID). The owner is the signed-in Google account `uid` with an active account, as 
 | `platform` | `"android"` \| `"ios"` | |
 | `deviceName` | string ≤ 100 | Model label, e.g. "Pixel 9" (same label as synced history) |
 | `appVersion` | string ≤ 40 | |
-| `fcmToken` | string ≤ 4096 | Android; absent on iOS until its relay is wired |
+| `fcmToken` | string ≤ 4096 of `A-Z a-z 0-9 _ - :` | Android; absent on iOS until its relay is wired |
 | `capabilities` | list of strings ≤ 20 | Only `travel`, `spokenAlarms`, `plus` (the phone has Plus benefits, whether bought or free for a limited time), `pause` (the rules reject others, so a new capability needs a rules change first) |
 | `lastPing` | map | `{id: string ≤ 64, receivedAt: timestamp}` echo of the latest test ping |
 | `updatedAt` | timestamp | `request.time` |
 
 A phone writes this only while `assistant/state.connected == true`, and deletes it when the flag
-turns false, on sign-out, and before account deletion. The server pushes to at most the 10 most
-recently updated devices and reads at most the 5 most recently published snapshots.
+turns false, on sign-out, and before account deletion. An account keeps at most 10 device and 10
+snapshot documents: creating more deletes the least recently updated. The server pushes to at most
+the 10 most recently updated devices and parses only the most recently published snapshot. While
+waiting for phones (`confirm_change`, `refresh`) it polls only the snapshots' `publishedAt` and
+`requestId`, and reads a payload again only after its phone published a new one (for
+`valuesAppliedThrough`, found without parsing the rest).
 
 ### Snapshot
 
 `accounts/{uid}/assistantSnapshots/{deviceId}` has four fields: `schemaVersion` (1),
 `publishedAt` (timestamp, `request.time`), `requestId` (string ≤ 64 or absent, echo of the
-publish request that caused it) and `payload` (JSON string ≤ 800,000 characters):
+publish request that caused it) and `payload` (JSON string ≤ 800,000 characters; the phone drops
+its furthest events until it fits, and the server never parses a longer one):
 
 ```json
 {
@@ -104,8 +111,9 @@ publish request that caused it) and `payload` (JSON string ≤ 800,000 character
   `source`: `app`, `calendar`, `series`, `event` or `travel`. `status`: `on`, `off` (alarm disabled
   for the event), `paused` (inside a pause window), or `past`.
 - The server drops fields it doesn't know and values outside these lists, and treats titles and
-  names as untrusted text: it strips control, format and bidirectional characters, collapses
-  whitespace and cuts them at 200 characters.
+  names as untrusted text: it strips control, format and bidirectional characters and other
+  invisible ones (variation selectors, tag characters, fillers), collapses whitespace and cuts them
+  at 200 characters.
 - Never included: descriptions, attendees, locations, meeting links, travel origins or
   destinations, sound or voice choices.
 
@@ -125,7 +133,13 @@ publish request that caused it) and `payload` (JSON string ≤ 800,000 character
 | `paused` | `p_alarms_paused_until` set to −1 or a time |
 | `calendar_unwatched` | a `c_` record's `selected` becomes false |
 | `alarms_off` | a `c_` record's `overrides.enabled`, or an `s_`/`e_` record's `enabled`, becomes false |
-| `alerts_reduced` | `alarm_volume` set to 20 or less and lower than before (unset counts as 80), `alert_type` lowered (`sound_and_vibration` > `vibration_only` > `visual_only`), or `vibration_enabled` set to false while the alert type is `vibration_only` |
+| `alerts_reduced` | `alarm_volume` set to 20 or less and lower than before (unset counts as 80), `alert_type` lowered (`sound_and_vibration` > `vibration_only` > `visual_only`), `vibration_enabled` set to false while the alert type is `vibration_only`, `respect_dnd` turned on, `override_system_volume` turned off (from true), or a calendar's `ringThroughDnd` turned off |
+| `alarms_filtered` | `rsvp_filter`, or a calendar's `rsvpFilter`, becomes `accepted_only`; `ignore_all_day_events` (from false) or a calendar's `ignoreAllDay` becomes true |
+| `alarms_shortened` | `alarm_duration_seconds` set to 1–15 and shorter than before (unset counts as 60, 0 rings until dismissed) |
+| `alarms_early` | a lead time over 1,440 minutes (a day) added to an event, series or calendar (`leadTimes` or `addedLeadTimes`) or to the app default (`default_lead_times_csv`, `default_lead_time_minutes`) |
+
+Phones show any `alert` (an unknown value gets generic wording) with an undo action, so a new value
+needs no app change.
 
 ## Record keys and payloads
 
@@ -236,7 +250,9 @@ same change as the code, and ship the side that must accept a value before the s
 
 - **A new preference:** add it to `PREFERENCE_*` in
   [`assistant-records.js`](../functions/assistant-records.js), the vectors' `preferences` and the
-  list above, with its range or allowed values; then to the app's account-sync allowlist. Expose it
+  list above, with its range or allowed values, and to `isRecordId` in
+  [`firestore.rules`](../firestore.rules) (a test keeps it equal to the allowlist); deploy the rules,
+  then add it to the app's account-sync allowlist. Expose it
   to assistants through `SETTINGS` in [`assistant-settings.js`](../functions/assistant-settings.js)
   (the schema comes from the allowlist), and decide whether `changeAlert` should flag it.
 - **A new tool:** add it to the read, write or connection module, list it in

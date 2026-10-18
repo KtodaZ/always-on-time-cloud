@@ -17,19 +17,50 @@ function requireRecentGoogleAccount(auth, now = Date.now()) {
   return auth.uid;
 }
 
-async function deleteAccountData(db, auth, uid) {
+// A deletion still marked pending this long after it started has stopped (the callable's timeout is
+// shorter), so resumeAccountDeletions finishes it.
+const DELETION_RESUME_AFTER_MS = 15 * 60 * 1000;
+const RESUME_BATCH = 20;
+
+async function deleteAccountData(db, auth, uid, now = Date.now()) {
   const root = db.collection('accounts').doc(uid);
-  // Keep a minimal UID tombstone so an already-issued token cannot recreate deleted data.
-  await root.set({ active: false, schemaVersion: 1 });
-  await db.recursiveDelete(root.collection('values'));
-  await db.recursiveDelete(root.collection('history'));
-  // Assistant connections: revoke every grant, then remove what the connector stored.
+  // Keep a minimal UID tombstone so an already-issued token cannot recreate deleted data. It stays
+  // marked pending until everything below is gone, so a deletion that stops partway is resumed.
+  await root.set({ active: false, schemaVersion: 1, deletionPending: true, deletionStartedAt: now });
+  await finishAccountDeletion(db, auth, uid);
+}
+
+/** Deletes everything a (tombstoned) account left behind. Safe to run again after a partial run. */
+async function finishAccountDeletion(db, auth, uid) {
+  const root = db.collection('accounts').doc(uid);
+  // Assistant connections first: revoke every grant and token so no assistant can act on the
+  // account while the rest is deleted, then remove what the connector stored.
   await deleteAllGrants(db, uid);
   await deleteConnectorData(db, uid);
+  await db.recursiveDelete(root.collection('values'));
+  await db.recursiveDelete(root.collection('history'));
   // assistant/state and assistant/log: removing the logId leaves the connector's request logs
   // (which name the account only by it) with nothing that ties them to this account.
   await db.recursiveDelete(root.collection('assistant'));
-  await auth.deleteUser(uid);
+  try {
+    await auth.deleteUser(uid);
+  } catch (error) {
+    if (error?.code !== 'auth/user-not-found') throw error;
+  }
+  await root.set({ active: false, schemaVersion: 1 });
+}
+
+/** Finishes deletions that stopped partway (a timeout or crash). Returns how many it finished. */
+async function resumeAccountDeletions(db, auth, now = Date.now()) {
+  const page = await db.collection('accounts').where('deletionPending', '==', true).limit(RESUME_BATCH).get();
+  let resumed = 0;
+  for (const doc of page.docs) {
+    const started = doc.data().deletionStartedAt;
+    if (Number.isFinite(started) && started > now - DELETION_RESUME_AFTER_MS) continue;
+    await finishAccountDeletion(db, auth, doc.id);
+    resumed += 1;
+  }
+  return resumed;
 }
 
 async function pruneAccountHistory(db, now = Date.now()) {
@@ -45,4 +76,7 @@ async function pruneAccountHistory(db, now = Date.now()) {
   }
 }
 
-module.exports = { HISTORY_WINDOW_MS, requireRecentGoogleAccount, deleteAccountData, pruneAccountHistory };
+module.exports = {
+  DELETION_RESUME_AFTER_MS, HISTORY_WINDOW_MS, requireRecentGoogleAccount, deleteAccountData, finishAccountDeletion,
+  pruneAccountHistory, resumeAccountDeletions,
+};

@@ -7,9 +7,16 @@ const { FakeFirestore } = require("../testing/fake-firestore");
 const { CHANGE_ID_PATTERN, deleteConnectorData, recordChange } = require("../assistant-data");
 const { RecordError } = require("../assistant-records");
 
-const change = (db, build, extra = {}) => recordChange(db, "alice", {
+/** Changes need an active account, as signed-in phones create it. */
+function activeAccount(db) {
+  if (!db.documents.has("accounts/alice")) db.documents.set("accounts/alice", { active: true, schemaVersion: 1 });
+  return db;
+}
+
+const changeIn = (db, build, extra = {}) => recordChange(db, "alice", {
   recordIds: ["p_alarm_volume"], build, assistant: "Claude", tool: "update_settings", summary: "Changed volume", now: Date.now(), ...extra,
 });
+const change = (db, build, extra) => changeIn(activeAccount(db), build, extra);
 
 test("a change rebuilds from fresh data when the record changes underneath it", async () => {
   const db = new FakeFirestore();
@@ -63,4 +70,26 @@ test("unchanged records write nothing, and invalid payloads never reach Firestor
   await assert.rejects(change(db, () => ({ p_alarm_volume: "loud" })), RecordError);
   await assert.rejects(change(db, () => ({ p_max_snoozes: 1 })), /unexpected record/);
   assert.equal(db.writes, 0);
+});
+
+test("a change never lands in an account that is being deleted", async () => {
+  const db = new FakeFirestore();
+  db.documents.set("accounts/alice", { active: false, schemaVersion: 1 });
+  await assert.rejects(changeIn(db, () => ({ p_alarm_volume: 80 })), /no longer active/);
+  db.documents.delete("accounts/alice");
+  await assert.rejects(changeIn(db, () => ({ p_alarm_volume: 80 })), /no longer active/);
+  assert.equal(db.writes, 0);
+
+  // Deletion writes its tombstone between the change's reads and its commit: the commit fails,
+  // and the rebuilt change sees the tombstone and stops.
+  db.documents.set("accounts/alice", { active: true, schemaVersion: 1 });
+  let builds = 0;
+  await assert.rejects(changeIn(db, async () => {
+    builds += 1;
+    if (builds === 1) await db.collection("accounts").doc("alice").set({ active: false, schemaVersion: 1 });
+    return { p_alarm_volume: 80 };
+  }), /no longer active/);
+  assert.equal(builds, 1);
+  assert.deepEqual(Object.keys(db.dump()), ["accounts/alice"]);
+  assert.deepEqual(db.documents.get("accounts/alice"), { active: false, schemaVersion: 1 });
 });
