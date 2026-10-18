@@ -101,8 +101,9 @@ async function start() {
   }
   const scopes = Array.isArray(info.scopes) ? info.scopes : [];
   showBadge(info);
-  element('heading').textContent = `Connect ${info.clientName}`;
-  element('client').textContent = info.clientName;
+  // An unverified client's name is the generic "Unverified app"; phrase it as a description, not a name.
+  element('heading').textContent = info.verified ? `Connect ${info.clientName}` : 'Connect an unverified app';
+  element('client').textContent = info.verified ? info.clientName : 'An unverified app';
   element('redirect-host').textContent = info.clientHost;
   element('unverified').hidden = info.verified;
   element('unverified-host').textContent = info.clientHost;
@@ -139,7 +140,7 @@ async function start() {
     try {
       const status = await post('/oauth/consent', { request, idToken: await user.getIdToken() });
       element('intro').textContent = status.account === 'ready'
-        ? `Approve to let ${info.clientName} manage alarms for this account.`
+        ? `Approve to let ${info.verified ? info.clientName : 'this app'} manage alarms for this account.`
         : 'One more step before connecting.';
       element('not-ready').hidden = status.account === 'ready';
       element('approve').hidden = status.account !== 'ready';
