@@ -1,9 +1,10 @@
 const { initializeApp } = require("firebase-admin/app");
+const { getFirestore } = require("firebase-admin/firestore");
 const { logger } = require("firebase-functions");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { defineSecret } = require("firebase-functions/params");
 
-const { buildFeedbackNotification, discordPayload } = require("./feedback-notification");
+const { publishFeedbackAlert } = require("./feedback-notification");
 
 initializeApp();
 
@@ -43,22 +44,8 @@ exports.publishFeedbackNotification = onDocumentCreated(
     }
 
     try {
-      const notification = buildFeedbackNotification(feedback, feedbackId);
-      const response = await fetch(feedbackWebhookUrl.value(), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(discordPayload(notification)),
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) {
-        const retryAfter = response.headers.get("retry-after");
-        const retryHint = retryAfter ? `; Retry-After: ${retryAfter}` : "";
-        throw new Error(`Discord returned HTTP ${response.status}${retryHint}`);
-      }
-
-      logger.info("Published feedback notification", {
-        feedbackId,
-        status: response.status,
+      await publishFeedbackAlert({
+        feedback, feedbackId, eventTime: event.time, db: getFirestore(), webhookUrl: feedbackWebhookUrl.value(), logger,
       });
     } catch (error) {
       logger.error("Could not publish feedback notification", { feedbackId, error });
