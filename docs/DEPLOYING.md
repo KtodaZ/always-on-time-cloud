@@ -80,8 +80,8 @@ gh attestation verify delete-account.html --repo KtodaZ/always-on-time-cloud \
 ### What this does not prove
 
 - The checks detect changes; they cannot stop a project owner from changing production.
-- Settings that are not code (secret values, App Check enforcement, billing) are not signed, though
-  changes to them appear in the audit log listing.
+- Settings that are not code (secret values, App Check enforcement, the Storage bucket's lifecycle
+  rule, billing) are not signed, though changes to them appear in the audit log listing.
 - The deploy job runs the Firebase CLI and this repository's function code (to discover functions)
   while it holds the deploy identity, so a malicious locked dependency could act during a deploy.
   The lockfiles are reviewed through Dependabot pull requests, and anything it deployed would still

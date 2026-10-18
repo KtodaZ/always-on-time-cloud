@@ -47,14 +47,14 @@ More detail: [assistant connector](docs/ASSISTANT_CONNECTOR.md) and its
 npm ci && npm ci --prefix functions && npm test
 ```
 
-Security rules, the Firestore store, account deletion and the assistant connector also have emulator tests (Java 21 and the
+Firestore and Storage security rules, the Firestore store, account deletion and the assistant connector also have emulator tests (Java 21 and the
 Firebase CLI). The emulators load every function, so give the declared secrets and params stand-in
 values first:
 
 ```sh
 printf 'APNS_AUTH_KEY_P8=x\nFEEDBACK_DISCORD_WEBHOOK_URL=http://127.0.0.1:9/\nTOMTOM_API_KEY=x\nTRAVEL_ROUTE_API_KEY=x\n' > functions/.secret.local
 cp functions/.env.always-on-time-zombit-2026 functions/.env.local
-npx firebase emulators:exec --only firestore --project demo-account-sync 'node functions/testing/account-sync-rules.cjs && node functions/testing/assistant-rules.cjs && npm --prefix functions test'
+npx firebase emulators:exec --only firestore,storage --project demo-account-sync 'node functions/testing/storage-rules.cjs && node functions/testing/account-sync-rules.cjs && node functions/testing/assistant-rules.cjs && npm --prefix functions test'
 npx firebase emulators:exec --only auth,firestore,functions,hosting --project demo-account-sync 'node functions/testing/account-delete.cjs && node functions/testing/assistant-e2e.cjs'
 ```
 

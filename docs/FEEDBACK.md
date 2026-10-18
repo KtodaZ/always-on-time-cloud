@@ -14,8 +14,10 @@ not stored in the document.
 
 [`firestore.rules`](../firestore.rules) only lets a client create a document with exactly those
 fields; nobody can read, update or delete feedback through client SDKs.
-[`storage.rules`](../storage.rules) lets only the uploader write its own objects, and other app
-users cannot read them. The developer reads feedback with admin credentials.
+[`storage.rules`](../storage.rules) lets only the uploader create its own objects (never overwrite
+them), and other app users cannot read them. The developer reads feedback with admin credentials.
+Attachments are deleted automatically 180 days after upload by a lifecycle rule on the Storage
+bucket, within the privacy policy's limit of 24 months for feedback records.
 
 ## Developer alert
 

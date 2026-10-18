@@ -144,6 +144,9 @@
     "hosting": {
       "port": 5012
     },
+    "storage": {
+      "port": 9299
+    },
     "ui": {
       "enabled": false
     },
