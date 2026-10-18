@@ -148,8 +148,11 @@ test("provider tokens are reused for 40 minutes and invalidated no faster than e
 test("APNs config rejects missing or malformed credentials without echoing them", () => {
   assert.throws(() => validateApnsConfig({ ...CONFIG, keyPem: "" }), ApnsConfigError);
   assert.throws(() => validateApnsConfig({ ...CONFIG, keyPem: "-----BEGIN PRIVATE KEY-----\nnope" }), /not a readable private key/);
-  const rsa = crypto.generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ type: "pkcs8", format: "pem" });
+  // Well-formed keys of the wrong type or curve: APNs ES256 needs EC P-256.
+  const rsa = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" });
   assert.throws(() => validateApnsConfig({ ...CONFIG, keyPem: rsa }), /EC P-256/);
+  const p384 = crypto.generateKeyPairSync("ec", { namedCurve: "secp384r1" }).privateKey.export({ type: "pkcs8", format: "pem" });
+  assert.throws(() => validateApnsConfig({ ...CONFIG, keyPem: p384 }), /EC P-256/);
   assert.throws(() => validateApnsConfig({ ...CONFIG, keyId: "abc" }), /APNS_KEY_ID/);
   assert.throws(() => validateApnsConfig({ ...CONFIG, teamId: "abc" }), /APNS_TEAM_ID/);
   assert.throws(() => validateApnsConfig({ ...CONFIG, topic: "com.example.app.voip" }), /APNS_TOPIC/);
