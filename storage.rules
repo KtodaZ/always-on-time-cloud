@@ -7,8 +7,10 @@ service firebase.storage {
     // stored only in the feedback document, which clients cannot read.
     match /feedback/{userId}/{feedbackId}/{attachmentId} {
       allow read: if request.auth != null && request.auth.uid == userId;
-      allow write: if request.auth != null
+      // Create only: each attachment is a new object, so nothing can be overwritten or reused.
+      allow create: if request.auth != null
         && request.auth.uid == userId
+        && resource == null
         && request.resource != null
         && request.resource.contentType is string
         && (
