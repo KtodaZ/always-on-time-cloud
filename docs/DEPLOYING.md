@@ -113,7 +113,10 @@ site. Hosting serves the same release on the site's default domains,
 
 The account pages sign in with a popup through Firebase Auth's `authDomain`
 (`always-on-time-zombit-2026.firebaseapp.com`), which works from any domain listed in Firebase
-Auth's authorized domains. The custom domain is connected in the Firebase console (Hosting > Add
+Auth's authorized domains. The `apiKey` in
+[`account-web/firebase-config.json`](../account-web/firebase-config.json) is Firebase's public
+web client identifier, not a secret; in Google Cloud it is limited to the Firebase Auth APIs and
+to requests from the three hosting domains above. The custom domain is connected in the Firebase console (Hosting > Add
 custom domain, plus the DNS records it shows); the Verify report lists that as a configuration
 change, not a deploy.
 

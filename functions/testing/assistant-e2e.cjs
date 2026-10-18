@@ -28,7 +28,11 @@ const json = { 'Content-Type': 'application/json' };
     const moved = await fetch(`${site}${path}`, { redirect: 'manual' });
     assert.deepEqual([moved.status, moved.headers.get('location')], [301, location]);
   }
-  assert.match(await fetch(`${site}/delete-account/`).then(r => r.text()), /https:\/\/zombit\.io\/always-on-time\/privacy\//);
+  const deletePage = await fetch(`${site}/delete-account/`);
+  assert.match(await deletePage.text(), /https:\/\/zombit\.io\/always-on-time\/privacy\//);
+  // The deletion page cannot be framed (clickjacking).
+  assert.equal(deletePage.headers.get('x-frame-options'), 'DENY');
+  assert.match(deletePage.headers.get('content-security-policy'), /frame-ancestors 'none'/);
   const consentPage = await fetch(`${site}/connect/`);
   assert.match(consentPage.headers.get('content-security-policy'), /script-src 'self' https:\/\/www\.gstatic\.com/);
   assert.match(consentPage.headers.get('content-security-policy'), /frame-ancestors 'none'/);

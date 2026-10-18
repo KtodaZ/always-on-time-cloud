@@ -17,7 +17,11 @@
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^6.0.0",
+    "fast-check": "^4.10.2",
     "firebase": "^13.0.0"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.6"
+  }
 }
