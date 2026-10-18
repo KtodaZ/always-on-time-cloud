@@ -7,6 +7,7 @@ const app = initializeApp(config);
 const auth = getAuth(app);
 const removeAccount = httpsCallable(getFunctions(app, 'us-central1'), 'deleteSyncedAccount');
 const element = id => document.getElementById(id);
+const status = (message, tone = '') => { element('status').textContent = message; element('status').dataset.tone = tone; };
 let deleting = false;
 onAuthStateChanged(auth, user => {
   element('account').hidden = !user;
@@ -17,9 +18,9 @@ onAuthStateChanged(auth, user => {
 });
 element('sign-in').addEventListener('click', async () => {
   element('sign-in').disabled = true;
-  element('status').textContent = '';
+  status('');
   try { await signInWithPopup(auth, new GoogleAuthProvider()); }
-  catch (error) { if (error.code !== 'auth/popup-closed-by-user') element('status').textContent = 'Couldn’t sign in. Please try again.'; }
+  catch (error) { if (error.code !== 'auth/popup-closed-by-user') status('Couldn’t sign in. Please try again.', 'error'); }
   finally { element('sign-in').disabled = false; }
 });
 element('sign-out').addEventListener('click', () => signOut(auth));
@@ -29,18 +30,20 @@ element('delete').addEventListener('click', async () => {
   deleting = true;
   element('delete').disabled = true;
   element('sign-out').disabled = true;
-  element('status').textContent = 'Deleting your account and synced data…';
+  element('delete').setAttribute('aria-busy', 'true');
+  status('Deleting your account and synced data…');
   try {
     await removeAccount();
     await signOut(auth);
-    element('status').textContent = 'Your Always On Time account and synced data have been deleted.';
+    status('Your Always On Time account and synced data have been deleted.', 'success');
   } catch (error) {
     if (error.code === 'functions/failed-precondition' || error.code === 'functions/unauthenticated') {
       await signOut(auth);
-      element('status').textContent = 'Please sign in again, then confirm account deletion.';
-    } else element('status').textContent = 'Couldn’t finish deleting your account. Please try again.';
+      status('Please sign in again, then confirm account deletion.', 'error');
+    } else status('Couldn’t finish deleting your account. Please try again.', 'error');
   } finally {
     deleting = false;
+    element('delete').removeAttribute('aria-busy');
     element('delete').disabled = !element('confirm').checked;
     element('sign-out').disabled = false;
   }

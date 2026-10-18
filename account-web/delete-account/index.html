@@ -2,22 +2,30 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#fbfbfc" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111318" media="(prefers-color-scheme: dark)">
 <title>Delete your account · Always On Time</title>
+<link rel="preload" href="/fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/newsreader-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/account.css">
 <main>
-  <a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Always On Time</a>
+  <div class="parties"><img class="app-icon" src="/icon.webp" alt="Always On Time" width="56" height="56"></div>
   <h1>Delete your account</h1>
-  <p>Sign in with the Google account you use in Always On Time to delete your account and its synced data.</p>
+  <p class="lede">Sign in with the Google account you use in Always On Time to delete your account and its synced data.</p>
   <p>This removes saved settings, calendar and event customizations, and cloud alarm history. Your Google account and calendars are unaffected. Settings and history stored locally on your phones remain there.</p>
-  <p id="status" role="status" aria-live="polite"></p>
-  <button id="sign-in" class="google"><img src="/google-g.svg" alt="">Sign in with Google</button>
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+  <div class="actions"><button id="sign-in" class="google"><img src="/google-g.svg" alt="">Sign in with Google</button></div>
   <section id="account" hidden>
-    <p>Signed in as <strong id="email"></strong></p>
-    <label><input id="confirm" type="checkbox"> I understand that deleting my account and synced data cannot be undone.</label>
-    <div class="actions"><button id="delete" disabled>Delete account and synced data</button><button id="sign-out">Sign out</button></div>
+    <div class="account">
+      <span class="avatar" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg></span>
+      <p>Signed in as <strong id="email"></strong></p>
+    </div>
+    <label class="confirm"><input id="confirm" type="checkbox"> I understand that deleting my account and synced data cannot be undone.</label>
+    <div class="actions stack"><button id="sign-out">Sign out</button><button id="delete" class="danger" disabled>Delete account and synced data</button></div>
   </section>
   <p class="secondary">Expired alarm history is removed in the daily cleanup after 14 days. A technical deletion marker is retained to prevent old sessions from recreating deleted data.</p>
-  <a href="https://zombit.io/always-on-time/privacy/">Privacy policy</a>
 </main>
+<footer class="site-footer"><a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Always On Time</a> by Zombit Studios · <a href="https://zombit.io/always-on-time/privacy/">Privacy policy</a></footer>
 <script type="module" src="/account.js"></script>
 </html>

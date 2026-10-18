@@ -10,8 +10,11 @@ import {
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
 
 const element = id => document.getElementById(id);
+const page = element('page');
 const request = new URLSearchParams(location.search).get('request');
 const local = ['localhost', '127.0.0.1'].includes(location.hostname);
+const EXPIRED = ['This request expired', 'Start connecting again from your assistant.'];
+const RATE_LIMITED = 'Too many attempts. Wait a few minutes and try again.';
 let busy = false;
 
 async function post(path, body) {
@@ -21,62 +24,96 @@ async function post(path, body) {
   return data;
 }
 
-function show(message) {
+/** The status line; tone 'error' colours it. */
+function show(message, tone = '') {
   element('status').textContent = message;
+  element('status').dataset.tone = tone;
 }
 
-function stop(message) {
-  for (const id of ['details', 'sign-in', 'account', 'approve', 'cancel']) element(id).hidden = true;
+/** Ends the flow on a page that only says what happened: state is error, info, approved or cancelled. */
+function stop(title, message, state = 'error') {
+  for (const id of ['details', 'sign-in', 'account', 'not-ready', 'approve', 'cancel']) element(id).hidden = true;
+  page.dataset.state = state;
+  delete page.dataset.busy;
+  element('heading').textContent = title;
   element('intro').textContent = message;
+  show('');
+}
+
+/** The assistant's monogram, as in the app: Claude "C", ChatGPT "G", a warning sign for an unverified app. */
+function showBadge(info) {
+  const kind = !info.verified ? 'unverified'
+    : info.clientName.startsWith('Claude') ? 'claude'
+      : info.clientName === 'ChatGPT' ? 'chatgpt' : 'other';
+  element('badge').dataset.kind = kind;
+  element('initial').textContent = kind === 'claude' ? 'C' : kind === 'chatgpt' ? 'G' : kind === 'other' ? info.clientName.slice(0, 1) : '';
+}
+
+function setBusy(decision) {
+  for (const id of ['approve', 'cancel']) {
+    element(id).disabled = Boolean(decision);
+    if (decision && id === (decision === 'approve' ? 'approve' : 'cancel')) element(id).setAttribute('aria-busy', 'true');
+    else element(id).removeAttribute('aria-busy');
+  }
+  if (decision) page.dataset.busy = decision;
+  else delete page.dataset.busy;
 }
 
 async function decide(decision, user) {
   if (busy) return;
   busy = true;
-  element('approve').disabled = true;
-  element('cancel').disabled = true;
+  setBusy(decision);
   show(decision === 'approve' ? 'Connecting…' : 'Cancelling…');
   try {
     const idToken = user ? await user.getIdToken() : undefined;
     const { redirect, cancelled } = await post('/oauth/approve', { request, idToken, decision });
     if (cancelled || !redirect) {
-      stop('Cancelled. Nothing was connected. You can close this page.');
-      show('');
+      stop('Cancelled', 'Nothing was connected. You can close this page.', 'cancelled');
       return;
     }
-    show(decision === 'approve' ? 'Approved. Returning to your assistant…' : 'Cancelled. Returning to your assistant…');
+    const approved = decision === 'approve';
+    stop(approved ? 'Approved' : 'Cancelled', 'Returning to your assistant…', approved ? 'approved' : 'cancelled');
+    show(approved ? 'Approved. Returning to your assistant…' : 'Cancelled. Returning to your assistant…');
     location.assign(redirect);
   } catch (error) {
     busy = false;
-    element('approve').disabled = false;
-    element('cancel').disabled = false;
-    if (error.code === 'expired') stop('This connection request expired. Start connecting again from your assistant.');
-    else if (error.code === 'account_not_ready') show(error.message);
-    else show('Couldn’t finish. Please try again.');
+    setBusy(null);
+    if (error.code === 'expired') stop(...EXPIRED);
+    else if (error.code === 'account_not_ready') show(error.message, 'error');
+    else if (error.status === 429) show(RATE_LIMITED, 'error');
+    else show('Couldn’t finish. Please try again.', 'error');
   }
 }
 
 async function start() {
   if (!request) {
-    stop('This page opens from your assistant when you connect Always On Time. Start from Claude or ChatGPT’s connector settings.');
+    stop('Connect an assistant', 'This page opens from your assistant when you connect Always On Time. Start from Claude or ChatGPT’s connector settings.', 'info');
     return;
   }
   let info;
   try {
     info = await post('/oauth/consent', { request });
   } catch (error) {
-    stop(error.code === 'expired' ? 'This connection request expired. Start connecting again from your assistant.' : 'Couldn’t load this connection request. Please try again from your assistant.');
+    if (error.code === 'expired') stop(...EXPIRED);
+    else if (error.status === 429) stop('Too many attempts', 'Wait a few minutes, then try again from your assistant.');
+    else stop('Something went wrong', 'Couldn’t load this connection request. Please try again from your assistant.');
     return;
   }
+  const scopes = Array.isArray(info.scopes) ? info.scopes : [];
+  showBadge(info);
   element('heading').textContent = `Connect ${info.clientName}`;
   element('client').textContent = info.clientName;
   element('redirect-host').textContent = info.clientHost;
   element('unverified').hidden = info.verified;
   element('unverified-host').textContent = info.clientHost;
   element('started-from').textContent = info.verified ? info.clientName : `the app at ${info.clientHost}`;
+  // An empty scope list means both; a read-only request says it can change nothing.
+  element('scope-write').hidden = scopes.length > 0 && !scopes.includes('alarms.write');
+  element('scope-read-only').hidden = !element('scope-write').hidden;
   element('intro').textContent = 'Sign in to review and approve this connection.';
   element('details').hidden = false;
   element('cancel').hidden = false;
+  page.dataset.state = 'consent';
 
   const config = await fetch('/firebase-config.json').then(response => response.json());
   // Local testing runs against the Auth emulator and the emulators' demo project.
@@ -94,7 +131,10 @@ async function start() {
     element('approve').hidden = true;
     element('not-ready').hidden = true;
     show('');
-    if (!user) return;
+    if (!user) {
+      element('intro').textContent = 'Sign in to review and approve this connection.';
+      return;
+    }
     element('email').textContent = user.email || '';
     try {
       const status = await post('/oauth/consent', { request, idToken: await user.getIdToken() });
@@ -104,16 +144,17 @@ async function start() {
       element('not-ready').hidden = status.account === 'ready';
       element('approve').hidden = status.account !== 'ready';
     } catch (error) {
-      if (error.code === 'expired') stop('This connection request expired. Start connecting again from your assistant.');
-      else if (error.code === 'login_required') { show('Sign in with a Google account.'); await signOut(auth); }
-      else show('Couldn’t check this account. Please try again.');
+      if (error.code === 'expired') stop(...EXPIRED);
+      else if (error.code === 'login_required') { show('Sign in with a Google account.', 'error'); await signOut(auth); }
+      else if (error.status === 429) show(RATE_LIMITED, 'error');
+      else show('Couldn’t check this account. Please try again.', 'error');
     }
   });
   element('sign-in').addEventListener('click', async () => {
     element('sign-in').disabled = true;
     show('');
     try { await signInWithPopup(auth, new GoogleAuthProvider()); }
-    catch (error) { if (error.code !== 'auth/popup-closed-by-user') show('Couldn’t sign in. Please try again.'); }
+    catch (error) { if (error.code !== 'auth/popup-closed-by-user') show('Couldn’t sign in. Please try again.', 'error'); }
     finally { element('sign-in').disabled = false; }
   });
   element('sign-out').addEventListener('click', () => signOut(auth));
