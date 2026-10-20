@@ -7,7 +7,7 @@ account-sync records the app already uses. The phone/server/Firestore contract i
 [ASSISTANT_PROTOCOL.md](ASSISTANT_PROTOCOL.md).
 
 Code: [`functions/assistant-*.js`](../functions/assistant-functions.js), consent page
-[`account-web/connect/`](../account-web/connect/index.html), App Link fallback
+[`account-web/connect/`](../account-web/connect/index.html), App Link and Universal Link fallback
 [`account-web/open/`](../account-web/open/index.html).
 
 ## Endpoints
@@ -25,8 +25,9 @@ All on `https://alwaysontime.zombit.io` (Hosting rewrites to the functions):
 | `POST /oauth/token` | `assistantOauth` | Code and refresh token exchange |
 | `POST /oauth/revoke` | `assistantOauth` | RFC 7009 revocation (revokes the whole connection) |
 | `/connect/` | Hosting | Consent page: Google sign-in, what the assistant can see and change, Approve/Cancel |
-| `/open/**` | Hosting | Fallback for App Links when the app is not installed |
+| `/open/**` | Hosting | Fallback for App Links and Universal Links when the app did not open them |
 | `/.well-known/assetlinks.json` | Hosting | Android App Links verification |
+| `/.well-known/apple-app-site-association` | Hosting | iOS Universal Links verification (`/open` and `/open/*` for `LRTR5A87Y6.com.zombitstudios.alwaysontime`) |
 
 Hosting also serves these paths on the project's default domains
 (`always-on-time-zombit-2026.web.app` and `.firebaseapp.com`, recognized by `X-Forwarded-Host`).

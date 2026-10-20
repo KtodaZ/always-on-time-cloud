@@ -13,11 +13,13 @@
 <main>
   <div class="parties"><img class="app-icon" src="/icon.webp" alt="" width="56" height="56"></div>
   <h1>Open Always On Time</h1>
-  <p class="lede">This link opens a screen in the Always On Time app on your Android phone.</p>
+  <p class="lede" data-platform="android">This link opens a screen in the Always On Time app on your Android phone.</p>
+  <p class="lede" data-platform="ios" hidden>This link opens a screen in the Always On Time app on your iPhone.</p>
   <div class="actions"><a id="open" class="button primary" href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Open Always On Time</a></div>
-  <p class="secondary">Don’t have the app? <a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Get Always On Time on Google Play</a>.</p>
+  <p class="secondary" data-platform="android">Don’t have the app? <a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Get Always On Time on Google Play</a>.</p>
+  <p class="secondary" data-platform="ios" hidden>If the app didn’t open, open this link on the iPhone where Always On Time is installed.</p>
   <p class="secondary">Links like this only open a screen in the app; they never change your settings.</p>
 </main>
-<footer class="site-footer"><a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Always On Time</a> by Zombit Studios</footer>
+<footer class="site-footer"><a id="app-page" href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Always On Time</a> by Zombit Studios</footer>
 <script src="/open/open.js"></script>
 </html>

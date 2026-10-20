@@ -112,8 +112,12 @@ site. Hosting serves the same release on the site's default domains,
 - `/` and `/privacy-policy.html` redirect to the Zombit Studios website on every domain.
 - The assistant connector's OAuth and discovery paths redirect to the custom domain, and `/mcp`
   answers with an error naming the new URL ([details](ASSISTANT_CONNECTOR.md#endpoints)).
-- The account pages, `/open/**` and `/.well-known/assetlinks.json` are served on every domain, so
-  App Links verify on both the custom and the default domain.
+- The account pages, `/open/**`, `/.well-known/assetlinks.json` and
+  `/.well-known/apple-app-site-association` are served on every domain, so Android App Links and
+  iOS Universal Links verify on both the custom and the default domain. Both association files
+  are served as `application/json` without redirects, as Android and Apple require. Apple's CDN
+  caches `apple-app-site-association`, so a change can take a day or more to reach release
+  builds; Debug builds of the app read it directly.
 
 The account pages sign in with a popup through Firebase Auth's `authDomain`
 (`always-on-time-zombit-2026.firebaseapp.com`), which works from any domain listed in Firebase

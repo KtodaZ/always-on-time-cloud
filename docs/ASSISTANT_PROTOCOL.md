@@ -239,12 +239,17 @@ snapshot per 10 seconds; extra requests coalesce.
 
 ## App Links
 
-`https://alwaysontime.zombit.io/open/{destination}` with the app's verified
-`assetlinks.json`, which Hosting serves on every domain, so links on
+`https://alwaysontime.zombit.io/open/{destination}`, verified for the Android app by
+`.well-known/assetlinks.json` and for the iOS app by `.well-known/apple-app-site-association`
+(Universal Links). Hosting serves both on every domain, so links on
 `always-on-time-zombit-2026.web.app` keep verifying too. Destinations: `event/{eventKey}`, `calendars`, `calendar/{calendarKey}`,
 `settings/alarms`, `settings/sounds`, `settings/spoken`, `permissions`, `battery`, `travel`,
 `account`, `assistants`, `plus?source=assistant`. Links only open screens; they never change
-settings and never contain titles.
+settings and never contain titles. Both apps accept every destination: on iOS, `travel` and
+`plus` (Android-only features) open Settings, and a key that is not on the phone falls back as on
+Android. When the app does not open a link, the page at `/open/**` offers it again: an intent
+with the Play listing as fallback on Android, the same path on the other domain on an iPhone
+(iOS opens apps only for links to a different domain).
 
 ## Changing the protocol
 
@@ -266,7 +271,7 @@ same change as the code, and ship the side that must accept a value before the s
   first (phones that write an unknown capability are rejected), then add it to `CAPABILITIES` in
   [`assistant-tools-connection.js`](../functions/assistant-tools-connection.js) and this file, and
   finally ship the app.
-- **A new App Link destination:** the app's link routing must handle it first. Then add it to
+- **A new App Link destination:** both apps' link routing must handle it first. Then add it to
   `DESTINATIONS` and `appLink` in [`assistant-snapshot.js`](../functions/assistant-snapshot.js)
   (`open_in_app` takes its values) and this file's App Links list. The Hosting fallback in
   `account-web/open/` serves every path, so it needs no change.
