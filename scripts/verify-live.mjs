@@ -129,7 +129,7 @@ export function attestationCommit(attestation) {
 
 /**
  * Hosting paths firebase.json deploys from account-web. Its `ignore` skips dotfiles and dot
- * directories except /.well-known (App Links), plus node_modules; scripts/test checks the two agree.
+ * directories except /.well-known (App Links and Universal Links), plus node_modules; scripts/test checks the two agree.
  */
 export function expectedHostingPaths(repoPaths) {
   return repoPaths.filter((p) => p.startsWith("account-web/"))

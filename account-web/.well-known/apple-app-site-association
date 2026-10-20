@@ -1,0 +1,13 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["LRTR5A87Y6.com.zombitstudios.alwaysontime"],
+        "components": [
+          { "/": "/open/*" },
+          { "/": "/open" }
+        ]
+      }
+    ]
+  }
+}

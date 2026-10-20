@@ -94,8 +94,9 @@ test("reports never show a person's email", () => {
 
 test("hosting expects every account-web file except ignored ones", () => {
   assert.deepEqual(expectedHostingPaths(["account-web/index.html", "account-web/.DS_Store", "account-web/a/b.js", "README.md",
-    "account-web/.well-known/assetlinks.json", "account-web/.git/config", "account-web/a/.env"]),
-  ["/index.html", "/a/b.js", "/.well-known/assetlinks.json"]);
+    "account-web/.well-known/assetlinks.json", "account-web/.well-known/apple-app-site-association", "account-web/.git/config",
+    "account-web/a/.env"]),
+  ["/index.html", "/a/b.js", "/.well-known/assetlinks.json", "/.well-known/apple-app-site-association"]);
 });
 
 test("the verifier expects exactly the files firebase deploy uploads with firebase.json's ignore list", () => {
@@ -103,7 +104,8 @@ test("the verifier expects exactly the files firebase deploy uploads with fireba
   const { listFiles } = createRequire(import.meta.url)("firebase-tools/lib/listFiles");
   const { ignore } = JSON.parse(readFileSync(new URL("../../firebase.json", import.meta.url), "utf8")).hosting;
   const sample = [
-    "index.html", "firebase.json", ".DS_Store", ".env", "a/.env", "a/b.js", ".well-known/assetlinks.json", ".well-known/.hidden",
+    "index.html", "firebase.json", ".DS_Store", ".env", "a/.env", "a/b.js", ".well-known/assetlinks.json",
+    ".well-known/apple-app-site-association", ".well-known/.hidden",
     ".git/config", "a/.hidden/x.js", "node_modules/x/y.js", "open/index.html", "connect/connect.js", ".well-knownx/z",
   ];
   const root = mkdtempSync(join(tmpdir(), "hosting-"));
@@ -114,6 +116,7 @@ test("the verifier expects exactly the files firebase deploy uploads with fireba
   const deployed = listFiles(root, ignore).map((path) => `/${path}`).sort();
   assert.deepEqual(deployed, expectedHostingPaths(sample.map((path) => `account-web/${path}`)).sort());
   assert.ok(deployed.includes("/.well-known/assetlinks.json"));
+  assert.ok(deployed.includes("/.well-known/apple-app-site-association"));
   assert.equal(deployed.some((path) => path.includes("/.env") || path.includes(".git")), false);
 });
 

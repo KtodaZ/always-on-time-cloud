@@ -25,5 +25,14 @@ const site = 'http://127.0.0.1:5012';
     assert.equal(response.headers.get('x-content-type-options'), 'nosniff', path);
   }
   console.log('PASS: every page is served with one Content-Security-Policy that limits scripts and forbids framing.');
+
+  // Android and Apple fetch these without following redirects and expect JSON.
+  for (const path of ['/.well-known/assetlinks.json', '/.well-known/apple-app-site-association']) {
+    const response = await fetch(`${site}${path}`, { redirect: 'manual' });
+    assert.equal(response.status, 200, path);
+    assert.match(response.headers.get('content-type') ?? '', /^application\/json\b/, path);
+    JSON.parse(await response.text());
+  }
+  console.log('PASS: the App Link and Universal Link association files are served as JSON.');
   process.exit(0);
 })().catch(error => { console.error(error); process.exit(1); });
