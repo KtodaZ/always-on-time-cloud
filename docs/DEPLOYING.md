@@ -29,7 +29,7 @@ Secrets stay in Secret Manager and are bound to functions at deploy time:
 | --- | --- |
 | `FEEDBACK_DISCORD_WEBHOOK_URL` | `publishFeedbackNotification`, `sendAssistantUsageSummary` |
 | `TOMTOM_API_KEY`, `TRAVEL_ROUTE_API_KEY` | `calculateTravelRoute` |
-| `APNS_AUTH_KEY_P8` | iOS relay push functions |
+| `APNS_AUTH_KEY_P8` | iOS relay push functions, `assistantMcp`, `undoAssistantChange` |
 
 Non-secret params are in [`functions/.env.always-on-time-zombit-2026`](../functions/.env.always-on-time-zombit-2026).
 The deploy does not pass `--force`, so if the source no longer exports a live function the deploy

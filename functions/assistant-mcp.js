@@ -40,7 +40,7 @@ const bearer = (req) => {
 };
 
 /**
- * Builds the MCP request handler. `deps`: db, messaging,
+ * Builds the MCP request handler. `deps`: db, messaging, apns (APNs transport),
  * usage(counts), accountEmails(uid), logger, now, sleep, origin, legacyHosts, sdk ({McpServer,
  * StreamableHTTPServerTransport}; loaded lazily so other functions don't pay for it).
  */
@@ -91,7 +91,7 @@ function createMcpHandler(deps) {
         inputSchema: tool.inputSchema,
         annotations: { title: tool.title, ...tool.annotations },
       }, async (args) => runTool(tool, createToolContext({
-        db, uid: grant.uid, grant, origin: u.origin, now, sleep, messaging: deps.messaging, logger, accountEmails: deps.accountEmails,
+        db, uid: grant.uid, grant, origin: u.origin, now, sleep, messaging: deps.messaging, apns: deps.apns, logger, accountEmails: deps.accountEmails,
       }), args ?? {}));
     }
     return server;

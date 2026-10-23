@@ -115,7 +115,7 @@ parameter (RFC 9207).
 | `open_in_app` | A link that opens a screen of the app (sounds, permissions, Plus and so on) |
 
 Each change writes the new `values` records and an activity entry atomically, then sends the
-phones an FCM `sync` message. Write tools return a `changeId` for `confirm_change` and `undo`. Once
+phones a `sync` message (FCM on Android, APNs on iPhone). Write tools return a `changeId` for `confirm_change` and `undo`. Once
 the change is saved, a failure to notify the phones doesn't make the call fail: it returns the
 `changeId` with a note that the phone will pick the change up on its next sync. Tools that can
 stop alarms from ringing (pausing, turning alarms off, unwatching a calendar, quieter settings)
@@ -136,6 +136,7 @@ explains that and links to the app.
 | Metadata document fetches: 20 per host, 100 overall per 10 min; Claude's and ChatGPT's hosts are exempt | memory, per instance | `/oauth/authorize` |
 | JSON-RPC messages per connection (every method), tool calls 120 per connection per 10 min; pushes 40 per connection per 10 min | memory; Firestore | `/mcp` |
 | Failed tokens: per caller and overall, counted only after the token fails to verify | memory, per instance | `/mcp` |
+| Device API calls: 200 per iPhone per 10 min; failed requests (bad keys, unreadable bodies) per caller and overall, and a caller past its budget is refused before any read for the rest of the minute | Firestore; memory, per instance | `assistantDeviceApi` |
 | Direct calls to the function URLs: per network hop and overall | memory, per instance | all endpoints |
 
 In-memory limits hold per instance; with at most 10 instances they hold at ten times their value
@@ -157,7 +158,7 @@ they can't use up the budgets of traffic that came through Hosting.
 
 | Data | Where | Lifetime |
 | --- | --- | --- |
-| Snapshot of upcoming events and alarms (titles, times, calendar names), device model label, FCM token | `accounts/{uid}/assistantSnapshots`, `assistantDevices` (at most 10 phones; older ones are removed) | Until the last assistant disconnects, sign-out or account deletion |
+| Snapshot of upcoming events and alarms (titles, times, calendar names), device model label, FCM token (Android) or APNs token and the hash of the device key (iPhone) | `accounts/{uid}/assistantSnapshots`, `assistantDevices` (at most 10 phones; older ones are removed) | Until the last assistant disconnects, sign-out or account deletion |
 | Change log (summary, before/after settings) | `accounts/{uid}/assistantActivity` | 30 days, or until the last assistant disconnects |
 | Connection: assistant name, whether it is verified, the host its codes go to, scopes, created/last used, the account's `logId` | `oauthGrants` | Until revoked, or 90 days idle |
 | `logId`: a random pseudonym that names the account in request logs | `accounts/{uid}/assistant/log` | Until account deletion |
@@ -199,6 +200,7 @@ are logged with `accounts/<uid>` paths and email addresses replaced.
 | `callable.undo`, `callable.list_connections`, `callable.revoke_connection` | as `tool.call`, or `count` / `revoked` |
 | `push.failed`, `push.invalid_token_removed`, `push.state_failed` | `deviceId`, `type`, `errorCode` |
 | `push.after_commit_failed` | A change was saved but reading devices or pushing failed: `changeId`, `errorCode` |
+| `device_api` | An iPhone extension's [Device API](ASSISTANT_PROTOCOL.md#device-api) call: `path` (`ping`, `snapshot`, `sync`), `outcome` (`ok`, `unauthorized`, `refused`, `unexpected_error`), `status`, `durationMs`, `deviceId`, `reason` when refused, and `pingId`, `requestId`, `changeId` or `count` when they apply; no `logId` when unauthorized |
 | `grant.touch_failed`, `oauth.client_touch_failed` | Updating a connection's or client's last-used time failed: `grantId` or `clientId`, `errorName`, `errorCode` |
 | `grant.log_id_failed` | A connection made before logIds existed couldn't get one; its request went ahead without: `grantId`, `errorCode` |
 | `account_emails_failed` | Reading the account's emails (to match Google Calendar IDs) failed: `errorCode` |
@@ -246,4 +248,4 @@ signs in through the Auth emulator, which the production Content-Security-Policy
 in the Emulator UI so the account counts as set up. Without a phone, tools report that no phone has
 shared its alarms; [`functions/testing/assistant-e2e.cjs`](../functions/testing/assistant-e2e.cjs)
 shows how to write a device and snapshot to stand in for one. In the emulator, FCM messages are
-logged instead of sent.
+logged instead of sent, and APNs pushes are recorded in the `emulatorApnsPushes` collection.

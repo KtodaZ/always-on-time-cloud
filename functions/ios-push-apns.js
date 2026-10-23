@@ -111,8 +111,12 @@ function apnsPriority(kind) {
   return kind === "heartbeat" ? "5" : "10";
 }
 
-function collapseId(installId) {
-  return `aot-${installId}`;
+// Every relay push, and every assistant push that shows no alert of its own, replaces the same
+// quiet notification on the device (docs/IOS_PUSH_PROTOCOL.md section 5).
+const SYNC_COLLAPSE_ID = "aot-sync";
+
+function collapseId() {
+  return SYNC_COLLAPSE_ID;
 }
 
 function buildApnsRequest({ installId, install, kind, provider, at, topic, ttlSeconds = DEFAULT_TTL_SECONDS }) {
@@ -130,7 +134,7 @@ function buildApnsRequest({ installId, install, kind, provider, at, topic, ttlSe
     headers: {
       "apns-push-type": "alert",
       "apns-priority": apnsPriority(kind),
-      "apns-collapse-id": collapseId(installId),
+      "apns-collapse-id": collapseId(),
       "apns-topic": topic,
       "apns-id": crypto.randomUUID(),
       "apns-expiration": String(Math.floor(at / 1000) + ttlSeconds),
@@ -251,18 +255,29 @@ function sendOnSession({ session, authorization, request, timeoutMs = 10_000 }) 
 }
 
 /**
- * Creates `send({ installId, install, kind, provider, at })`. Resolves with the APNs status and
- * reason (200 means APNs accepted the push, not that the device received it). Rejects only for
- * transport failures. A request that fails before APNs answered is retried once on a new
- * connection; a duplicate is harmless because every push to an install shares a collapse ID.
+ * Creates the APNs transport: `send({ environment, token, headers, body })` posts one alert push to
+ * `token` on the given APNs environment and resolves with the APNs status and reason (200 means APNs
+ * accepted the push, not that the device received it). It adds `apns-topic` and `apns-id` unless
+ * `headers` has them. Rejects only for invalid input and transport failures. A request that fails
+ * before APNs answered is retried once on a new connection, so every caller sends a collapse ID
+ * that makes a duplicate harmless.
  */
-function createApnsSender({ keyPem, keyId, teamId, topic, connect, now = () => Date.now(), timeoutMs }) {
+function createApnsTransport({ keyPem, keyId, teamId, topic, connect, now = () => Date.now(), timeoutMs }) {
   const config = validateApnsConfig({ keyPem, keyId, teamId, topic });
   const tokenCache = new ProviderTokenCache(config, { now });
   const pool = new Http2SessionPool({ connect });
 
-  async function send({ installId, install, kind, provider, at }) {
-    const request = buildApnsRequest({ installId, install, kind, provider, at, topic: config.topic });
+  async function send({ environment, token, headers = {}, body }) {
+    if (!Object.hasOwn(APNS_HOSTS, environment)) throw new TypeError("invalid APNs environment");
+    if (!/^[0-9a-f]{64,200}$/.test(token ?? "")) throw new TypeError("invalid APNs token");
+    if (typeof body !== "string") throw new TypeError("APNs body must be a JSON string");
+    if (Buffer.byteLength(body, "utf8") > MAX_PAYLOAD_BYTES) throw new TypeError("APNs payload exceeds 4 KB");
+    const request = {
+      origin: APNS_HOSTS[environment],
+      path: `/3/device/${token}`,
+      headers: { ...headers, "apns-topic": headers["apns-topic"] ?? config.topic, "apns-id": headers["apns-id"] ?? crypto.randomUUID() },
+      body,
+    };
     let result;
     for (let attempt = 0; ; attempt += 1) {
       const session = pool.get(request.origin);
@@ -280,7 +295,23 @@ function createApnsSender({ keyPem, keyId, teamId, topic, connect, now = () => D
     return result;
   }
 
-  send.close = () => pool.closeAll();
+  return { topic: config.topic, send, close: () => pool.closeAll() };
+}
+
+/**
+ * Creates the relay's `send({ installId, install, kind, provider, at })` on an APNs transport:
+ * either `transport` or one built from the key options (`keyPem`, `keyId`, `teamId`, `topic`, ...).
+ * A duplicate from the transport's retry is harmless because every relay push shares one collapse ID.
+ */
+function createApnsSender({ transport, ...options }) {
+  const apns = transport ?? createApnsTransport(options);
+
+  async function send({ installId, install, kind, provider, at }) {
+    const request = buildApnsRequest({ installId, install, kind, provider, at, topic: apns.topic });
+    return apns.send({ environment: install.apnsEnvironment, token: install.apnsToken, headers: request.headers, body: request.body });
+  }
+
+  send.close = () => apns.close();
   return send;
 }
 
@@ -292,11 +323,13 @@ module.exports = {
   PAYLOAD_VERSION,
   ApnsConfigError,
   ProviderTokenCache,
+  SYNC_COLLAPSE_ID,
   apnsPriority,
   buildApnsRequest,
   buildPayload,
   collapseId,
   createApnsSender,
+  createApnsTransport,
   makeProviderToken,
   sendOnSession,
   validateApnsConfig,

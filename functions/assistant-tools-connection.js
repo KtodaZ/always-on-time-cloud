@@ -9,7 +9,7 @@ const z = require("zod");
 const {
   UNDO_DAYS, readAppliedThrough, readDevices, readSnapshotTimes, readValues, refs, toMillis,
 } = require("./assistant-data");
-const { deviceName } = require("./assistant-push");
+const { canReceive, deviceName } = require("./assistant-push");
 const { PAUSED_UNTIL } = require("./assistant-records");
 const { describePause, parseStored } = require("./assistant-settings");
 const {
@@ -70,7 +70,7 @@ const TOOLS = [
           platform: device.platform === "android" || device.platform === "ios" ? device.platform : null,
           appVersion: cleanText(device.appVersion, 40) || null,
           capabilities: Array.isArray(device.capabilities) ? device.capabilities.filter((item) => CAPABILITIES.includes(item)) : [],
-          canReceiveMessages: Boolean(device.fcmToken),
+          canReceiveMessages: canReceive(device),
           lastSharedAt: shared ? isoLocal(shared, timeZone) : null,
           lastSharedMillis: shared,
         };
@@ -185,9 +185,9 @@ const TOOLS = [
       if (received.length) lines.push(`Message received on ${names(received)}.`);
       const permissions = appLink(ctx.origin, "permissions");
       const battery = appLink(ctx.origin, "battery");
-      const silent = missing.filter((device) => device.fcmToken);
+      const silent = missing.filter(canReceive);
       if (silent.length) lines.push(`${names(silent)} didn't answer. Ask the user to open Always On Time, and check its notification and battery settings: ${permissions} and ${battery}`);
-      const noToken = missing.filter((device) => !device.fcmToken);
+      const noToken = missing.filter((device) => !canReceive(device));
       if (noToken.length) lines.push(`${names(noToken)} can't receive messages from the assistant yet; changes reach it on its next sync.`);
       const outcome = received.length ? (missing.length ? "partial" : "received") : silent.length ? "noAnswer" : "unreachable";
       ctx.count(`setupTests.${outcome}`);

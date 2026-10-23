@@ -2,8 +2,9 @@
 
 The contract between the phone app, the assistant connector (MCP server) and Firestore. The
 product design lives in the app repository; this file is what both sides must agree on. Android
-implements it first. iOS can use the same Firestore contract, but pushes are FCM-only today: iOS
-needs an APNs push path in [`functions/assistant-push.js`](../functions/assistant-push.js).
+implements it first. iOS uses the same Firestore contract; its pushes go over APNs to the
+notification service extension, which answers through the [Device API](#device-api) because it
+has no Firebase sign-in.
 
 [`assistant-protocol-vectors.json`](assistant-protocol-vectors.json) holds the shared test
 vectors (record keys, canonical payloads, preference allowlists). The server's tests and the app's
@@ -49,9 +50,12 @@ ID). The owner is the signed-in Google account `uid` with an active account, as 
 | `platform` | `"android"` \| `"ios"` | |
 | `deviceName` | string ≤ 100 | Model label, e.g. "Pixel 9" (same label as synced history) |
 | `appVersion` | string ≤ 40 | |
-| `fcmToken` | string ≤ 4096 of `A-Z a-z 0-9 _ - :` | Android; absent on iOS until its relay is wired |
+| `fcmToken` | string ≤ 4096 of `A-Z a-z 0-9 _ - :` | Android |
+| `apnsToken` | lowercase hex, 64–200 characters | iOS only, always with `apnsEnvironment`. Written only while notifications are allowed |
+| `apnsEnvironment` | `"development"` \| `"production"` | iOS only: sandbox APNs (debug builds) or production (TestFlight, App Store) |
+| `deviceKeyHash` | lowercase hex SHA-256, 64 characters | iOS only: SHA-256 of the UTF-8 bytes of the device key, see [Device API](#device-api) |
 | `capabilities` | list of strings ≤ 20 | Only `travel`, `spokenAlarms`, `plus` (the phone has Plus benefits, whether bought or free for a limited time), `pause` (the rules reject others, so a new capability needs a rules change first) |
-| `lastPing` | map | `{id: string ≤ 64, receivedAt: timestamp}` echo of the latest test ping |
+| `lastPing` | map | `{id: string ≤ 64, receivedAt: timestamp}` echo of the latest test ping (on iOS the server writes it for the Device API's `/v1/ping`) |
 | `updatedAt` | timestamp | `request.time` |
 
 A phone writes this only while `assistant/state.connected == true`, and deletes it when the flag
@@ -211,18 +215,138 @@ both payloads and compare their canonical forms.
 The server validates every write against these limits before writing; phones validate again on
 apply.
 
-## Push messages (FCM, data-only, high priority)
+## Push messages
+
+The server sends each message to the account's 10 most recently updated devices: over FCM to
+devices with an `fcmToken`, over APNs to iPhones with an `apnsToken` and `apnsEnvironment`.
 
 | `type` | Other fields | Phone does |
 | --- | --- | --- |
 | `sync` | `changeId` | Pull `values`, apply, reschedule, publish a snapshot |
 | `publish` | `requestId` | Publish a snapshot with that `requestId` |
 | `ping` | `pingId`, `assistant` (display name ≤ 60) | Post the "connected" notification and write `lastPing` |
-| `state` | — | Re-read `assistant/state` (connection added or removed) |
+| `state` | — | Re-read `assistant/state` (connection added or removed). Not sent to iPhones: the app re-reads the state when it opens |
 
 Phones must treat every message as a hint: verify the signed-in account, read Firestore for the
 actual data, and do nothing that a forged message could abuse. A phone publishes at most one
 snapshot per 10 seconds; extra requests coalesce.
+
+### FCM (Android)
+
+Data-only, `android.priority` high, `android.ttl` 10 minutes for `sync`, 2 minutes for `publish`
+and `ping`, 1 hour for `state`. `data` is `{type, ...other fields}` with every value a string.
+
+### APNs (iPhone)
+
+Every push is an alert with `mutable-content: 1`, so the notification service extension runs even
+after force quit and in Low Power Mode, and every push shows a notification. The extension may
+rewrite the text but must deliver a notification.
+
+| Header | Value |
+| --- | --- |
+| `apns-push-type` | `alert` |
+| `apns-priority` | `10` |
+| `apns-topic` | the app bundle ID (`APNS_TOPIC`) |
+| `apns-expiration` | send time + the FCM TTL above for the type, in seconds |
+| `apns-collapse-id` | `aot-sync` for `publish` and for a `sync` without `alert` (shared with the [relay](IOS_PUSH_PROTOCOL.md#5-push-format)), `aot-change-<changeId>` for a `sync` with `alert`, `aot-assistant-ping` for `ping` |
+
+Payloads (`aot.kind` is `assistant`; the relay's NSE rule 4 makes an older extension treat it as a
+plain sync). `aot.at` is the server send time (epoch ms) and `aot.deviceId` the device document's
+ID, which the extension checks against its own. No payload carries the uid, record ids or payloads,
+or event data.
+
+Quiet `sync` (a change without `alert`):
+
+```json
+{"aps":{"alert":{"title":"Keeping your alarms up to date","body":"Checking for assistant changes."},"mutable-content":1,"interruption-level":"passive"},
+ "aot":{"v":1,"kind":"assistant","type":"sync","at":1793120000000,"deviceId":"0F8FAD5B-D9CB-469F-A165-70867728950E","changeId":"ch_…"}}
+```
+
+`sync` for a change with an `alert` (see [Activity](#activity)), shown with Undo through the
+category the app registers:
+
+```json
+{"aps":{"alert":{"title":"An assistant changed your alarms","body":"Open Always On Time to review or undo."},"mutable-content":1,"interruption-level":"active","category":"AOT_ASSISTANT_CHANGE"},
+ "aot":{"v":1,"kind":"assistant","type":"sync","at":1793120000000,"deviceId":"0F8FAD5B-…","changeId":"ch_…","alert":"paused","assistant":"Claude"}}
+```
+
+`ping` (no sound):
+
+```json
+{"aps":{"alert":{"title":"Always On Time is connected","body":"Claude can reach this iPhone."},"mutable-content":1,"interruption-level":"active"},
+ "aot":{"v":1,"kind":"assistant","type":"ping","at":1793120000000,"deviceId":"0F8FAD5B-…","pingId":"ping_…","assistant":"Claude"}}
+```
+
+`publish`: the quiet form with `"type":"publish","requestId":"req_…"` instead of `changeId`.
+
+`assistant` is the connection's display name, cleaned like snapshot text and cut at 60
+characters. Payloads stay under APNs's 4 KB.
+
+Delivery failures are reported per device as `apns:<reason>` (APNs's reason, or `status_<code>`).
+APNs status 410, or 400 with `BadDeviceToken` (as for the relay), deletes the device document unless
+its `apnsToken` changed meanwhile; the app writes it again when it next opens. A
+server without APNs credentials reports `apns:unconfigured` for iPhones and still sends FCM.
+
+## Device API
+
+`https://us-central1-always-on-time-zombit-2026.cloudfunctions.net/assistantDeviceApi` (function
+`assistantDeviceApi`). The iPhone's notification service extension calls it instead of Firestore.
+
+**Device key.** When the app registers a device document it creates a device key: 32 random bytes,
+base64url without padding (exactly 43 characters), kept in the keychain group it shares with the
+extension. The device document stores `deviceKeyHash` = lowercase hex SHA-256 of the key's UTF-8
+bytes. Every call sends `Authorization: Bearer <key>` and names the device in the body with `uid`
+(the Firebase uid) and `deviceId` (the document ID, any case as written). The key opens only that
+device: recording its ping, replacing its snapshot and reading the connector's values. It stops
+working once the device document is gone (disconnect, sign-out, account deletion) or the app
+writes a new hash.
+
+Conventions: UTF-8 JSON bodies of at most 2 MiB; every object is strict (a missing required field
+or an unknown one is `400`); times are epoch milliseconds; responses carry
+`Cache-Control: no-store`; error bodies are `{"error": "<message>"}`, for logs only.
+
+| Status | Meaning |
+| --- | --- |
+| `200` / `204` | Success, as listed per endpoint |
+| `400` | Invalid JSON or a field outside the schema below |
+| `401` | The key doesn't open this device now: wrong key, malformed `uid`/`deviceId`, no device document or no `deviceKeyHash`, inactive account, or no assistant connected. Stop, and let the app re-read `assistant/state` and register again when it next opens |
+| `404` / `405` | Unknown path / wrong method (see `Allow`) |
+| `413` | Body over 2 MiB, or a snapshot Firestore can't store (over 1 MiB) |
+| `429` | 200 calls per device per 10 minutes, or too many failed requests (bad keys or unreadable bodies) from one network, which then refuses that network's calls for the rest of the minute; see `Retry-After` |
+| `500` | Server error; the push can be dropped |
+
+`POST /v1/ping` `{"uid", "deviceId", "pingId"}`: `pingId` is the push's `aot.pingId` (1–64
+characters). Sets the device's `lastPing` to `{id: pingId, receivedAt: <server time>}` and
+`updatedAt` to the server time. `204`. Call it first, before showing the notification.
+
+`PUT /v1/snapshot` `{"uid", "deviceId", "payload", "requestId"?}`: replaces
+`assistantSnapshots/{deviceId}` with `{schemaVersion: 1, publishedAt: <server time>, requestId?,
+payload}`, the same document a phone writes (see [Snapshot](#snapshot)). `payload` is the snapshot
+JSON as a string of at most 800,000 characters; `requestId` (≤ 64 characters, or omitted or null)
+echoes a `publish` push's `aot.requestId`. `204`.
+
+`POST /v1/sync` `{"uid", "deviceId", "since", "changeId"?}`: `since` is the device's
+`valuesAppliedThrough` (an integer ≥ 0); `changeId` (optional, or null) the push's `aot.changeId`.
+`200`:
+
+```json
+{
+  "change": {"changeId": "ch_…", "assistant": "Claude", "alert": "paused", "writtenAt": 1793120000000,
+             "undoneAt": null, "recordIds": ["p_alarms_paused_until"]},
+  "values": [{"id": "p_alarms_paused_until", "payload": "-1", "updatedAt": 1793120000000}],
+  "more": false
+}
+```
+
+- `change` is the [activity](#activity) entry for `changeId`, or null when it is absent, unknown or
+  expired. `alert` and `undoneAt` are null when absent. Its summary and before/after payloads are
+  never returned.
+- `values` are the records the connector wrote after `since`: those whose `updatedAt`, in whole
+  milliseconds, is greater than `since`, oldest first, with their current payload. Records phones
+  wrote have no `updatedAt` and are never listed; nor are deleted ones.
+- A page holds at most 50 values and never ends inside a millisecond (one change writing more than
+  a page in a single commit comes back whole). When `more` is true, call again with `since` set to
+  the last value's `updatedAt` for the rest.
 
 ## Connection lifecycle
 
@@ -230,9 +354,10 @@ snapshot per 10 seconds; extra requests coalesce.
    connected and updates `connections`. Connecting the same assistant again replaces its earlier
    grant; grants unused for 90 days are revoked by a daily job.
 2. A signed-in phone sees the flag (live listener while the app runs, or the next periodic account
-   sync), writes its device document with an FCM token, and publishes a snapshot.
+   sync), writes its device document with its push token (an FCM token on Android; an APNs token,
+   its environment and `deviceKeyHash` on iOS), and publishes a snapshot.
 3. The assistant's first call runs `test_connection`: the server sends `ping` to each device,
-   then waits for `lastPing.id` to match.
+   then waits for `lastPing.id` to match (an iPhone's extension records it through the Device API).
 4. Revoking the last grant (from the app, the assistant, or account deletion) sets `connected`
    false and deletes `assistantSnapshots`, `assistantDevices` and `assistantActivity`. Phones that
    see the flag turn false delete their own device and snapshot documents too.

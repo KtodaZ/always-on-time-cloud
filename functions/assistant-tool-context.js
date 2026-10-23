@@ -1,7 +1,7 @@
 "use strict";
 
 // What every assistant tool runs with (createToolContext, used by the MCP server and the app's
-// undo callable alike) and the helpers tools share: reading snapshots, sending FCM hints, and
+// undo callable alike) and the helpers tools share: reading snapshots, sending push hints, and
 // saving a change (applyChange). Every Firestore path is derived from ctx.uid, the uid of the
 // verified access token or callable caller.
 
@@ -17,7 +17,7 @@ const POLL_MS = 1500;
 
 /**
  * `deps`: db, uid, grant ({grantId, logId, clientName, assistant, scopes, setupConfirmedAt}), logId
- * (when the grant has none), origin, now, sleep, messaging, logger, accountEmails(uid). Usage counts
+ * (when the grant has none), origin, now, sleep, messaging, apns, logger, accountEmails(uid). Usage counts
  * and the debugging trace for one call collect on the context (ctx.counts, ctx.trace). Log lines
  * name the account by ctx.logId, never ctx.uid (assistant-log.js).
  */
@@ -33,6 +33,7 @@ function createToolContext(deps) {
     now,
     sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     messaging: deps.messaging,
+    apns: deps.apns ?? null,
     logger,
     counts,
     trace: {},
@@ -96,14 +97,16 @@ const hasCapability = (devices, capability) => devices.some((device) => Array.is
 /** `plus` means the phone has Plus benefits: subscribed, or Plus is free while the paywall is off. */
 const hasPlus = (devices) => hasCapability(devices, "plus");
 
-/** Sends an FCM hint unless this connection has used up its push allowance. */
-async function push(ctx, type, data, devices) {
+/** Sends a push hint (FCM or APNs) unless this connection has used up its push allowance. */
+async function push(ctx, type, data, devices, options = {}) {
   let sent;
   if (!(await ctx.pushAllowed())) {
     ctx.count("rateLimited");
-    sent = { limited: true, sent: [], failed: [], removed: [], errors: {}, noToken: devices ?? [] };
+    sent = { limited: true, sent: [], failed: [], removed: [], errors: {}, skipped: [], noToken: devices ?? [] };
   } else {
-    sent = await sendToDevices({ db: ctx.db, messaging: ctx.messaging, logger: ctx.logger, logId: ctx.logId }, ctx.uid, type, data, devices);
+    sent = await sendToDevices({
+      db: ctx.db, messaging: ctx.messaging, apns: ctx.apns, logger: ctx.logger, logId: ctx.logId, now: ctx.now,
+    }, ctx.uid, type, data, devices, options);
   }
   trace(ctx, { push: deliveryFields(type, sent) });
   return sent;
@@ -146,7 +149,8 @@ async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite })
   let sentTo = [];
   try {
     const devices = await readDevices(ctx.db, ctx.uid);
-    const sent = await push(ctx, "sync", { changeId }, devices);
+    // iPhones show a change that could stop alarms with Undo, naming the assistant that made it.
+    const sent = await push(ctx, "sync", { changeId }, devices, alert ? { alert, assistant: ctx.grant.clientName } : {});
     sentTo = sent.sent.map(deviceName);
     if (sent.sent.length) delivery = `Sent to ${names(sent.sent)}; call confirm_change with this changeId to check the phone applied it.`;
     else if (!devices.length) delivery = "No phone is connected yet; the change applies when Always On Time next syncs on the user's phone.";

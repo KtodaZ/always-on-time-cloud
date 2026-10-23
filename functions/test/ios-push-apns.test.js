@@ -12,6 +12,7 @@ const {
   buildApnsRequest,
   buildPayload,
   createApnsSender,
+  createApnsTransport,
   makeProviderToken,
   validateApnsConfig,
 } = require("../ios-push-apns");
@@ -92,7 +93,7 @@ test("payload v1 is passive, mutable, content free, and validates kind and provi
   assert.throws(() => buildPayload({ kind: "change", at: 1.5 }), TypeError);
 });
 
-test("APNs request headers: alert type, one collapse id per install, priority by kind", () => {
+test("APNs request headers: alert type, the shared aot-sync collapse id, priority by kind", () => {
   const priorities = {};
   for (const kind of ["change", "heartbeat", "precheck", "renew"]) {
     const request = buildApnsRequest({ installId: INSTALL_ID, install: INSTALL, kind, at: AT, topic: CONFIG.topic });
@@ -100,7 +101,7 @@ test("APNs request headers: alert type, one collapse id per install, priority by
     assert.equal(request.origin, APNS_HOSTS.development);
     assert.equal(request.path, `/3/device/${INSTALL.apnsToken}`);
     assert.equal(request.headers["apns-push-type"], "alert");
-    assert.equal(request.headers["apns-collapse-id"], `aot-${INSTALL_ID}`);
+    assert.equal(request.headers["apns-collapse-id"], "aot-sync");
     assert.equal(request.headers["apns-topic"], CONFIG.topic);
     assert.equal(request.headers["apns-expiration"], String(AT / 1000 + 86400));
     assert.match(request.headers["apns-id"], /^[0-9a-f-]{36}$/);
@@ -181,7 +182,7 @@ test("HTTP/2 sender posts the payload with a bearer JWT and reuses one connectio
   assert.equal(request.headers["apns-push-type"], "alert");
   assert.equal(request.headers["apns-priority"], "10");
   assert.equal(apns.requests[1].headers["apns-priority"], "5");
-  assert.equal(request.headers["apns-collapse-id"], `aot-${INSTALL_ID}`);
+  assert.equal(request.headers["apns-collapse-id"], "aot-sync");
   assert.deepEqual(request.body.aot, { v: 1, kind: "precheck", at: AT });
   const jwt = decodeJwt(request.headers.authorization.replace(/^bearer /, ""));
   assert.deepEqual(jwt.claims, { iss: CONFIG.teamId, iat: AT / 1000 });
@@ -238,6 +239,46 @@ test("HTTP/2 sender rejects after the retry also fails", async (t) => {
   t.after(() => send.close());
   await assert.rejects(send({ installId: INSTALL_ID, install: INSTALL, kind: "change", at: AT }));
   assert.equal(apns.requests.length, 2);
+});
+
+test("the transport sends any alert push, adding the topic and an apns-id, and validates its input", async (t) => {
+  const apns = await startFakeApns(() => ({ status: 400, reason: "BadDeviceToken" }));
+  t.after(apns.close);
+  const transport = createApnsTransport({ ...CONFIG, connect: apns.connect, now: () => AT });
+  t.after(() => transport.close());
+  assert.equal(transport.topic, CONFIG.topic);
+  const body = JSON.stringify({ aps: { alert: { title: "t", body: "b" }, "mutable-content": 1 }, aot: { v: 1, kind: "assistant" } });
+  const result = await transport.send({
+    environment: "development", token: INSTALL.apnsToken, body,
+    headers: { "apns-push-type": "alert", "apns-priority": "10", "apns-collapse-id": "aot-assistant-ping", "apns-expiration": "1" },
+  });
+  assert.deepEqual(pick(result), { status: 400, reason: "BadDeviceToken" });
+  const [request] = apns.requests;
+  assert.equal(request.headers[":path"], `/3/device/${INSTALL.apnsToken}`);
+  assert.equal(request.headers["apns-topic"], CONFIG.topic);
+  assert.equal(request.headers["apns-collapse-id"], "aot-assistant-ping");
+  assert.match(request.headers["apns-id"], /^[0-9a-f-]{36}$/);
+  assert.deepEqual(request.body, JSON.parse(body));
+
+  await assert.rejects(transport.send({ environment: "sandbox", token: INSTALL.apnsToken, body }), TypeError);
+  await assert.rejects(transport.send({ environment: "production", token: "AB".repeat(32), body }), TypeError);
+  await assert.rejects(transport.send({ environment: "production", token: INSTALL.apnsToken, body: "x".repeat(4097) }), TypeError);
+  await assert.rejects(transport.send({ environment: "production", token: INSTALL.apnsToken, body: {} }), TypeError);
+  assert.equal(apns.requests.length, 1, "invalid input never reaches APNs");
+});
+
+test("the relay sender can share a transport and sends exactly what buildApnsRequest builds", async () => {
+  const calls = [];
+  const transport = { topic: CONFIG.topic, send: async (request) => { calls.push(request); return { status: 200 }; }, close() {} };
+  const send = createApnsSender({ transport });
+  assert.equal((await send({ installId: INSTALL_ID, install: INSTALL, kind: "renew", at: AT })).status, 200);
+  const [call] = calls;
+  assert.equal(call.environment, "development");
+  assert.equal(call.token, INSTALL.apnsToken);
+  const expected = buildApnsRequest({ installId: INSTALL_ID, install: INSTALL, kind: "renew", at: AT, topic: CONFIG.topic });
+  assert.deepEqual(Object.keys(call.headers), Object.keys(expected.headers));
+  assert.deepEqual({ ...call.headers, "apns-id": null }, { ...expected.headers, "apns-id": null });
+  assert.equal(call.body, expected.body);
 });
 
 function pick({ status, reason }) {

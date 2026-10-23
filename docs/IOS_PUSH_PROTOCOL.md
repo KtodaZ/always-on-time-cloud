@@ -239,10 +239,10 @@ APNs request headers:
 | `apns-push-type` | `alert` |
 | `apns-topic` | the app bundle ID (`APNS_TOPIC`) |
 | `apns-priority` | `5` for `heartbeat`; `10` for `change`, `precheck`, `renew` |
-| `apns-collapse-id` | `aot-<installId>` for every push to the install |
+| `apns-collapse-id` | `aot-sync` for every relay push (it was `aot-<installId>` before October 2026; the app removes delivered notifications with the old ID once) |
 | `apns-expiration` | send time + 24 hours |
 
-Payload (always exactly these keys; `aot.provider` is optional):
+Relay payload (always exactly these keys; `aot.provider` is optional):
 
 ```json
 {
@@ -258,7 +258,7 @@ Payload (always exactly these keys; `aot.provider` is optional):
 | Field | Values |
 | --- | --- |
 | `aot.v` | Payload version, currently `1` |
-| `aot.kind` | `change`, `heartbeat`, `precheck`, or `renew` |
+| `aot.kind` | `change`, `heartbeat`, `precheck`, or `renew`; `assistant` for the assistant connector's pushes, which add fields of their own ([assistant protocol](ASSISTANT_PROTOCOL.md#apns-iphone)) |
 | `aot.provider` | `google` or `microsoft`; present on `change` and on `renew` when every subscription due for renewal belongs to one provider |
 | `aot.at` | Server send time, epoch ms |
 
@@ -276,7 +276,9 @@ NSE handling rules:
 4. Unknown `aot.v` or `kind`, or a missing `aot`: treat as a plain sync.
 5. Every push replaces the previous notification via the shared collapse ID and is passive, so
    the user sees one quiet entry. The NSE may rewrite the title/body but must deliver a
-   notification.
+   notification. Assistant pushes without an alert of their own
+   ([assistant protocol](ASSISTANT_PROTOCOL.md#push-messages)) use the same `aot-sync` collapse ID,
+   so relay and assistant syncs share that one entry.
 
 ## 6. Scheduling and coalescing
 
@@ -339,7 +341,10 @@ trigger deletes them, and the scheduler prunes any left after an hour.
 Functions: `iosPushApi`, `iosGoogleWebhook` and `iosMicrosoftWebhook` (HTTPS), `scheduleIosPushes`
 (every minute), and `deliverIosPushDispatch` (Firestore `onDocumentCreated` on
 `iosPushDispatches/{dispatchId}`, region `us-central1`, not retried). The APNs secret is bound to
-the Google webhook, the scheduler and the dispatch trigger only.
+the Google webhook, the scheduler and the dispatch trigger, and, for the assistant connector's
+iPhone pushes ([assistant protocol](ASSISTANT_PROTOCOL.md#push-messages)), to `assistantMcp` and
+`undoAssistantChange`. The key and params are declared once, in
+[`functions/apns-config.js`](../functions/apns-config.js).
 
 Because the codebase now declares these params and the secret, expect any functions deploy from
 it, including one that only updates the feedback trigger, to prompt for or require them. Create

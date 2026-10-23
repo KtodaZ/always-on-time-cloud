@@ -144,7 +144,7 @@ const hostOf = (uri) => {
 };
 
 function createOAuth(deps) {
-  const { db, now = Date.now, verifyIdToken, fetchMetadata, messaging, logger, usage = async () => {} } = deps;
+  const { db, now = Date.now, verifyIdToken, fetchMetadata, messaging, apns = null, logger, usage = async () => {} } = deps;
   const origin = deps.origin ?? PRODUCTION_ORIGIN;
   const u = urls(origin);
   const collection = (name) => db.collection(COLLECTIONS[name]);
@@ -493,7 +493,7 @@ function createOAuth(deps) {
   /** Tells the account's phones to re-read assistant/state. Never fails the caller. */
   async function notifyState(uid, devices = null, logId = null) {
     try {
-      await sendToDevices({ db, messaging, logger, logId }, uid, "state", {}, devices);
+      await sendToDevices({ db, messaging, apns, logger, logId, now }, uid, "state", {}, devices);
     } catch (error) {
       log("warn", "push.state_failed", { logId, errorName: error?.name, errorCode: error?.code });
     }

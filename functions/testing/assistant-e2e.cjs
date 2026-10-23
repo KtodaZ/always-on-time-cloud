@@ -1,10 +1,11 @@
 // End to end through the Hosting rewrites, Functions, Auth and Firestore emulators:
 //   firebase emulators:exec --only auth,firestore,functions,hosting 'node functions/testing/assistant-e2e.cjs'
 // Connects an MCP client with OAuth (registration, PKCE, consent, token), uses tools, rotates the
-// refresh token and disconnects. The emulators cannot deliver FCM, so the "phone" is simulated by
-// writing its documents directly.
+// refresh token and disconnects. The emulators cannot deliver FCM or APNs, so the Android "phone" is
+// simulated by writing its documents directly, and the iPhone's notification service extension by
+// reading the APNs pushes the emulator records in emulatorApnsPushes and calling assistantDeviceApi.
 const assert = require('node:assert/strict');
-const { createHash, randomUUID } = require('node:crypto');
+const { createHash, randomBytes, randomUUID } = require('node:crypto');
 process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8180';
 require('firebase-admin/app').initializeApp({ projectId: 'demo-account-sync' });
 const { getFirestore, Timestamp } = require('firebase-admin/firestore');
@@ -103,6 +104,45 @@ const json = { 'Content-Type': 'application/json' };
   const value = await db.doc(`accounts/${uid}/values/e_${'c'.repeat(64)}`).get();
   assert.ok(activity.writtenAt.isEqual(value.data().updatedAt), 'writtenAt equals the values updatedAt');
 
+  // An iPhone registers for APNs with the hash of its device key.
+  const iphone = randomUUID().toUpperCase();
+  const deviceKey = randomBytes(32).toString('base64url');
+  const apnsToken = randomBytes(32).toString('hex');
+  await db.doc(`accounts/${uid}/assistantDevices/${iphone}`).set({
+    platform: 'ios', deviceName: 'iPhone 17', appVersion: '1.4.0', apnsToken, apnsEnvironment: 'development',
+    deviceKeyHash: createHash('sha256').update(deviceKey).digest('hex'), capabilities: ['pause'], updatedAt: Timestamp.now(),
+  });
+  const deviceApi = (method, path, body, key = deviceKey) => fetch(`http://127.0.0.1:5011/demo-account-sync/us-central1/assistantDeviceApi${path}`, {
+    method, headers: { ...json, Authorization: `Bearer ${key}` }, body: JSON.stringify({ uid, deviceId: iphone, ...body }),
+  });
+  const pushesTo = async type => (await db.collection('emulatorApnsPushes').where('token', '==', apnsToken).get()).docs
+    .map(doc => JSON.parse(doc.data().payload)).filter(push => push.aot.type === type);
+  const waitForPush = async (type, match = () => true) => {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const found = (await pushesTo(type)).find(match);
+      if (found) return found;
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    throw new Error(`no ${type} push reached the iPhone`);
+  };
+  // test_connection pings both phones; the iPhone's extension answers through the device API.
+  const testing = rpc(tokens.access_token, 'tools/call', { name: 'test_connection', arguments: { waitSeconds: 10 } });
+  const ping = await waitForPush('ping');
+  assert.deepEqual([ping.aot.kind, ping.aot.deviceId, ping.aps['mutable-content']], ['assistant', iphone, 1]);
+  assert.equal((await deviceApi('POST', '/v1/ping', { pingId: ping.aot.pingId })).status, 204);
+  const tested = await testing;
+  assert.deepEqual(tested.structuredContent.received, ['iPhone 17'], JSON.stringify(tested));
+  assert.equal((await db.doc(`accounts/${uid}/assistantDevices/${iphone}`).get()).data().lastPing.id, ping.aot.pingId);
+  assert.equal((await deviceApi('POST', '/v1/ping', { pingId: 'ping_forged' }, randomBytes(32).toString('base64url'))).status, 401);
+  // The extension pulls the connector's values and publishes a snapshot that confirms them.
+  const pulled = await deviceApi('POST', '/v1/sync', { since: 0, changeId: changed.structuredContent.changeId }).then(r => r.json());
+  assert.deepEqual(pulled.values.map(item => [item.id, item.payload]), [[`e_${'c'.repeat(64)}`, '{"leadTimes":[15],"enabled":true}']]);
+  assert.equal(pulled.change.writtenAt, activity.writtenAt.toMillis());
+  assert.equal(pulled.change.summary, undefined);
+  assert.equal((await deviceApi('PUT', '/v1/snapshot', { payload: JSON.stringify({ device: 'iPhone 17', valuesAppliedThrough: pulled.change.writtenAt, calendars: [], events: [] }) })).status, 204);
+  const confirmed = await rpc(tokens.access_token, 'tools/call', { name: 'confirm_change', arguments: { changeId: changed.structuredContent.changeId, waitSeconds: 0 } });
+  assert.match(confirmed.content[0].text, /iPhone 17/);
+
   // Refresh rotates; the old access token keeps working until it expires.
   const rotated = await fetch(`${site}/oauth/token`, form({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: client.client_id })).then(r => r.json());
   assert.ok(rotated.access_token);
@@ -115,11 +155,16 @@ const json = { 'Content-Type': 'application/json' };
   assert.equal(undone.result.undone, true, JSON.stringify(undone));
   assert.equal((await db.doc(`accounts/${uid}/values/e_${'c'.repeat(64)}`).get()).data().payload, 'null');
   assert.ok((await db.doc(`accounts/${uid}/assistantActivity/${changed.structuredContent.changeId}`).get()).data().undoneAt);
+  // The app's undo reaches the iPhone as a quiet sync push.
+  const undoPush = await waitForPush('sync', push => push.aot.changeId === undone.result.changeId);
+  assert.equal(undoPush.aps['interruption-level'], 'passive');
   assert.equal((await call('revokeAssistantConnection', { grantId: listed.result.connections[0].grantId })).result.revoked, true);
   assert.equal((await db.doc(`accounts/${uid}/assistant/state`).get()).data().connected, false);
   assert.equal((await db.collection(`accounts/${uid}/assistantSnapshots`).get()).size, 0);
+  // Disconnecting deleted the device documents, so the device key no longer works.
+  assert.equal((await deviceApi('POST', '/v1/sync', { since: 0 })).status, 401);
   const after = await fetch(`${site}/mcp`, { method: 'POST', headers: { ...json, Accept: 'application/json, text/event-stream', Authorization: `Bearer ${rotated.access_token}` }, body: '{}' });
   assert.equal(after.status, 401);
-  console.log('PASS: assistant connector OAuth, MCP tools, app callables and disconnect work end to end through Hosting.');
+  console.log('PASS: assistant connector OAuth, MCP tools, iPhone pushes and device API, app callables and disconnect work end to end through Hosting.');
   process.exit(0);
 })().catch(error => { console.error(error); process.exit(1); });

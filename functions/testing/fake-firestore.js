@@ -13,15 +13,27 @@ const { FieldValue } = require("firebase-admin/firestore");
 const SERVER_TIMESTAMP = FieldValue.serverTimestamp();
 const STAMP = "__serverTimestamp";
 
-// Top-level FieldValue.serverTimestamp() fields become a marker that `write` replaces with the
-// commit time, so they match the document's update time as in Firestore.
+const isMap = (value) => value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date) && !(value instanceof FieldValue);
+
+// FieldValue.serverTimestamp() fields, top-level or inside maps, become a marker that `write`
+// replaces with the commit time, so they match the document's update time as in Firestore.
+function markStamps(value) {
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => [
+    key,
+    field instanceof FieldValue && field.isEqual(SERVER_TIMESTAMP) ? { [STAMP]: true } : isMap(field) ? markStamps(field) : field,
+  ]));
+}
+
 function clone(value) {
   if (value === undefined) return undefined;
-  if (value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date)) {
-    value = Object.fromEntries(Object.entries(value).map(([key, field]) =>
-      [key, field instanceof FieldValue && field.isEqual(SERVER_TIMESTAMP) ? { [STAMP]: true } : field]));
+  return structuredClone(isMap(value) ? markStamps(value) : value);
+}
+
+function resolveStamps(value, time) {
+  for (const [key, field] of Object.entries(value ?? {})) {
+    if (field && typeof field === "object" && field[STAMP] === true) value[key] = new Date(time);
+    else if (isMap(field)) resolveStamps(field, time);
   }
-  return structuredClone(value);
 }
 
 class DocumentSnapshot {
@@ -262,9 +274,7 @@ class FakeFirestore {
 
   write(path, value) {
     const time = this.frozenTime ?? this.commitTime();
-    for (const [key, field] of Object.entries(value ?? {})) {
-      if (field && typeof field === "object" && field[STAMP] === true) value[key] = new Date(time);
-    }
+    resolveStamps(value, time);
     this.documents.set(path, value);
     this.updateTimes.set(path, time);
     this.writes += 1;
