@@ -14,6 +14,7 @@ const { onSchedule } = require("firebase-functions/v2/scheduler");
 
 const { apnsAuthKey, getApnsTransport } = require("./apns-config");
 const { isChangeId, readLogId, refs } = require("./assistant-data");
+const { createDeviceApi } = require("./assistant-device-api");
 const { errorFields, logEvent } = require("./assistant-log");
 const { createMcpHandler, loadSdk } = require("./assistant-mcp");
 const { ToolError } = require("./assistant-snapshot");
@@ -95,6 +96,17 @@ exports.assistantOauth = onRequest(
       oauthHandler = createOAuthHandler({ oauth, db, logger, usage, legacyHosts });
     }
     return oauthHandler(req, res);
+  },
+);
+
+// The iPhone notification service extension's API (docs/ASSISTANT_PROTOCOL.md "Device API"). It
+// authenticates with a per-device key, never reads a secret and sends no pushes.
+let deviceApiHandler;
+exports.assistantDeviceApi = onRequest(
+  { region: REGION, invoker: "public", maxInstances: 10, timeoutSeconds: 30, memory: "512MiB" },
+  (req, res) => {
+    if (!deviceApiHandler) deviceApiHandler = createDeviceApi({ db: getFirestore(), logger });
+    return deviceApiHandler(req, res);
   },
 );
 

@@ -6,6 +6,7 @@ const test = require("node:test");
 test("index exports the feedback trigger unchanged alongside the iOS push functions", () => {
   const functions = require("../index");
   assert.deepEqual(Object.keys(functions).sort(), [
+    "assistantDeviceApi",
     "assistantMcp",
     "assistantOauth",
     "calculateTravelRoute",
@@ -76,6 +77,14 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
     assert.deepEqual(functions[name].__endpoint.secretEnvironmentVariables, secrets, name);
   }
   assert.equal(functions.pruneAssistantConnections.__endpoint.secretEnvironmentVariables, undefined);
+  // The iPhone extension's API authenticates with a per-device key and never reads a secret.
+  const deviceApi = functions.assistantDeviceApi.__endpoint;
+  assert.deepEqual(deviceApi.region, ["us-central1"]);
+  assert.deepEqual(deviceApi.httpsTrigger, { invoker: ["public"] });
+  assert.equal(deviceApi.secretEnvironmentVariables, undefined, "the device API never touches the APNs key");
+  assert.equal(deviceApi.maxInstances, 10);
+  assert.equal(deviceApi.timeoutSeconds, 30);
+  assert.equal(deviceApi.availableMemoryMb, 512);
   assert.deepEqual(functions.sendAssistantUsageSummary.__endpoint.secretEnvironmentVariables, [{ key: "FEEDBACK_DISCORD_WEBHOOK_URL" }]);
   assert.equal(functions.sendAssistantUsageSummary.__endpoint.scheduleTrigger.schedule, "every monday 09:00");
 

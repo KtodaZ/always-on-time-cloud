@@ -3,8 +3,8 @@
 // Abuse limits for the assistant connector.
 //
 // - LIMITS are fixed-window counters in Firestore, shared by every instance: per caller for the
-//   browser steps (authorize, consent, approve), per connection's push messages, and valid DCR
-//   registrations per caller and overall.
+//   browser steps (authorize, consent, approve), per connection's push messages, per iPhone's
+//   device API calls, and valid DCR registrations per caller and overall.
 // - INSTANCE_LIMITS are counted in memory per instance, with no database write. The functions run
 //   at most 10 instances (maxInstances), so a cap holds at ten times its value overall, which is
 //   enough to stop a flood without making every request pay for a shared counter.
@@ -29,6 +29,9 @@ const LIMITS = {
   consent: { limit: 120, windowMs: TEN_MINUTES_MS },
   approve: { limit: 30, windowMs: TEN_MINUTES_MS },
   push: { limit: 40, windowMs: TEN_MINUTES_MS },
+  // Per iPhone, for assistantDeviceApi: a push leads to one or two calls, and each connection may
+  // send 40 pushes per window.
+  device: { limit: 200, windowMs: TEN_MINUTES_MS },
 };
 
 const INSTANCE_LIMITS = {

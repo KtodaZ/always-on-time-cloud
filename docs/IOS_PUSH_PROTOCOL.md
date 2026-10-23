@@ -242,7 +242,7 @@ APNs request headers:
 | `apns-collapse-id` | `aot-sync` for every relay push (it was `aot-<installId>` before October 2026; the app removes delivered notifications with the old ID once) |
 | `apns-expiration` | send time + 24 hours |
 
-Payload (always exactly these keys; `aot.provider` is optional):
+Relay payload (always exactly these keys; `aot.provider` is optional):
 
 ```json
 {
@@ -258,7 +258,7 @@ Payload (always exactly these keys; `aot.provider` is optional):
 | Field | Values |
 | --- | --- |
 | `aot.v` | Payload version, currently `1` |
-| `aot.kind` | `change`, `heartbeat`, `precheck`, or `renew` |
+| `aot.kind` | `change`, `heartbeat`, `precheck`, or `renew`; `assistant` for the assistant connector's pushes, which add fields of their own ([assistant protocol](ASSISTANT_PROTOCOL.md#apns-iphone)) |
 | `aot.provider` | `google` or `microsoft`; present on `change` and on `renew` when every subscription due for renewal belongs to one provider |
 | `aot.at` | Server send time, epoch ms |
 
