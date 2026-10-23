@@ -86,12 +86,29 @@ jobs:
       # A minute of slack for clock skew between the runner and Google.
       - id: start
         run: echo "time=$(date -u -d '-1 minute' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-      - name: Deploy ${{ inputs.only }} at ${{ github.sha }}${{ inputs.dry_run && ' (dry run)' || '' }}
+      # The CLI grants the service-agent roles a new kind of trigger needs (the first Storage trigger
+      # needs Cloud Storage's agent to publish to Pub/Sub), but this account cannot change IAM. A dry
+      # run only mentions those roles and passes, and the real deploy then fails part-way.
+      - name: Preflight ${{ inputs.only }} at ${{ github.sha }} (dry run)
         env:
           ONLY: ${{ inputs.only }}
-          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          set -o pipefail
+          npx --no-install firebase deploy --only "$ONLY" --project always-on-time-zombit-2026 --non-interactive --dry-run 2>&1 \
+            | tee preflight.log
+          sed -i 's/\x1b\[[0-9;]*m//g' preflight.log
+          if grep -qE "required roles will be granted|Could not verify the necessary IAM configuration" preflight.log; then
+            echo "::error::This deploy needs IAM roles the deploy account cannot grant. A project owner must grant them first; see docs/DEPLOYING.md."
+            sed -n -e 's/.*the following required roles will be granted: //p' \
+              -e 's/.*`\(gcloud projects add-iam-policy-binding[^`]*\)`.*/\1/p' preflight.log
+            exit 1
+          fi
+      - name: Deploy ${{ inputs.only }} at ${{ github.sha }}
+        if: ${{ !inputs.dry_run }}
+        env:
+          ONLY: ${{ inputs.only }}
         # No --force: a deploy that would delete a live function stops instead.
-        run: npx --no-install firebase deploy --only "$ONLY" --project always-on-time-zombit-2026 --non-interactive $DRY_RUN
+        run: npx --no-install firebase deploy --only "$ONLY" --project always-on-time-zombit-2026 --non-interactive
 
   # Signing runs separately, with no npm packages installed, so only first-party scripts and pinned
   # actions can produce or sign the attestation. It signs only artifacts that match the repository.
