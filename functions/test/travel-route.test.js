@@ -11,6 +11,7 @@ const {
   googleBody,
   parseRouteRequest,
   routeTrip,
+  spendRouteAllowance,
   tomTomUrl,
 } = require("../travel-route");
 
@@ -190,4 +191,18 @@ test("a bike stays on typical speeds even when traffic is requested", () => {
   const url = tomTomUrl(parseRouteRequest(trip({ mode: "BICYCLE", routingPreference: "TRAFFIC_AWARE" }), NOW), KEY, NOW);
   assert.equal(url.searchParams.get("traffic"), "false");
   assert.equal(url.searchParams.get("computeTravelTimeFor"), null);
+});
+
+test("the allowance reports an install's first accepted call of each UTC day, and nothing more", async () => {
+  const db = new FakeFirestore();
+  const spend = (installId, now = NOW) => spendRouteAllowance(db, { installId, provider: "tomtom" }, now);
+  assert.deepEqual(await spend("install-abc123"), { firstToday: true });
+  assert.deepEqual(await spend("install-abc123"), { firstToday: false });
+  assert.deepEqual(await spend("install-abc123", NOW + 86_400_000), { firstToday: true });
+  const [first, second] = await Promise.all([spend("install-two"), spend("install-two")]);
+  assert.equal(first.firstToday !== second.firstToday, true);
+  // The install document keeps its existing shape and 2-day expiry.
+  const install = db.documents.get("travelRouteUsage/install-abc123");
+  assert.deepEqual(Object.keys(install).sort(), ["count", "day", "expiresAt"]);
+  assert.equal(install.expiresAt.getTime(), NOW + 86_400_000 + 2 * 86_400_000);
 });

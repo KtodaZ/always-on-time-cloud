@@ -163,6 +163,10 @@ const sha256Hex = (text) => createHash("sha256").update(text, "utf8").digest("he
  * All three counters live in travelRouteUsage (covered by its TTL policy). Install documents are
  * keyed by the install id, which can't contain "~" or "."; the network and provider counters can,
  * so they never collide. The network is stored only as a hash.
+ *
+ * Resolves to { firstToday }: whether this was the install's first accepted call of the UTC day,
+ * for the anonymous daily active-install count (travel-route-usage.js). Concurrent calls are
+ * serialized by the transaction, so only one of them sees itself first.
  */
 async function spendRouteAllowance(db, { installId, network = null, provider }, now = Date.now(), limits = {}) {
   const installLimit = limits.install ?? DAILY_CALLS_PER_INSTALL;
@@ -174,7 +178,7 @@ async function spendRouteAllowance(db, { installId, network = null, provider }, 
   const installRef = collection.doc(installId);
   const networkRef = network ? collection.doc(`~network.${sha256Hex(network)}`) : null;
   const providerRef = collection.doc(`~provider.${provider}.${day}`);
-  await db.runTransaction(async (transaction) => {
+  return db.runTransaction(async (transaction) => {
     const [install, net, total] = await Promise.all([
       transaction.get(installRef),
       networkRef ? transaction.get(networkRef) : null,
@@ -190,6 +194,7 @@ async function spendRouteAllowance(db, { installId, network = null, provider }, 
     transaction.set(installRef, { day, count: installCount + 1, expiresAt: new Date(now + 2 * DAY_MS) });
     if (networkRef) transaction.set(networkRef, { hour, count: networkCount + 1, expiresAt: new Date(hour + 2 * HOUR_MS) });
     transaction.set(providerRef, { count: providerCount + 1, expiresAt: new Date(now + 2 * DAY_MS) });
+    return { firstToday: installCount === 0 };
   });
 }
 
@@ -201,14 +206,46 @@ async function spendInstallAllowance(db, installId, now = Date.now(), limit = DA
 /**
  * Runs one routed call. [fetchImpl] and [keys] are injected so tests need no network or secrets.
  * Resolves to the provider's { status, body }; throws RouteRequestError for refused requests.
+ * [metrics], when given, is travel-route-usage.js's record(): it counts the call in anonymous
+ * daily totals once the outcome is known, bounded in time and unable to change the reply.
  */
-async function routeTrip({ data, db, keys, fetchImpl = fetch, logger, network = null, now = Date.now() }) {
-  const request = parseRouteRequest(data, now);
+async function routeTrip({ metrics = null, now = Date.now(), ...options }) {
+  const event = {};
+  try {
+    return await routeCountedTrip({ ...options, now }, event);
+  } finally {
+    if (metrics) {
+      try {
+        await metrics(event, now);
+      } catch {
+        // record() never throws; this only guards a misbehaving stand-in.
+      }
+    }
+  }
+}
+
+async function routeCountedTrip({ data, db, keys, fetchImpl = fetch, logger, network = null, now }, event) {
+  let request;
+  try {
+    request = parseRouteRequest(data, now);
+  } catch (error) {
+    event.refused = "invalid";
+    throw error;
+  }
   const apiKey = request.provider === "tomtom" ? keys.tomtom() : keys.google();
   if (!apiKey) {
+    event.refused = "not_configured";
     throw new RouteRequestError("failed-precondition", `${request.provider} routing is not configured`);
   }
-  await spendRouteAllowance(db, { installId: request.installId, network, provider: request.provider }, now);
+  try {
+    const allowance = await spendRouteAllowance(db, { installId: request.installId, network, provider: request.provider }, now);
+    event.firstToday = allowance?.firstToday === true;
+  } catch (error) {
+    if (error instanceof RouteRequestError) event.refused = "allowance";
+    throw error;
+  }
+  // Counted as one outbound request from here, whether or not the provider answers.
+  event.fetch = { provider: request.provider, mode: request.mode, routingPreference: request.routingPreference, status: null };
   let response;
   let body;
   try {
@@ -230,6 +267,7 @@ async function routeTrip({ data, db, keys, fetchImpl = fetch, logger, network = 
     logger?.warn("Route provider unreachable", { provider: request.provider, name: error?.name });
     throw new RouteRequestError("unavailable", "Route provider unreachable");
   }
+  event.fetch.status = response.status;
   if (!response.ok) {
     logger?.warn("Route provider refused", { provider: request.provider, status: response.status });
   }
