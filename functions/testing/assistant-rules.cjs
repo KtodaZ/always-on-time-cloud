@@ -96,9 +96,10 @@ const DEVICE = '0f8fad5b-d9cb-469f-a165-70867728950e';
     await assertFails(deleteDoc(doc(alice, 'accounts/alice/assistantActivity/ch_1')));
 
     // Server-only collections have no client access at all.
-    for (const path of ['oauthClients/x', 'oauthRequests/x', 'oauthCodes/x', 'oauthGrants/x', 'oauthTokens/x', 'assistantUsage/2026-10-16', 'assistantRateLimits/x']) {
+    for (const path of ['oauthClients/x', 'oauthRequests/x', 'oauthCodes/x', 'oauthGrants/x', 'oauthTokens/x', 'assistantUsage/2026-10-16', 'assistantRateLimits/x', 'travelRouteDaily/2026-10-23']) {
       await assertFails(getDoc(doc(alice, path)));
       await assertFails(setDoc(doc(alice, path), { uid: 'alice' }));
+      await assertFails(getDoc(doc(anonymous, path)));
     }
 
     // When the last assistant disconnects, phones may still delete but no longer write.

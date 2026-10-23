@@ -234,6 +234,11 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Aggregate operational counters contain no installation or trip identifiers.
+    match /travelRouteDaily/{document=**} {
+      allow read, write: if false;
+    }
+
     // Assistant connector OAuth state, anonymous usage totals and rate limit counters: written and
     // read only by Cloud Functions through the Admin SDK.
     match /oauthClients/{document=**} {
