@@ -47,6 +47,24 @@ const DEVICE = '0f8fad5b-d9cb-469f-a165-70867728950e';
     // iOS phones have no FCM token yet, and Swift writes UUIDs in upper case.
     const { fcmToken, ...ios } = device({ platform: 'ios' });
     await assertSucceeds(setDoc(doc(alice, `accounts/alice/assistantDevices/${DEVICE.toUpperCase()}`), ios));
+    // iOS phones register an APNs token with its environment and the hash of their device key.
+    const push = { apnsToken: 'ab'.repeat(32), apnsEnvironment: 'production', deviceKeyHash: 'c0'.repeat(32) };
+    await assertSucceeds(setDoc(doc(alice, devicePath), { ...ios, ...push }));
+    await assertSucceeds(setDoc(doc(alice, devicePath), { ...ios, ...push, apnsToken: 'f'.repeat(200), apnsEnvironment: 'development' }));
+    await assertSucceeds(setDoc(doc(alice, devicePath), { ...ios, deviceKeyHash: push.deviceKeyHash }));
+    await assertSucceeds(setDoc(doc(alice, devicePath), { ...ios, ...push, lastPing: { id: 'ping_abc', receivedAt: Timestamp.fromMillis(Date.now() - 1000) } }));
+    const { apnsEnvironment, ...tokenOnly } = push;
+    const { apnsToken, ...environmentOnly } = push;
+    const badIosDevices = [
+      device(push), device({ apnsToken: push.apnsToken, apnsEnvironment: 'production' }), device({ deviceKeyHash: push.deviceKeyHash }),
+      { ...ios, ...tokenOnly }, { ...ios, ...environmentOnly },
+      { ...ios, ...push, apnsToken: 'AB'.repeat(32) }, { ...ios, ...push, apnsToken: 'ab'.repeat(31) }, { ...ios, ...push, apnsToken: 'f'.repeat(201) },
+      { ...ios, ...push, apnsToken: `${'ab'.repeat(32)}zz` }, { ...ios, ...push, apnsToken: 5 },
+      { ...ios, ...push, apnsEnvironment: 'sandbox' }, { ...ios, ...push, apnsEnvironment: 1 },
+      { ...ios, ...push, deviceKeyHash: 'c0'.repeat(31) }, { ...ios, ...push, deviceKeyHash: 'C0'.repeat(32) }, { ...ios, ...push, deviceKeyHash: `${'c0'.repeat(32)}0` },
+      { ...ios, ...push, deviceKey: 'secret' },
+    ];
+    for (const bad of badIosDevices) await assertFails(setDoc(doc(alice, devicePath), bad));
     const badDevices = [
       device({ platform: 'windows' }), device({ deviceName: 'x'.repeat(101) }), device({ appVersion: 'x'.repeat(41) }),
       device({ fcmToken: 'x'.repeat(4097) }), device({ fcmToken: '' }), device({ fcmToken: 'token with spaces' }),

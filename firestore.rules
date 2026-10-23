@@ -118,13 +118,20 @@ service cloud.firestore {
         return deviceId.matches('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$');
       }
       function isValidDevice(data) {
-        return data.keys().hasOnly(['platform', 'deviceName', 'appVersion', 'fcmToken', 'capabilities', 'lastPing', 'updatedAt'])
+        return data.keys().hasOnly(['platform', 'deviceName', 'appVersion', 'fcmToken', 'apnsToken', 'apnsEnvironment', 'deviceKeyHash', 'capabilities', 'lastPing', 'updatedAt'])
           && data.keys().hasAll(['platform', 'deviceName', 'appVersion', 'capabilities', 'updatedAt'])
           && data.platform in ['android', 'ios']
           && data.deviceName is string && data.deviceName.size() <= 100
           && data.appVersion is string && data.appVersion.size() <= 40
           && (!data.keys().hasAny(['fcmToken']) || (data.fcmToken is string && data.fcmToken.size() <= 4096
             && data.fcmToken.matches('^[A-Za-z0-9_:-]+$')))
+          // iOS only: the APNs token and its environment (always together), and the SHA-256 of the
+          // per-device key the notification extension uses for assistantDeviceApi.
+          && (!data.keys().hasAny(['apnsToken', 'apnsEnvironment', 'deviceKeyHash']) || data.platform == 'ios')
+          && (data.keys().hasAll(['apnsToken', 'apnsEnvironment']) || !data.keys().hasAny(['apnsToken', 'apnsEnvironment']))
+          && (!data.keys().hasAny(['apnsToken']) || (data.apnsToken is string && data.apnsToken.matches('^[0-9a-f]{64,200}$')))
+          && (!data.keys().hasAny(['apnsEnvironment']) || data.apnsEnvironment in ['development', 'production'])
+          && (!data.keys().hasAny(['deviceKeyHash']) || (data.deviceKeyHash is string && data.deviceKeyHash.matches('^[0-9a-f]{64}$')))
           && data.capabilities is list && data.capabilities.size() <= 20
           && data.capabilities.hasOnly(['travel', 'spokenAlarms', 'plus', 'pause'])
           && (!data.keys().hasAny(['lastPing']) || (
