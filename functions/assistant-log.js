@@ -49,7 +49,7 @@ function errorFields(error) {
   return fields;
 }
 
-/** Per-device outcome of an FCM send (sendToDevices' result), keyed by the phone's deviceId. */
+/** Per-device outcome of a push (sendToDevices' result), keyed by the phone's deviceId. */
 function deliveryFields(type, sent) {
   if (!sent) return undefined;
   const devices = [
@@ -59,6 +59,7 @@ function deliveryFields(type, sent) {
       result: sent.removed.includes(device) ? "removed" : "failed",
       ...(sent.errors?.[device.id] ? { errorCode: sent.errors[device.id] } : {}),
     })),
+    ...(sent.skipped ?? []).map((device) => ({ deviceId: device.id, result: "skipped" })),
     ...sent.noToken.map((device) => ({ deviceId: device.id, result: "noToken" })),
   ];
   return { type, ...(sent.limited ? { limited: true } : {}), devices };

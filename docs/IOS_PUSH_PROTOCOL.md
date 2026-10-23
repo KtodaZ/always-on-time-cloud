@@ -341,7 +341,10 @@ trigger deletes them, and the scheduler prunes any left after an hour.
 Functions: `iosPushApi`, `iosGoogleWebhook` and `iosMicrosoftWebhook` (HTTPS), `scheduleIosPushes`
 (every minute), and `deliverIosPushDispatch` (Firestore `onDocumentCreated` on
 `iosPushDispatches/{dispatchId}`, region `us-central1`, not retried). The APNs secret is bound to
-the Google webhook, the scheduler and the dispatch trigger only.
+the Google webhook, the scheduler and the dispatch trigger, and, for the assistant connector's
+iPhone pushes ([assistant protocol](ASSISTANT_PROTOCOL.md#push-messages)), to `assistantMcp` and
+`undoAssistantChange`. The key and params are declared once, in
+[`functions/apns-config.js`](../functions/apns-config.js).
 
 Because the codebase now declares these params and the secret, expect any functions deploy from
 it, including one that only updates the feedback trigger, to prompt for or require them. Create

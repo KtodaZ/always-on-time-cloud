@@ -12,6 +12,7 @@ const { defineSecret } = require("firebase-functions/params");
 const { HttpsError, onCall, onRequest } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 
+const { apnsAuthKey, getApnsTransport } = require("./apns-config");
 const { isChangeId, readLogId, refs } = require("./assistant-data");
 const { errorFields, logEvent } = require("./assistant-log");
 const { createMcpHandler, loadSdk } = require("./assistant-mcp");
@@ -20,7 +21,7 @@ const { createToolContext } = require("./assistant-tool-context");
 const { TOOLS } = require("./assistant-tools");
 const { LEGACY_HOSTS, PRODUCTION_ORIGIN, createOAuth } = require("./assistant-oauth");
 const { createOAuthHandler } = require("./assistant-oauth-http");
-const { createRecordingMessaging } = require("./assistant-push");
+const { createRecordingApns, createRecordingMessaging } = require("./assistant-push");
 const { createUsage, weeklySummary } = require("./assistant-usage");
 const { discordPayload } = require("./feedback-notification");
 
@@ -37,18 +38,26 @@ let shared;
 function services() {
   if (!shared) {
     const db = getFirestore();
-    // The emulators cannot deliver FCM messages; record them in memory instead.
+    // The emulators cannot deliver FCM or APNs pushes; record them in memory instead.
     const messaging = emulated ? createRecordingMessaging() : getMessaging();
+    // The transport is created on first use, so functions without the APNs secret never read it
+    // (their iPhone pushes fail as apns:unconfigured; only `state` is sent from those, and iPhones
+    // skip it). In the emulator, APNs pushes are also written to emulatorApnsPushes for
+    // testing/assistant-e2e.cjs.
+    const apns = emulated
+      ? createRecordingApns({ onSend: (request) => db.collection("emulatorApnsPushes").add({ token: request.token, payload: request.body, at: new Date() }) })
+      : { send: (request) => getApnsTransport().send(request) };
     const usage = createUsage({ db, increment: (amount) => FieldValue.increment(amount), logger });
     const oauth = createOAuth({
       db,
       origin,
       messaging,
+      apns,
       logger,
       usage,
       verifyIdToken: (token) => getAuth().verifyIdToken(token, true),
     });
-    shared = { db, messaging, usage, oauth };
+    shared = { db, messaging, apns, usage, oauth };
   }
   return shared;
 }
@@ -63,13 +72,15 @@ async function accountEmails(uid) {
 let mcpHandler;
 let oauthHandler;
 
+// The APNs key is bound only to the functions that can push a change, ping or publish request to
+// an iPhone: the MCP endpoint and the app's undo. The others send only `state`, which iPhones skip.
 exports.assistantMcp = onRequest(
-  { region: REGION, invoker: "public", maxInstances: 10, timeoutSeconds: 60, memory: "512MiB" },
+  { region: REGION, invoker: "public", maxInstances: 10, timeoutSeconds: 60, memory: "512MiB", secrets: [apnsAuthKey] },
   (req, res) => {
     if (!mcpHandler) {
-      const { db, messaging, usage } = services();
+      const { db, messaging, apns, usage } = services();
       mcpHandler = createMcpHandler({
-        db, messaging, usage, logger, origin, legacyHosts, accountEmails, sdk: loadSdk(),
+        db, messaging, apns, usage, logger, origin, legacyHosts, accountEmails, sdk: loadSdk(),
       });
     }
     return mcpHandler(req, res);
@@ -107,8 +118,8 @@ async function requireActiveAccount(request) {
  * Runs a callable. An unexpected error is logged here (its message scrubbed of account ids) and
  * reaches the app as a plain internal error, so the Functions runtime doesn't log it raw.
  */
-function connectorCallable(event, handler) {
-  return onCall({ region: REGION, maxInstances: 5 }, async (request) => {
+function connectorCallable(event, handler, options = {}) {
+  return onCall({ region: REGION, maxInstances: 5, ...options }, async (request) => {
     try {
       return await handler(request);
     } catch (error) {
@@ -142,7 +153,7 @@ exports.undoAssistantChange = connectorCallable("callable.undo", async (request)
   const { uid, logId } = await requireActiveAccount(request);
   const changeId = request.data?.changeId;
   if (!isChangeId(changeId)) throw new HttpsError("invalid-argument", "changeId is required.");
-  const { db, messaging, usage } = services();
+  const { db, messaging, apns, usage } = services();
   const started = Date.now();
   const ctx = createToolContext({
     db,
@@ -153,6 +164,7 @@ exports.undoAssistantChange = connectorCallable("callable.undo", async (request)
     origin,
     now: () => Date.now(),
     messaging,
+    apns,
     logger,
   });
   const done = (outcome, extra = {}) => logEvent(logger, outcome === "unexpected_error" ? "error" : "info", "callable.undo", {
@@ -172,7 +184,7 @@ exports.undoAssistantChange = connectorCallable("callable.undo", async (request)
     done("unexpected_error", errorFields(error));
     throw new HttpsError("internal", "Something went wrong on the Always On Time server. Try again in a moment.");
   }
-});
+}, { secrets: [apnsAuthKey] });
 
 exports.pruneAssistantConnections = onSchedule(
   { schedule: "every 24 hours", region: REGION, maxInstances: 1, timeoutSeconds: 300 },

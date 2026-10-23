@@ -60,17 +60,20 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
   assert.ok(route.callableTrigger, "the route proxy is a callable function");
   assert.deepEqual(route.secretEnvironmentVariables, [{ key: "TOMTOM_API_KEY" }, { key: "TRAVEL_ROUTE_API_KEY" }]);
 
-  // The assistant endpoints are public HTTP (Hosting rewrites to them) and read no secrets; only
-  // the weekly summary reads the Discord webhook.
-  for (const name of ["assistantMcp", "assistantOauth"]) {
+  // The assistant endpoints are public HTTP (Hosting rewrites to them). Only the functions that can
+  // push a change, ping or publish request to an iPhone read the APNs key; the others send only
+  // `state`, which iPhones skip. Only the weekly summary reads the Discord webhook.
+  for (const [name, secrets] of [["assistantMcp", [{ key: "APNS_AUTH_KEY_P8" }]], ["assistantOauth", undefined]]) {
     const endpoint = functions[name].__endpoint;
     assert.deepEqual(endpoint.region, ["us-central1"], name);
     assert.deepEqual(endpoint.httpsTrigger, { invoker: ["public"] }, name);
-    assert.equal(endpoint.secretEnvironmentVariables, undefined, name);
+    assert.deepEqual(endpoint.secretEnvironmentVariables, secrets, name);
   }
-  for (const name of ["listAssistantConnections", "revokeAssistantConnection", "undoAssistantChange"]) {
+  for (const [name, secrets] of [
+    ["listAssistantConnections", undefined], ["revokeAssistantConnection", undefined], ["undoAssistantChange", [{ key: "APNS_AUTH_KEY_P8" }]],
+  ]) {
     assert.ok(functions[name].__endpoint.callableTrigger, name);
-    assert.equal(functions[name].__endpoint.secretEnvironmentVariables, undefined, name);
+    assert.deepEqual(functions[name].__endpoint.secretEnvironmentVariables, secrets, name);
   }
   assert.equal(functions.pruneAssistantConnections.__endpoint.secretEnvironmentVariables, undefined);
   assert.deepEqual(functions.sendAssistantUsageSummary.__endpoint.secretEnvironmentVariables, [{ key: "FEEDBACK_DISCORD_WEBHOOK_URL" }]);
