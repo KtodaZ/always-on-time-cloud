@@ -32,6 +32,19 @@ which runs every 6 hours. Attachments are deleted automatically 180 days after u
 lifecycle rule on the Storage bucket, within the privacy policy's limit of 24 months for feedback
 records.
 
+## Diagnostics scrub
+
+The app redacts the diagnostics file before upload. `scrubFeedbackDiagnostics`
+([code](../functions/feedback-log-scrub.js), [tests](../functions/test/feedback-log-scrub.test.js))
+runs when a `text/plain` object under `feedback/` is finalized and applies the same rules again:
+emails, links (meeting links keep only a provider tag), maps links, coordinates, street addresses,
+phone numbers, dial-in codes, tokens, and named personal fields such as `title=`. Alarm IDs, times,
+time zones and stack traces stay readable, and the app's own tags pass through unchanged. If
+anything changes, the object is rewritten; either way it gets the `aotScrubbed` metadata marker,
+which stops the rewrite from being scrubbed again. A generation precondition leaves a file that
+changed while it was read for its own trigger. The scrub covers files from app versions released
+before a client rule existed.
+
 ## Developer alert
 
 `publishFeedbackNotification` runs when a document is created and posts a short alert to a

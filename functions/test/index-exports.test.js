@@ -26,9 +26,15 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
     "resumeAccountDeletions",
     "revokeAssistantConnection",
     "scheduleIosPushes",
+    "scrubFeedbackDiagnostics",
     "sendAssistantUsageSummary",
     "undoAssistantChange",
   ]);
+
+  const scrub = functions.scrubFeedbackDiagnostics.__endpoint;
+  assert.equal(scrub.eventTrigger.eventType, "google.cloud.storage.object.v1.finalized");
+  assert.deepEqual(scrub.eventTrigger.eventFilters, { bucket: "always-on-time-zombit-2026.firebasestorage.app" });
+  assert.equal(scrub.secretEnvironmentVariables, undefined, "the scrub reads no secrets");
 
   const feedback = functions.publishFeedbackNotification.__endpoint;
   assert.deepEqual(feedback.region, ["us-central1"]);
