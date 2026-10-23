@@ -6,11 +6,12 @@
 const { getAppCheck } = require("firebase-admin/app-check");
 const { getFirestore } = require("firebase-admin/firestore");
 const { logger } = require("firebase-functions");
-const { defineBoolean, defineSecret, defineString } = require("firebase-functions/params");
+const { defineBoolean } = require("firebase-functions/params");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onRequest } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 
+const { apnsAuthKey, getApnsTransport } = require("./apns-config");
 const { createApnsSender } = require("./ios-push-apns");
 const { COLLECTIONS, FirestorePushStore } = require("./ios-push-firestore");
 const { createIosPushService } = require("./ios-push-service");
@@ -18,10 +19,6 @@ const { createIosPushService } = require("./ios-push-service");
 const REGION = "us-central1";
 const SCHEDULE_BUDGET_MS = 50 * 1000;
 
-const apnsAuthKey = defineSecret("APNS_AUTH_KEY_P8");
-const apnsKeyId = defineString("APNS_KEY_ID", { description: "APNs auth key ID (10 characters)" });
-const apnsTeamId = defineString("APNS_TEAM_ID", { description: "Apple developer team ID (10 characters)" });
-const apnsTopic = defineString("APNS_TOPIC", { description: "iOS app bundle identifier" });
 const enforceAppCheck = defineBoolean("IOS_PUSH_ENFORCE_APP_CHECK", {
   default: true,
   description: "Require a Firebase App Check token for iOS install registration",
@@ -32,12 +29,7 @@ let sender;
 
 function getSender() {
   if (!sender) {
-    sender = createApnsSender({
-      keyPem: apnsAuthKey.value(),
-      keyId: apnsKeyId.value(),
-      teamId: apnsTeamId.value(),
-      topic: apnsTopic.value(),
-    });
+    sender = createApnsSender({ transport: getApnsTransport() });
   }
   return sender;
 }

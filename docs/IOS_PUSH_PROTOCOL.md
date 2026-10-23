@@ -239,7 +239,7 @@ APNs request headers:
 | `apns-push-type` | `alert` |
 | `apns-topic` | the app bundle ID (`APNS_TOPIC`) |
 | `apns-priority` | `5` for `heartbeat`; `10` for `change`, `precheck`, `renew` |
-| `apns-collapse-id` | `aot-<installId>` for every push to the install |
+| `apns-collapse-id` | `aot-sync` for every relay push (it was `aot-<installId>` before October 2026; the app removes delivered notifications with the old ID once) |
 | `apns-expiration` | send time + 24 hours |
 
 Payload (always exactly these keys; `aot.provider` is optional):
@@ -276,7 +276,9 @@ NSE handling rules:
 4. Unknown `aot.v` or `kind`, or a missing `aot`: treat as a plain sync.
 5. Every push replaces the previous notification via the shared collapse ID and is passive, so
    the user sees one quiet entry. The NSE may rewrite the title/body but must deliver a
-   notification.
+   notification. Assistant pushes without an alert of their own
+   ([assistant protocol](ASSISTANT_PROTOCOL.md#push-messages)) use the same `aot-sync` collapse ID,
+   so relay and assistant syncs share that one entry.
 
 ## 6. Scheduling and coalescing
 
