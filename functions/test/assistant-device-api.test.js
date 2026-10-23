@@ -102,14 +102,45 @@ test("only the device's own key opens it, while the account is active and an ass
   assert.equal(env.logs.at(-1).logId, "log_alice");
 });
 
-test("repeated failed keys from one caller are answered 429 once the failure budget is used", async () => {
+test("a failed key costs only the three reads that check it; the log pseudonym is read after the key works", async () => {
+  const env = setup();
+  let reads = env.db.reads;
+  assert.equal((await env.call("POST", "/v1/ping", ping(), { key: BOB_KEY })).status, 401);
+  assert.equal(env.db.reads - reads, 3, "device, account and state only");
+  reads = env.db.reads;
+  assert.equal((await env.call("POST", "/v1/ping", ping({ uid: "__alice__" }))).status, 401, "reserved document ids are malformed");
+  assert.equal((await env.call("POST", "/v1/ping", ping({ uid: "__.*__" }))).status, 401);
+  assert.equal(env.db.reads - reads, 0, "malformed requests read nothing");
+  assert.equal((await env.call("POST", "/v1/ping", ping())).status, 204);
+  assert.equal(env.logs.at(-1).logId, "log_alice");
+});
+
+test("a network that used up its failure budget is refused before any read, other networks are not", async () => {
   const env = setup();
   const statuses = [];
   for (let i = 0; i < 32; i += 1) statuses.push((await env.call("POST", "/v1/ping", ping(), { key: BOB_KEY })).status);
   assert.deepEqual(statuses.slice(0, 30), Array(30).fill(401));
   assert.deepEqual(statuses.slice(30), [429, 429]);
-  // A working key from the same network is still verified and served.
+  const logged = env.logs.length;
+  const reads = env.db.reads;
+  const refused = await env.call("POST", "/v1/ping", ping());
+  assert.deepEqual([refused.status, refused.headers["retry-after"]], [429, "60"], "the budget is per network, for one minute");
+  assert.equal(env.db.reads, reads, "no document is read for a refused network");
+  assert.equal(env.logs.length, logged, "and nothing is logged");
+  // An iPhone on another network is unaffected, and this network recovers after the minute.
+  assert.equal((await env.call("POST", "/v1/ping", ping(), { headers: { "x-forwarded-for": "198.51.100.9" } })).status, 204);
+  env.clock.time += 60 * 1000;
   assert.equal((await env.call("POST", "/v1/ping", ping())).status, 204);
+});
+
+test("unreadable bodies count against the failure budget and stop being logged past it", async () => {
+  const env = setup();
+  const statuses = [];
+  for (let i = 0; i < 16; i += 1) statuses.push((await env.call("POST", "/v1/ping", null, { raw: Buffer.from("{nope") })).status);
+  for (let i = 0; i < 16; i += 1) statuses.push((await env.call("PUT", "/v1/snapshot", null, { raw: Buffer.alloc(2 * 1024 * 1024 + 1, 0x20) })).status);
+  assert.deepEqual(statuses, [...Array(16).fill(400), ...Array(14).fill(413), 429, 429]);
+  assert.equal(env.logs.length, 30, "one line per counted failure, none past the budget");
+  assert.ok(env.logs.every((line) => line.outcome === "refused" && line.deviceId === undefined));
 });
 
 test("routes: unknown paths 404, wrong methods 405 with Allow, the function name prefix is accepted", async () => {

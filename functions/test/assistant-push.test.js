@@ -145,11 +145,12 @@ test("iPhones skip state messages; Android still gets them", async () => {
   assert.deepEqual(deliveryFields("state", sent).devices.map((device) => device.result), ["sent", "skipped", "noToken"]);
 });
 
-test("APNs 410 and permanent 400 reasons remove the device, but only while its token is unchanged", async () => {
+test("APNs 410 and 400 BadDeviceToken remove the device, but only while its token is unchanged", async () => {
   for (const [response, removed] of [
     [{ status: 410, reason: "Unregistered" }, true],
     [{ status: 400, reason: "BadDeviceToken" }, true],
-    [{ status: 400, reason: "DeviceTokenNotForTopic" }, true],
+    // A wrong APNS_TOPIC answers this for every iPhone; it must not delete their devices.
+    [{ status: 400, reason: "DeviceTokenNotForTopic" }, false],
     [{ status: 400, reason: "PayloadTooLarge" }, false],
     [{ status: 429, reason: "TooManyRequests" }, false],
     [{ status: 500, reason: "InternalServerError" }, false],

@@ -15,8 +15,9 @@ const PERMANENT_ERRORS = new Set([
   "messaging/registration-token-not-registered",
   "messaging/invalid-registration-token",
 ]);
-// APNs answers for a token that will never work again (status 410, or 400 with these reasons).
-const PERMANENT_APNS_REASONS = new Set(["BadDeviceToken", "DeviceTokenNotForTopic"]);
+// APNs answers for a token that will never work again: status 410, or 400 BadDeviceToken, as for
+// the relay. DeviceTokenNotForTopic is not one: a wrong APNS_TOPIC would remove every iPhone.
+const PERMANENT_APNS_REASONS = new Set(["BadDeviceToken"]);
 const APNS_TOKEN = /^[0-9a-f]{64,200}$/;
 const APNS_ENVIRONMENTS = new Set(["development", "production"]);
 

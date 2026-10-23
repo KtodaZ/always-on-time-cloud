@@ -136,7 +136,7 @@ explains that and links to the app.
 | Metadata document fetches: 20 per host, 100 overall per 10 min; Claude's and ChatGPT's hosts are exempt | memory, per instance | `/oauth/authorize` |
 | JSON-RPC messages per connection (every method), tool calls 120 per connection per 10 min; pushes 40 per connection per 10 min | memory; Firestore | `/mcp` |
 | Failed tokens: per caller and overall, counted only after the token fails to verify | memory, per instance | `/mcp` |
-| Device API calls: 200 per iPhone per 10 min; failed device keys per caller and overall | Firestore; memory, per instance | `assistantDeviceApi` |
+| Device API calls: 200 per iPhone per 10 min; failed requests (bad keys, unreadable bodies) per caller and overall, and a caller past its budget is refused before any read for the rest of the minute | Firestore; memory, per instance | `assistantDeviceApi` |
 | Direct calls to the function URLs: per network hop and overall | memory, per instance | all endpoints |
 
 In-memory limits hold per instance; with at most 10 instances they hold at ten times their value

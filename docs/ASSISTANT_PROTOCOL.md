@@ -283,8 +283,8 @@ category the app registers:
 characters. Payloads stay under APNs's 4 KB.
 
 Delivery failures are reported per device as `apns:<reason>` (APNs's reason, or `status_<code>`).
-APNs status 410, or 400 with `BadDeviceToken` or `DeviceTokenNotForTopic`, deletes the device
-document unless its `apnsToken` changed meanwhile; the app writes it again when it next opens. A
+APNs status 410, or 400 with `BadDeviceToken` (as for the relay), deletes the device document unless
+its `apnsToken` changed meanwhile; the app writes it again when it next opens. A
 server without APNs credentials reports `apns:unconfigured` for iPhones and still sends FCM.
 
 ## Device API
@@ -312,7 +312,7 @@ or an unknown one is `400`); times are epoch milliseconds; responses carry
 | `401` | The key doesn't open this device now: wrong key, malformed `uid`/`deviceId`, no device document or no `deviceKeyHash`, inactive account, or no assistant connected. Stop, and let the app re-read `assistant/state` and register again when it next opens |
 | `404` / `405` | Unknown path / wrong method (see `Allow`) |
 | `413` | Body over 2 MiB, or a snapshot Firestore can't store (over 1 MiB) |
-| `429` | 200 calls per device per 10 minutes, or too many failed keys from one network; see `Retry-After` |
+| `429` | 200 calls per device per 10 minutes, or too many failed requests (bad keys or unreadable bodies) from one network, which then refuses that network's calls for the rest of the minute; see `Retry-After` |
 | `500` | Server error; the push can be dropped |
 
 `POST /v1/ping` `{"uid", "deviceId", "pingId"}`: `pingId` is the push's `aot.pingId` (1–64

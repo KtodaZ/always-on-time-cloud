@@ -27,6 +27,8 @@ const MAX_REQUEST_ID = 64;
 const MAX_SINCE = 253_402_300_799_998;
 
 const UID = /^[A-Za-z0-9:_-]{1,128}$/;
+// Firestore reserves document IDs of the form __x__; such a uid would fail as a server error.
+const RESERVED_ID = /^__.*__$/;
 const DEVICE_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const DEVICE_KEY = /^Bearer ([A-Za-z0-9_-]{43})$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -243,19 +245,26 @@ function createDeviceApi(deps) {
     const log = (level, outcome, fields = {}) => logEvent(logger, level, "device_api", {
       path: target.name, outcome, durationMs: now() - started, ...fields,
     });
+    // A network that used up its failure budget is refused before the body is read or any
+    // document is fetched. Only the per-caller budget is checked up front: the overall one is
+    // shared by every direct caller, so checking it first would let a flood lock out real iPhones.
+    if (limiters.unauthorized.exceeded(caller.client, now())) {
+      return send(res, 429, { error: "too many failed requests" }, { "Retry-After": "60" });
+    }
     let auth = null;
     try {
       const body = readBody(req);
       const key = DEVICE_KEY.exec(header(req, "authorization"))?.[1] ?? null;
       const { uid, deviceId } = body;
-      if (!key || typeof uid !== "string" || !UID.test(uid) || typeof deviceId !== "string" || !DEVICE_ID.test(deviceId)) {
+      if (!key || typeof uid !== "string" || !UID.test(uid) || RESERVED_ID.test(uid) || typeof deviceId !== "string" || !DEVICE_ID.test(deviceId)) {
         throw new HttpError(401, "unauthorized", "malformed");
       }
       const keyHash = sha256Hex(key);
-      // The account's log pseudonym is read alongside, for matching these lines with the
-      // connector's (never the uid).
-      const [reason, logDoc] = await Promise.all([denial(db, (ref) => ref.get(), uid, deviceId, keyHash), refs.log(db, uid).get()]);
+      const reason = await denial(db, (ref) => ref.get(), uid, deviceId, keyHash);
       if (reason) throw new HttpError(401, "unauthorized", reason);
+      // The account's log pseudonym, read only once the key works, for matching these lines with
+      // the connector's (never the uid).
+      const logDoc = await refs.log(db, uid).get();
       auth = { uid, deviceId, keyHash, logId: logDoc.exists && typeof logDoc.data().logId === "string" ? logDoc.data().logId : null };
       if (!(await consume(db, `device|${uid}|${deviceId}`, LIMITS.device, now()))) {
         throw new HttpError(429, "rate limit exceeded", "rate_limited");
@@ -268,14 +277,15 @@ function createDeviceApi(deps) {
         log("error", "unexpected_error", { logId: auth?.logId, deviceId: auth?.deviceId, status: 500, ...errorFields(error) });
         return send(res, 500, { error: "server error" });
       }
-      if (error.status === 401) {
-        // Failed keys are counted per caller and overall; past the budget the answer is 429, and
-        // lines are no longer logged, so a flood stays cheap.
+      if (!auth) {
+        // Failures before the key is accepted (unreadable bodies, failed keys) are counted per
+        // caller and overall; past the budget the answer is 429 and nothing is logged, so a flood
+        // stays cheap.
         const time = now();
         const counted = [limiters.unauthorized(caller.client, time), limiters.unauthorizedGlobal(caller.scope, time)];
         if (!counted.every(Boolean)) return send(res, 429, { error: "too many failed requests" }, { "Retry-After": "60" });
-        log("info", "unauthorized", { reason: error.reason, status: 401 });
-        return send(res, 401, { error: "unauthorized" });
+        log("info", error.status === 401 ? "unauthorized" : "refused", { reason: error.reason, status: error.status });
+        return send(res, error.status, { error: error.status === 401 ? "unauthorized" : error.message });
       }
       log(error.status === 429 ? "warn" : "info", "refused", { logId: auth?.logId, deviceId: auth?.deviceId, reason: error.reason, status: error.status });
       return send(res, error.status, { error: error.message }, error.status === 429 ? { "Retry-After": "600" } : {});
