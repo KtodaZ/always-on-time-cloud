@@ -103,7 +103,8 @@ jobs:
               -e 's/.*`\(gcloud projects add-iam-policy-binding[^`]*\)`.*/\1/p' preflight.log
             exit 1
           fi
-      - name: Deploy ${{ inputs.only }} at ${{ github.sha }}
+      # verify-live reads this name to find deploys; a dry run keeps the suffix though the step is skipped.
+      - name: Deploy ${{ inputs.only }} at ${{ github.sha }}${{ inputs.dry_run && ' (dry run)' || '' }}
         if: ${{ !inputs.dry_run }}
         env:
           ONLY: ${{ inputs.only }}
