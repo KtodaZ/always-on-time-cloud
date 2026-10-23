@@ -282,7 +282,15 @@ NSE handling rules:
 
 ## 6. Scheduling and coalescing
 
-`scheduleIosPushes` runs every minute. Each install stores `nextWakeAtMs`, the next time anything
+`scheduleIosPushes` runs every minute. **Paused until the iOS app ships:** on 2026-10-23 its Cloud
+Scheduler job was paused, because with no iPhones registered it was still waking 1,440 times a day
+and running about three Firestore queries each time. Deploys don't change a job's paused state, so
+resume it before iOS testers or users need on-time pushes:
+`gcloud scheduler jobs resume firebase-schedule-scheduleIosPushes-us-central1 --location us-central1 --project always-on-time-zombit-2026`.
+While paused, heartbeats, prechecks, renewals and retries of deferred changes don't run; webhooks
+and the dispatch trigger still send immediate change pushes.
+
+Each install stores `nextWakeAtMs`, the next time anything
 could be due, and the scheduler only reads installs whose time has passed plus subscriptions whose
 renewal is due. Installs also store `priorityWakeAtMs`, the next precheck or pending change; the
 scheduler visits those installs first, so heartbeats and renewals can't delay them.
