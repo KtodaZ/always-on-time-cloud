@@ -12,6 +12,7 @@ initializeApp();
 Object.assign(exports, require("./ios-push-functions"));
 Object.assign(exports, require("./account-sync-functions"));
 Object.assign(exports, require("./storage-limits-functions"));
+Object.assign(exports, require("./feedback-log-scrub-functions"));
 Object.assign(exports, require("./travel-route-functions"));
 Object.assign(exports, require("./assistant-functions"));
 
