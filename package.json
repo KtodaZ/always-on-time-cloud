@@ -10,7 +10,7 @@
     "test": "npm --prefix functions test && node --test 'scripts/test/*.test.mjs'"
   },
   "devDependencies": {
-    "firebase-tools": "15.33.0"
+    "firebase-tools": "15.34.0"
   },
   "overrides": {
     "gaxios": {
