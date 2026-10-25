@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-test("index exports the feedback trigger unchanged alongside the iOS push functions", () => {
+test("index exports the feedback trigger unchanged alongside the other functions", () => {
   const functions = require("../index");
   assert.deepEqual(Object.keys(functions).sort(), [
     "assistantDeviceApi",
@@ -15,17 +15,12 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
     "capSyncedHistory",
     "deleteOrphanFeedbackUploads",
     "deleteSyncedAccount",
-    "deliverIosPushDispatch",
-    "iosGoogleWebhook",
-    "iosMicrosoftWebhook",
-    "iosPushApi",
     "listAssistantConnections",
     "pruneAssistantConnections",
     "pruneSyncedHistory",
     "publishFeedbackNotification",
     "resumeAccountDeletions",
     "revokeAssistantConnection",
-    "scheduleIosPushes",
     "scrubFeedbackDiagnostics",
     "sendAssistantUsageSummary",
     "undoAssistantChange",
@@ -45,22 +40,8 @@ test("index exports the feedback trigger unchanged alongside the iOS push functi
   assert.deepEqual(feedback.secretEnvironmentVariables, [{ key: "FEEDBACK_DISCORD_WEBHOOK_URL" }],
     "the feedback trigger reads only its webhook secret, never the APNs key");
 
-  const api = functions.iosPushApi.__endpoint;
-  assert.deepEqual(api.httpsTrigger, { invoker: ["public"] });
-  assert.equal(api.secretEnvironmentVariables, undefined, "the device API never touches the APNs key");
-  for (const name of ["iosGoogleWebhook", "deliverIosPushDispatch", "scheduleIosPushes"]) {
-    assert.deepEqual(functions[name].__endpoint.secretEnvironmentVariables, [{ key: "APNS_AUTH_KEY_P8" }], name);
-  }
-  assert.equal(functions.iosMicrosoftWebhook.__endpoint.secretEnvironmentVariables, undefined,
-    "the Graph webhook only records work; the dispatch trigger sends the push");
-
-  const dispatch = functions.deliverIosPushDispatch.__endpoint;
-  assert.deepEqual(dispatch.region, ["us-central1"]);
-  assert.equal(dispatch.eventTrigger.eventType, "google.cloud.firestore.document.v1.created");
-  assert.deepEqual(dispatch.eventTrigger.eventFilterPathPatterns, { document: "iosPushDispatches/{dispatchId}" });
-  assert.equal(dispatch.eventTrigger.retry, false);
-  assert.equal(functions.scheduleIosPushes.__endpoint.scheduleTrigger.schedule, "every 1 minutes");
-  assert.equal(functions.scheduleIosPushes.__endpoint.maxInstances, 1);
+  // The iOS calendar relay runs on Cloudflare (workers/ios-relay), not here.
+  assert.equal(Object.keys(functions).some((name) => /^(ios|scheduleIos|deliverIos)/.test(name)), false);
 
   const route = functions.calculateTravelRoute.__endpoint;
   assert.deepEqual(route.region, ["us-central1"]);

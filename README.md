@@ -51,7 +51,7 @@ More detail: [assistant connector](docs/ASSISTANT_CONNECTOR.md) and its
 npm ci && npm ci --prefix functions && npm test
 ```
 
-Firestore and Storage security rules, the Firestore store, account deletion and the assistant connector also have emulator tests (Java 21 and the
+Firestore and Storage security rules, Firestore-backed function code, account deletion and the assistant connector also have emulator tests (Java 21 and the
 Firebase CLI). The emulators load every function, so give the declared secrets and params stand-in
 values first:
 

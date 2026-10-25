@@ -12,7 +12,7 @@ const {
 const { deliveryFields } = require("../assistant-log");
 const { applyChange, createToolContext } = require("../assistant-tool-context");
 const { TOOLS } = require("../assistant-tools");
-const { ApnsConfigError } = require("../ios-push-apns");
+const { ApnsConfigError } = require("../apns-transport");
 
 const T0 = Date.parse("2026-10-22T12:00:00Z");
 const ANDROID = "11111111-1111-4111-8111-111111111111";

@@ -30,7 +30,7 @@ Secrets stay in Secret Manager and are bound to functions at deploy time:
 | --- | --- |
 | `FEEDBACK_DISCORD_WEBHOOK_URL` | `publishFeedbackNotification`, `sendAssistantUsageSummary` |
 | `TOMTOM_API_KEY`, `TRAVEL_ROUTE_API_KEY` | `calculateTravelRoute` |
-| `APNS_AUTH_KEY_P8` | iOS relay push functions, `assistantMcp`, `undoAssistantChange` |
+| `APNS_AUTH_KEY_P8` | `assistantMcp`, `undoAssistantChange` (the iOS relay Worker keeps its own copy, see below) |
 
 A function with a new kind of trigger can need a role granted to a Google service agent first: the
 first Storage trigger needs Cloud Storage's agent (`service-<project number>@gs-project-accounts`)
@@ -41,7 +41,11 @@ re-runs the deploy.
 
 Non-secret params are in [`functions/.env.always-on-time-zombit-2026`](../functions/.env.always-on-time-zombit-2026).
 The deploy does not pass `--force`, so if the source no longer exports a live function the deploy
-stops instead of deleting it. The Firebase CLI version is pinned in the root `package-lock.json`.
+stops instead of deleting it. To remove functions on purpose, name them in the run's
+**delete_functions** input (comma-separated): after the dry run, the deploy job deletes exactly
+those, refusing any the commit still exports, and then deploys. Deleting a scheduled function also
+deletes its Cloud Scheduler job. Because the deploy account does this through CI, Verify live
+treats it as part of the deploy; deleting functions or scheduler jobs by hand would fail it. The Firebase CLI version is pinned in the root `package-lock.json`.
 
 ## Signing what was deployed
 

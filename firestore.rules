@@ -211,24 +211,6 @@ service cloud.firestore {
       allow read, update, delete: if false;
     }
 
-    // iOS relay push state is written only by Cloud Functions through the Admin SDK, which
-    // bypasses these rules. Clients get no access to any document or subcollection.
-    match /iosPushInstalls/{document=**} {
-      allow read, write: if false;
-    }
-
-    match /iosPushSubscriptions/{document=**} {
-      allow read, write: if false;
-    }
-
-    match /iosPushRateLimits/{document=**} {
-      allow read, write: if false;
-    }
-
-    match /iosPushDispatches/{document=**} {
-      allow read, write: if false;
-    }
-
     // Per-install route call counters, written only by the route function.
     match /travelRouteUsage/{document=**} {
       allow read, write: if false;

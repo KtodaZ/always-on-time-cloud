@@ -1,5 +1,9 @@
 "use strict";
 
+// APNs token-based HTTP/2 transport for the assistant connector's iPhone pushes
+// (assistant-push.js, docs/ASSISTANT_PROTOCOL.md). The iOS calendar relay runs on Cloudflare
+// (workers/ios-relay) and has its own sender; the payload version and collapse ID are shared.
+
 const crypto = require("node:crypto");
 const http2 = require("node:http2");
 
@@ -7,13 +11,9 @@ const APNS_HOSTS = Object.freeze({
   development: "https://api.sandbox.push.apple.com",
   production: "https://api.push.apple.com",
 });
-const PUSH_KINDS = new Set(["change", "heartbeat", "precheck", "renew"]);
-const PROVIDERS = new Set(["google", "microsoft"]);
 const MAX_PAYLOAD_BYTES = 4096;
+// `aot.v` of the shared push payload (docs/IOS_PUSH_PROTOCOL.md section 5).
 const PAYLOAD_VERSION = 1;
-// APNs keeps only the newest undelivered notification per device and collapse ID, so a long
-// expiry costs nothing and lets an offline device catch up once it reconnects.
-const DEFAULT_TTL_SECONDS = 24 * 60 * 60;
 // Apple rejects provider tokens older than an hour and throttles refreshes more often than every
 // 20 minutes.
 const PROVIDER_TOKEN_MAX_AGE_MS = 40 * 60 * 1000;
@@ -85,63 +85,9 @@ class ProviderTokenCache {
   }
 }
 
-function buildPayload({ kind, provider, at }) {
-  if (!PUSH_KINDS.has(kind)) throw new TypeError("unsupported push kind");
-  if (provider !== undefined && !PROVIDERS.has(provider)) throw new TypeError("unsupported push provider");
-  if (!Number.isSafeInteger(at) || at < 0) throw new TypeError("at must be epoch milliseconds");
-  return {
-    aps: {
-      alert: {
-        title: "Keeping your alarms up to date",
-        body: "Checking for calendar updates.",
-      },
-      "mutable-content": 1,
-      "interruption-level": "passive",
-    },
-    aot: {
-      v: PAYLOAD_VERSION,
-      kind,
-      ...(provider ? { provider } : {}),
-      at,
-    },
-  };
-}
-
-function apnsPriority(kind) {
-  return kind === "heartbeat" ? "5" : "10";
-}
-
-// Every relay push, and every assistant push that shows no alert of its own, replaces the same
-// quiet notification on the device (docs/IOS_PUSH_PROTOCOL.md section 5).
+// Relay pushes and assistant pushes without an alert of their own replace the same quiet
+// notification on the device (docs/IOS_PUSH_PROTOCOL.md section 5).
 const SYNC_COLLAPSE_ID = "aot-sync";
-
-function collapseId() {
-  return SYNC_COLLAPSE_ID;
-}
-
-function buildApnsRequest({ installId, install, kind, provider, at, topic, ttlSeconds = DEFAULT_TTL_SECONDS }) {
-  if (!/^[A-Za-z0-9_-]{22}$/.test(installId ?? "")) throw new TypeError("invalid install id");
-  if (!/^[0-9a-f]{64,200}$/.test(install?.apnsToken ?? "")) throw new TypeError("invalid APNs token");
-  if (!Object.hasOwn(APNS_HOSTS, install?.apnsEnvironment)) throw new TypeError("invalid APNs environment");
-  if (!Number.isInteger(ttlSeconds) || ttlSeconds < 0 || ttlSeconds > 2_419_200) {
-    throw new TypeError("invalid APNs expiration");
-  }
-  const body = JSON.stringify(buildPayload({ kind, provider, at }));
-  if (Buffer.byteLength(body, "utf8") > MAX_PAYLOAD_BYTES) throw new TypeError("APNs payload exceeds 4 KB");
-  return {
-    origin: APNS_HOSTS[install.apnsEnvironment],
-    path: `/3/device/${install.apnsToken}`,
-    headers: {
-      "apns-push-type": "alert",
-      "apns-priority": apnsPriority(kind),
-      "apns-collapse-id": collapseId(),
-      "apns-topic": topic,
-      "apns-id": crypto.randomUUID(),
-      "apns-expiration": String(Math.floor(at / 1000) + ttlSeconds),
-    },
-    body,
-  };
-}
 
 /**
  * Keeps one HTTP/2 connection per APNs origin, as Apple recommends, and reconnects after the
@@ -298,37 +244,14 @@ function createApnsTransport({ keyPem, keyId, teamId, topic, connect, now = () =
   return { topic: config.topic, send, close: () => pool.closeAll() };
 }
 
-/**
- * Creates the relay's `send({ installId, install, kind, provider, at })` on an APNs transport:
- * either `transport` or one built from the key options (`keyPem`, `keyId`, `teamId`, `topic`, ...).
- * A duplicate from the transport's retry is harmless because every relay push shares one collapse ID.
- */
-function createApnsSender({ transport, ...options }) {
-  const apns = transport ?? createApnsTransport(options);
-
-  async function send({ installId, install, kind, provider, at }) {
-    const request = buildApnsRequest({ installId, install, kind, provider, at, topic: apns.topic });
-    return apns.send({ environment: install.apnsEnvironment, token: install.apnsToken, headers: request.headers, body: request.body });
-  }
-
-  send.close = () => apns.close();
-  return send;
-}
-
 module.exports = {
   APNS_HOSTS,
-  DEFAULT_TTL_SECONDS,
   Http2SessionPool,
   MAX_PAYLOAD_BYTES,
   PAYLOAD_VERSION,
   ApnsConfigError,
   ProviderTokenCache,
   SYNC_COLLAPSE_ID,
-  apnsPriority,
-  buildApnsRequest,
-  buildPayload,
-  collapseId,
-  createApnsSender,
   createApnsTransport,
   makeProviderToken,
   sendOnSession,
