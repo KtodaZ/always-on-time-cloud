@@ -226,7 +226,7 @@ describe("APNs failures", () => {
       await changeNow(h);
       await h.tick();
       const row = await h.row();
-      expect(row).toMatchObject({ enabled: 0, disabled_reason: result.status === 410 ? "apns_unregistered" : "apns_bad_device_token", next_wake_at: null, claim_id: null });
+      expect(row).toMatchObject({ enabled: 0, disabled_reason: result.status === 410 ? "apns_unregistered" : "apns_bad_device_token", next_wake_at: null });
       h.advance(5 * MINUTE);
       await changeNow(h);
       await h.tick();
@@ -253,7 +253,7 @@ describe("APNs failures", () => {
     await changeNow(h);
     await h.tick();
     expect(h.apns).toHaveLength(2);
-    expect(await h.row()).toMatchObject({ failure_count: 1, claim_id: null });
+    expect(await h.row()).toMatchObject({ failure_count: 1 });
     await runFor(h, MINUTE);
     expect(h.apns).toHaveLength(3);
     expect((await h.row())?.pending_change_at).toBeNull();

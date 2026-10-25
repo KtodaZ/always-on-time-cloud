@@ -100,13 +100,14 @@ type InstallRow = {
   time_zone: string;
   enabled: number;
   disabled_at: number | null;
+  disabled_reason: string | null;
   created_at: number;
+  updated_at: number;
   last_push_at: number | null;
+  last_push_kind: string | null;
   last_sync_at: number | null;
   pending_change_at: number | null;
   pending_change_provider: Provider | null;
-  claim_id: string | null;
-  claimed_at: number | null;
   failure_count: number;
   retry_after: number | null;
   rate_window_start: number | null;
@@ -154,8 +155,6 @@ CREATE TABLE IF NOT EXISTS installs (
   last_sync_at INTEGER,
   pending_change_at INTEGER,
   pending_change_provider TEXT,
-  claim_id TEXT,
-  claimed_at INTEGER,
   failure_count INTEGER NOT NULL DEFAULT 0,
   retry_after INTEGER,
   rate_window_start INTEGER,
@@ -164,8 +163,9 @@ CREATE TABLE IF NOT EXISTS installs (
   priority_wake_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS installs_next_wake ON installs (next_wake_at) WHERE next_wake_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS installs_priority_wake ON installs (priority_wake_at) WHERE priority_wake_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS installs_disabled ON installs (disabled_at) WHERE disabled_at IS NOT NULL;
+-- Shards created by the first deploy had a priority index; it only cost writes.
+DROP INDEX IF EXISTS installs_priority_wake;
 CREATE TABLE IF NOT EXISTS alarms (
   install_id TEXT NOT NULL,
   alarm_key TEXT NOT NULL,
@@ -206,6 +206,24 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 CREATE INDEX IF NOT EXISTS rate_limits_expires ON rate_limits (expires_at);
 `;
 
+/** Registration fields; registering again re-enables an install that APNs disabled. */
+function registrationPatch(fields: RegistrationInput, nowMs: number): InstallPatch {
+  return {
+    apns_token: fields.apnsToken,
+    apns_environment: fields.environment,
+    polling: fields.freshness.polling ? 1 : 0,
+    active_start: fields.freshness.activeHours.start,
+    active_end: fields.freshness.activeHours.end,
+    time_zone: fields.freshness.timeZone,
+    enabled: 1,
+    disabled_at: null,
+    disabled_reason: null,
+    failure_count: 0,
+    retry_after: null,
+    updated_at: nowMs,
+  };
+}
+
 function toSubscriptionState(row: SubscriptionRow): SubscriptionState {
   return {
     key: row.sub_key,
@@ -216,8 +234,16 @@ function toSubscriptionState(row: SubscriptionRow): SubscriptionState {
   };
 }
 
+type InstallPatch = Partial<Omit<InstallRow, "install_id" | "secret_hash" | "created_at" | "next_wake_at" | "priority_wake_at">>;
+
 export class InstallShard extends DurableObject<Env> {
   private readonly sql: SqlStorage;
+  /**
+   * Pushes in flight, by install. Only this object sends its installs' pushes and an alarm run
+   * waits for all of them, so the claim lives in memory; if the object restarts mid-push the claim
+   * is simply gone. Keeping it out of SQLite saves a row write per push.
+   */
+  private readonly inFlight = new Map<string, { claimId: string; at: number }>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -259,20 +285,34 @@ export class InstallShard extends DurableObject<Env> {
       lastSyncAt: row.last_sync_at,
       pendingChangeAt: row.pending_change_at,
       pendingChangeProvider: row.pending_change_provider,
-      claimedAt: row.claim_id === null ? null : row.claimed_at,
+      claimedAt: this.inFlight.get(row.install_id)?.at ?? null,
       retryAfter: row.retry_after,
       alarms: this.alarmStates(row.install_id),
     };
   }
 
-  /** Recomputes and stores the install's wake times. Returns the new `next_wake_at`. */
-  private refreshWake(installId: string, nowMs: number): number | null {
+  /**
+   * Applies `patch` to an install and recomputes its wake times, in a single UPDATE that writes
+   * only the columns that change (each row written is billed, so state changes are batched here).
+   * Alarm and subscription rows must already be written. Returns the new `next_wake_at`.
+   */
+  private updateInstall(installId: string, patch: InstallPatch, nowMs: number): number | null {
     const row = this.installRow(installId);
     if (!row) return null;
+    const merged: InstallRow = { ...row, ...patch };
     const subscriptions = this.subscriptionRows(installId).map(toSubscriptionState);
-    const wake = wakeTimes(this.installState(row), subscriptions, nowMs);
-    if (wake.next !== row.next_wake_at || wake.priority !== row.priority_wake_at) {
-      this.sql.exec("UPDATE installs SET next_wake_at = ?, priority_wake_at = ? WHERE install_id = ?", wake.next, wake.priority, installId);
+    const wake = wakeTimes(this.installState(merged), subscriptions, nowMs);
+    const changes: Array<[string, SqlStorageValue]> = [];
+    for (const [column, value] of Object.entries(patch)) {
+      if (row[column as keyof InstallRow] !== value) changes.push([column, value as SqlStorageValue]);
+    }
+    if (wake.next !== row.next_wake_at) changes.push(["next_wake_at", wake.next]);
+    if (wake.priority !== row.priority_wake_at) changes.push(["priority_wake_at", wake.priority]);
+    if (changes.length > 0) {
+      this.sql.exec(
+        `UPDATE installs SET ${changes.map(([column]) => `${column} = ?`).join(", ")} WHERE install_id = ?`,
+        ...changes.map(([, value]) => value), installId,
+      );
     }
     return wake.next;
   }
@@ -304,7 +344,7 @@ export class InstallShard extends DurableObject<Env> {
     const existing = this.installRow(installId);
     if (existing) {
       if (!safeEqualHex(secretHash, existing.secret_hash)) return "conflict";
-      this.applyRegistration(installId, fields, nowMs);
+      this.updateInstall(installId, registrationPatch(fields, nowMs), nowMs);
     } else {
       this.sql.exec(
         `INSERT INTO installs (install_id, secret_hash, apns_token, apns_environment, polling, active_start, active_end,
@@ -312,20 +352,10 @@ export class InstallShard extends DurableObject<Env> {
         installId, secretHash, fields.apnsToken, fields.environment, fields.freshness.polling ? 1 : 0,
         fields.freshness.activeHours.start, fields.freshness.activeHours.end, fields.freshness.timeZone, nowMs, nowMs,
       );
+      this.updateInstall(installId, {}, nowMs);
     }
-    this.refreshWake(installId, nowMs);
     await this.reschedule();
     return existing ? "updated" : "created";
-  }
-
-  private applyRegistration(installId: string, fields: RegistrationInput, nowMs: number): void {
-    this.sql.exec(
-      `UPDATE installs SET apns_token = ?, apns_environment = ?, polling = ?, active_start = ?, active_end = ?, time_zone = ?,
-         enabled = 1, disabled_at = NULL, disabled_reason = NULL, failure_count = 0, retry_after = NULL, updated_at = ?
-       WHERE install_id = ?`,
-      fields.apnsToken, fields.environment, fields.freshness.polling ? 1 : 0, fields.freshness.activeHours.start,
-      fields.freshness.activeHours.end, fields.freshness.timeZone, nowMs, installId,
-    );
   }
 
   /**
@@ -337,20 +367,16 @@ export class InstallShard extends DurableObject<Env> {
     const row = this.installRow(installId);
     if (!row || !safeEqualHex(secretHash, row.secret_hash)) return { status: "unauthorized" };
     const windowExpired = row.rate_window_start === null || nowMs - row.rate_window_start >= INSTALL_RATE.windowMs;
-    if (windowExpired) {
-      this.sql.exec("UPDATE installs SET rate_window_start = ?, rate_count = 1 WHERE install_id = ?", nowMs, installId);
-    } else if (row.rate_count >= INSTALL_RATE.limit) {
-      return { status: "rate-limited" };
-    } else {
-      this.sql.exec("UPDATE installs SET rate_count = rate_count + 1 WHERE install_id = ?", installId);
-    }
+    if (!windowExpired && row.rate_count >= INSTALL_RATE.limit) return { status: "rate-limited" };
+    const rate: InstallPatch = windowExpired ? { rate_window_start: nowMs, rate_count: 1 } : { rate_count: row.rate_count + 1 };
 
     let releasedKeys: string[] = [];
+    let patch: InstallPatch = {};
     switch (op.kind) {
       case "authorize":
-        return { status: "ok", releasedKeys };
+        break;
       case "update":
-        this.applyRegistration(installId, op.fields, nowMs);
+        patch = registrationPatch(op.fields, nowMs);
         break;
       case "delete":
         releasedKeys = this.deleteInstallRecords(installId);
@@ -359,7 +385,7 @@ export class InstallShard extends DurableObject<Env> {
         this.replaceAlarms(installId, op.alarms);
         break;
       case "synced":
-        this.recordSync(row, op.syncedAt);
+        patch = this.syncPatch(row, op.syncedAt);
         break;
       case "deleteSubscription": {
         const deleted = this.sql.exec("DELETE FROM subscriptions WHERE sub_key = ? AND install_id = ?", op.key, installId).rowsWritten;
@@ -367,8 +393,8 @@ export class InstallShard extends DurableObject<Env> {
         break;
       }
     }
-    if (op.kind !== "delete") this.refreshWake(installId, nowMs);
-    await this.reschedule();
+    if (op.kind !== "delete") this.updateInstall(installId, { ...rate, ...patch }, nowMs);
+    if (op.kind !== "authorize") await this.reschedule();
     return { status: "ok", releasedKeys };
   }
 
@@ -381,16 +407,23 @@ export class InstallShard extends DurableObject<Env> {
     return keys;
   }
 
-  /** Replaces the alarm snapshot, keeping sent-stage markers only for unchanged triggers. */
+  /**
+   * Replaces the alarm snapshot, keeping sent-stage markers only for unchanged triggers. Writes
+   * only the rows that differ, since re-sent snapshots are mostly unchanged.
+   */
   private replaceAlarms(installId: string, alarms: Array<{ key: string; triggerAt: number }>): void {
     const prior = new Map(this.alarmStates(installId).map((alarm) => [alarm.key, alarm]));
-    this.sql.exec("DELETE FROM alarms WHERE install_id = ?", installId);
+    const next = new Set(alarms.map((alarm) => alarm.key));
+    for (const key of prior.keys()) {
+      if (!next.has(key)) this.sql.exec("DELETE FROM alarms WHERE install_id = ? AND alarm_key = ?", installId, key);
+    }
     for (const alarm of alarms) {
       const previous = prior.get(alarm.key);
-      const keep = previous?.triggerAt === alarm.triggerAt;
+      if (previous?.triggerAt === alarm.triggerAt) continue;
       this.sql.exec(
-        "INSERT INTO alarms (install_id, alarm_key, trigger_at, sent_t20, sent_t8) VALUES (?, ?, ?, ?, ?)",
-        installId, alarm.key, alarm.triggerAt, keep ? previous.sentT20 : null, keep ? previous.sentT8 : null,
+        `INSERT INTO alarms (install_id, alarm_key, trigger_at, sent_t20, sent_t8) VALUES (?, ?, ?, NULL, NULL)
+         ON CONFLICT (install_id, alarm_key) DO UPDATE SET trigger_at = excluded.trigger_at, sent_t20 = NULL, sent_t8 = NULL`,
+        installId, alarm.key, alarm.triggerAt,
       );
     }
   }
@@ -400,19 +433,13 @@ export class InstallShard extends DurableObject<Env> {
    * resets the heartbeat clock and the meeting-window gap, satisfies precheck stages that started
    * at or before it and changes recorded at or before it. Renewals and coalescing are unaffected.
    */
-  private recordSync(row: InstallRow, syncedAt: number): void {
+  private syncPatch(row: InstallRow, syncedAt: number): InstallPatch {
     const state = this.installState(row);
     const fresh = freshAt(state);
-    if (fresh !== null && syncedAt <= fresh) return;
+    if (fresh !== null && syncedAt <= fresh) return {};
     this.markStages(row.install_id, stagesSatisfiedBySync(state, syncedAt), syncedAt);
     const changeCovered = row.pending_change_at !== null && row.pending_change_at <= syncedAt;
-    this.sql.exec(
-      `UPDATE installs SET last_sync_at = ?,
-         pending_change_at = CASE WHEN ? THEN NULL ELSE pending_change_at END,
-         pending_change_provider = CASE WHEN ? THEN NULL ELSE pending_change_provider END
-       WHERE install_id = ?`,
-      syncedAt, changeCovered ? 1 : 0, changeCovered ? 1 : 0, row.install_id,
-    );
+    return { last_sync_at: syncedAt, ...(changeCovered ? { pending_change_at: null, pending_change_provider: null } : {}) };
   }
 
   private markStages(installId: string, stages: Array<{ key: string; stage: Stage }>, at: number): void {
@@ -461,7 +488,7 @@ export class InstallShard extends DurableObject<Env> {
       key, installId, input.provider, input.resourceIdHash, input.verificationHash, input.expiresAt,
       initialRenewDueAt(input.expiresAt), nowMs, nowMs,
     );
-    this.refreshWake(installId, nowMs);
+    this.updateInstall(installId, {}, nowMs);
     await this.reschedule();
     return { status: "ok", droppedKeys };
   }
@@ -474,15 +501,12 @@ export class InstallShard extends DurableObject<Env> {
     return this.sql.exec<SubscriptionRow>("SELECT * FROM subscriptions WHERE sub_key = ? AND install_id = ?", key, installId).toArray()[0] ?? null;
   }
 
-  /** Marks a provider change for an enabled install. Returns false when there is no such install. */
-  private recordChange(installId: string, provider: Provider, nowMs: number): boolean {
-    const row = this.installRow(installId);
-    if (!row || row.enabled !== 1) return false;
-    // A push covers only changes recorded at or before its send time, so a change arriving while
-    // a push is in flight stays pending.
-    const pendingAt = Math.max(row.pending_change_at ?? 0, nowMs);
-    this.sql.exec("UPDATE installs SET pending_change_at = ?, pending_change_provider = ? WHERE install_id = ?", pendingAt, provider, installId);
-    return true;
+  /**
+   * The patch that marks a provider change. A push covers only changes recorded at or before its
+   * send time, so a change arriving while a push is in flight stays pending.
+   */
+  private changePatch(row: InstallRow, provider: Provider, nowMs: number): InstallPatch {
+    return { pending_change_at: Math.max(row.pending_change_at ?? 0, nowMs), pending_change_provider: provider };
   }
 
   /** Google channel notification, after the index named the install. */
@@ -494,8 +518,9 @@ export class InstallShard extends DurableObject<Env> {
     if (!safeEqualHex(input.tokenHash, subscription.verification_hash)) return "forbidden";
     if (!safeEqualHex(input.resourceIdHash, subscription.resource_id_hash)) return "ignored";
     if (input.state !== "exists" && input.state !== "not_exists") return "ignored";
-    if (!this.recordChange(input.installId, "google", nowMs)) return "ignored";
-    this.refreshWake(input.installId, nowMs);
+    const row = this.installRow(input.installId);
+    if (!row || row.enabled !== 1) return "ignored";
+    this.updateInstall(input.installId, this.changePatch(row, "google", nowMs), nowMs);
     await this.reschedule();
     return "recorded";
   }
@@ -535,14 +560,13 @@ export class InstallShard extends DurableObject<Env> {
     for (const installId of new Set([...changes, ...renewals.keys()])) {
       const row = this.installRow(installId);
       if (!row || row.enabled !== 1) continue;
-      if (changes.has(installId)) this.recordChange(installId, "microsoft", nowMs);
       for (const key of renewals.get(installId) ?? []) {
         this.sql.exec(
           "UPDATE subscriptions SET renewal_requested_at = ?, renew_due_at = ? WHERE sub_key = ? AND install_id = ?",
           nowMs, nowMs, key, installId,
         );
       }
-      this.refreshWake(installId, nowMs);
+      this.updateInstall(installId, changes.has(installId) ? this.changePatch(row, "microsoft", nowMs) : {}, nowMs);
       outcome.installs += 1;
     }
     if (outcome.installs > 0) await this.reschedule();
@@ -612,6 +636,7 @@ export class InstallShard extends DurableObject<Env> {
   /** Plans the next due push for an install and claims it, or refreshes its wake time. */
   private planAndClaim(installId: string, nowMs: number): Claim | null {
     const row = this.installRow(installId);
+    // An in-flight claim blocks planning until it is CLAIM_STALE_MS old; then it can be taken over.
     if (!row) return null;
     // A mapping past its expiry with no lifecycle request is never due again.
     for (const subscription of this.subscriptionRows(installId)) {
@@ -622,7 +647,7 @@ export class InstallShard extends DurableObject<Env> {
     const subscriptions = this.subscriptionRows(installId).map(toSubscriptionState);
     const plan = row.enabled === 1 ? planPush(this.installState(row), subscriptions, nowMs) : null;
     if (!plan) {
-      const next = this.refreshWake(installId, nowMs);
+      const next = this.updateInstall(installId, {}, nowMs);
       // Never leave an install due with nothing to send, or the alarm would spin.
       if (next !== null && next <= nowMs) {
         this.sql.exec("UPDATE installs SET next_wake_at = ?, priority_wake_at = NULL WHERE install_id = ?", nowMs + MINUTE_MS, installId);
@@ -630,10 +655,17 @@ export class InstallShard extends DurableObject<Env> {
       }
       return null;
     }
+    // The claim is not written: the outcome below updates the row once.
     const claimId = crypto.randomUUID();
-    this.sql.exec("UPDATE installs SET claim_id = ?, claimed_at = ? WHERE install_id = ?", claimId, nowMs, installId);
-    this.refreshWake(installId, nowMs);
+    this.inFlight.set(installId, { claimId, at: nowMs });
     return { installId, claimId, apnsToken: row.apns_token, environment: row.apns_environment, plan };
+  }
+
+  /** Releases the in-memory claim; false when it is no longer this claim's. */
+  private release(claim: Claim): boolean {
+    if (this.inFlight.get(claim.installId)?.claimId !== claim.claimId) return false;
+    this.inFlight.delete(claim.installId);
+    return true;
   }
 
   /**
@@ -641,18 +673,10 @@ export class InstallShard extends DurableObject<Env> {
    * precheck stages due at `sentAt` (looking ahead for priority-10 kinds) and its renewals.
    */
   private completePush(claim: Claim, sentAt: number): void {
+    if (!this.release(claim)) return;
     const row = this.installRow(claim.installId);
-    if (!row || row.claim_id !== claim.claimId) return;
+    if (!row) return;
     this.markStages(claim.installId, stagesSatisfiedByPush(this.installState(row), claim.plan.kind, sentAt), sentAt);
-    const changeCovered = row.pending_change_at !== null && row.pending_change_at <= sentAt;
-    this.sql.exec(
-      `UPDATE installs SET last_push_at = ?, last_push_kind = ?, claim_id = NULL, claimed_at = NULL, failure_count = 0,
-         retry_after = NULL,
-         pending_change_at = CASE WHEN ? THEN NULL ELSE pending_change_at END,
-         pending_change_provider = CASE WHEN ? THEN NULL ELSE pending_change_provider END
-       WHERE install_id = ?`,
-      sentAt, claim.plan.kind, changeCovered ? 1 : 0, changeCovered ? 1 : 0, claim.installId,
-    );
     for (const key of claim.plan.renewalKeys) {
       const subscription = this.subscriptionRow(claim.installId, key);
       if (!subscription || !isRenewalDue(toSubscriptionState(subscription), sentAt)) continue;
@@ -661,36 +685,35 @@ export class InstallShard extends DurableObject<Env> {
         sentAt, renewRetryAt(sentAt, subscription.expires_at), key,
       );
     }
-    this.refreshWake(claim.installId, sentAt);
+    const changeCovered = row.pending_change_at !== null && row.pending_change_at <= sentAt;
+    this.updateInstall(claim.installId, {
+      last_push_at: sentAt,
+      last_push_kind: claim.plan.kind,
+      failure_count: 0,
+      retry_after: null,
+      ...(changeCovered ? { pending_change_at: null, pending_change_provider: null } : {}),
+    }, sentAt);
   }
 
   /** Releases a claim after a transient failure and backs off (1, 2, 4, 8, 16, 30 minutes). */
   private failPush(claim: Claim, nowMs: number): void {
+    if (!this.release(claim)) return;
     const row = this.installRow(claim.installId);
-    if (!row || row.claim_id !== claim.claimId) return;
+    if (!row) return;
     const failureCount = row.failure_count + 1;
-    this.sql.exec(
-      "UPDATE installs SET claim_id = NULL, claimed_at = NULL, failure_count = ?, retry_after = ? WHERE install_id = ?",
-      failureCount, nowMs + failureBackoffMs(failureCount), claim.installId,
-    );
-    this.refreshWake(claim.installId, nowMs);
+    this.updateInstall(claim.installId, { failure_count: failureCount, retry_after: nowMs + failureBackoffMs(failureCount) }, nowMs);
   }
 
   /** Disables an install whose token APNs rejected, unless it registered a new token meanwhile. */
   private disableInstall(claim: Claim, reason: string, nowMs: number): boolean {
+    this.release(claim);
     const row = this.installRow(claim.installId);
     if (!row) return false;
-    if (row.claim_id === claim.claimId) {
-      this.sql.exec("UPDATE installs SET claim_id = NULL, claimed_at = NULL WHERE install_id = ?", claim.installId);
-    }
     if (row.apns_token !== claim.apnsToken) {
-      this.refreshWake(claim.installId, nowMs);
+      this.updateInstall(claim.installId, {}, nowMs);
       return false;
     }
-    this.sql.exec(
-      "UPDATE installs SET enabled = 0, disabled_at = ?, disabled_reason = ?, next_wake_at = NULL, priority_wake_at = NULL WHERE install_id = ?",
-      nowMs, reason, claim.installId,
-    );
+    this.updateInstall(claim.installId, { enabled: 0, disabled_at: nowMs, disabled_reason: reason }, nowMs);
     return true;
   }
 
@@ -749,20 +772,13 @@ export class InstallShard extends DurableObject<Env> {
     } catch (error) {
       log("warn", "Pruning failed", { error: errorName(error) });
     }
-    const ids: string[] = [];
-    const seen = new Set<string>();
-    for (const column of ["priority_wake_at", "next_wake_at"] as const) {
-      const rows = this.sql.exec<{ install_id: string }>(
-        `SELECT install_id FROM installs WHERE ${column} IS NOT NULL AND ${column} <= ? ORDER BY ${column} LIMIT ?`,
-        nowMs, PUSH_BATCH_SIZE,
-      ).toArray();
-      for (const { install_id: installId } of rows) {
-        if (ids.length < PUSH_BATCH_SIZE && !seen.has(installId)) {
-          ids.push(installId);
-          seen.add(installId);
-        }
-      }
-    }
+    // priority_wake_at is never earlier than next_wake_at, so every install with a precheck or
+    // change due is in this range; they go first.
+    const ids = this.sql.exec<{ install_id: string }>(
+      `SELECT install_id FROM installs WHERE next_wake_at IS NOT NULL AND next_wake_at <= ?
+       ORDER BY CASE WHEN priority_wake_at <= ? THEN 0 ELSE 1 END, next_wake_at LIMIT ?`,
+      nowMs, nowMs, PUSH_BATCH_SIZE,
+    ).toArray().map((row) => row.install_id);
     const counts: Record<string, number> = { installs: ids.length };
     await forEachLimited(ids, PUSH_CONCURRENCY, async (installId) => {
       try {

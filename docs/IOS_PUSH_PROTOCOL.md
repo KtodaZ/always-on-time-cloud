@@ -340,8 +340,9 @@ and its last reported sync (3.6).
 Rules shared by all kinds:
 
 - Coalescing: at most one push per install per 2 minutes, counted from the last push APNs
-  accepted. While a push is in flight the install is claimed (the claim expires after 2 minutes if
-  the sender dies). After an APNs failure other than an invalid token, the install backs off for 1,
+  accepted. While a push is in flight the install is claimed in the shard's memory (the claim
+  expires after 2 minutes; if the shard restarts the claim is lost and the push may be sent
+  twice; both carry the `aot-sync` collapse ID). After an APNs failure other than an invalid token, the install backs off for 1,
   2, 4, 8, 16, then 30 minutes; pending work is kept.
 - When several things are due at once, one push is sent, chosen in this order: `precheck`,
   `change`, `renew`, `heartbeat`. Deferred work goes out at the next allowed time.
@@ -402,8 +403,9 @@ migrating data. Keys are `install:<installId>` for an install and everything it 
 triggers, subscription mappings, push bookkeeping and per-install rate limit),
 `subscription:<subscription key>` for the subscription index entry, and `rate:<sha256 of the
 rate-limit key>` for registration counters. A subscription key is
-`<provider>_<sha256("<provider>:<subscriptionId>")>`. Pushes cost only SQLite writes in the
-install's shard.
+`<provider>_<sha256("<provider>:<subscriptionId>")>`. A push writes one install row (plus its
+`next_wake_at` index entry) in the install's shard, about 2 billed rows, and any satisfied
+precheck or renewal rows.
 
 Retention, run from each shard's alarm: registration counters are deleted when their hour ends
 (they are keyed by an unsalted `sha256` of the client network, which is guessable for IPv4 but
