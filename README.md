@@ -23,6 +23,10 @@ anywhere else. Its badge above is the current result. The checks detect changes 
 them; how they work, how to check a file yourself, and their limits:
 [docs/DEPLOYING.md](docs/DEPLOYING.md).
 
+The iOS calendar refresh relay is the exception: it runs on Cloudflare as a Worker, deployed by
+hand from [`workers/ios-relay/`](workers/ios-relay/), and these signatures and checks do not cover
+it ([details](docs/DEPLOYING.md#ios-relay-cloudflare-worker)).
+
 ## What is here
 
 | Feature | Code | Data it handles |
@@ -32,7 +36,7 @@ them; how they work, how to check a file yourself, and their limits:
 | History retention | `pruneSyncedHistory`, `capSyncedHistory` | Daily cleanup of synced history older than 14 days; an account keeps at most its newest 5,000 entries. |
 | Travel routes | [`functions/travel-route*.js`](functions/travel-route.js) | Start/destination coordinates and times for one route request, forwarded to TomTom or Google Routes. Not stored; only call counters (per installation, per hashed client network and per provider) are kept, and they expire. |
 | Feedback | [`functions/index.js`](functions/index.js), [`feedback-notification.js`](functions/feedback-notification.js), [`storage.rules`](storage.rules) | Feedback text, contact email, optional screenshots and an optional redacted diagnostics file. The contact email is never included in the developer notification. Uploads no feedback references are deleted after a day. |
-| iOS calendar refresh relay | [`functions/ios-push-*.js`](functions/ios-push-service.js), [protocol](docs/IOS_PUSH_PROTOCOL.md) | APNs token, hashed install secret, hashed alarm and subscription IDs with times. Never OAuth tokens, event titles, calendar IDs or meeting links. |
+| iOS calendar refresh relay | [`workers/ios-relay/`](workers/ios-relay/src/index.ts) (Cloudflare Worker), [protocol](docs/IOS_PUSH_PROTOCOL.md) | APNs token, hashed install secret, freshness settings (EventKit polling on or off, active hours, time zone), hashed alarm and subscription IDs with times, push bookkeeping. Stored in Cloudflare Durable Objects. Never OAuth tokens, event titles, calendar IDs or meeting links. |
 | AI assistant connector (optional) | [`functions/assistant-*.js`](functions/assistant-functions.js), [`account-web/connect/`](account-web/connect/index.html), [docs](docs/ASSISTANT_CONNECTOR.md) | Only after the user connects Claude or ChatGPT: a snapshot of upcoming event titles, times, calendar names and alarms shared by the phone, a 30-day log of the assistant's changes, and hashed OAuth tokens. Deleted when the last assistant disconnects. |
 | Account pages | [`account-web/`](account-web/) | The account deletion page, the assistant consent page, the App Link and Universal Link fallback and their association files, served at `https://alwaysontime.zombit.io`. The [privacy policy](https://zombit.io/always-on-time/privacy/) is published on the Zombit Studios website. |
 
@@ -56,6 +60,12 @@ printf 'APNS_AUTH_KEY_P8=x\nFEEDBACK_DISCORD_WEBHOOK_URL=http://127.0.0.1:9/\nTO
 cp functions/.env.always-on-time-zombit-2026 functions/.env.local
 npx firebase emulators:exec --only firestore,storage --project demo-account-sync 'node functions/testing/storage-rules.cjs && node functions/testing/account-sync-rules.cjs && node functions/testing/assistant-rules.cjs && npm --prefix functions test'
 npx firebase emulators:exec --only auth,firestore,functions,hosting --project demo-account-sync 'node functions/testing/hosting-headers.cjs && node functions/testing/account-delete.cjs && node functions/testing/assistant-e2e.cjs'
+```
+
+The iOS relay Worker has its own tests, which run in Cloudflare's `workerd` runtime:
+
+```sh
+cd workers/ios-relay && npm ci && npm run typecheck && npm test
 ```
 
 The [Test workflow](.github/workflows/test.yml) runs all of these on every push and pull request.

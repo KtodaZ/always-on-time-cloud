@@ -111,6 +111,38 @@ machine; the first signed deploy replaced every function, rules file and hosting
 maintainer also enabled the Cloud Billing API during that deploy, because the Firebase CLI reads the
 project's billing plan; that change is listed in the Verify report.
 
+## iOS relay (Cloudflare Worker)
+
+The iOS calendar refresh relay ([protocol](IOS_PUSH_PROTOCOL.md)) is not a Firebase function. It
+is the Cloudflare Worker `aot-ios-relay` with Durable Objects, in
+[`workers/ios-relay/`](../workers/ios-relay/), on the maintainer's Cloudflare account at
+`https://aot-ios-relay.kylemail2003.workers.dev`. There is no CI token for Cloudflare yet, so it
+is deployed by hand from the maintainer's machine:
+
+```sh
+cd workers/ios-relay
+npm ci && npm run typecheck && npm test
+npx wrangler deploy
+```
+
+Non-secret settings are `vars` in [`wrangler.jsonc`](../workers/ios-relay/wrangler.jsonc). The one
+secret, `APNS_AUTH_KEY_P8`, is the same APNs key the Firebase functions use, copied without
+printing it:
+
+```sh
+firebase functions:secrets:access APNS_AUTH_KEY_P8 --project always-on-time-zombit-2026 \
+  | npx wrangler secret put APNS_AUTH_KEY_P8
+```
+
+Durable Object classes change only through the `migrations` list in `wrangler.jsonc`, and the
+shard count in [`src/util.ts`](../workers/ios-relay/src/util.ts) cannot change without migrating
+data. `wrangler dev` cannot reach APNs (no HTTP/2), so push delivery is tested with mocks and
+proven only against a deployed Worker.
+
+The Deploy and Verify live workflows above do not cover the Worker: it carries no signature, and
+the audit log they read is Google Cloud's, not Cloudflare's. Cloudflare's dashboard lists its
+deployments and versions.
+
 ## Hosting domains
 
 The public origin is `https://alwaysontime.zombit.io`, a custom domain on the project's Hosting

@@ -1,26 +1,34 @@
-# iOS Relay Push Protocol (v1)
+# iOS Relay Push Protocol (v2)
 
 The iOS app keeps calendars fresh while closed by waking its Notification Service Extension (NSE)
-with APNs alert pushes. This document is the contract between the iOS app/NSE and the Firebase
-functions in `functions/ios-push-*.js`.
+with APNs alert pushes. This document is the contract between the iOS app/NSE and the relay, a
+Cloudflare Worker with Durable Objects in [`workers/ios-relay/`](../workers/ios-relay/).
 
 The server is a relay only. The device keeps its OAuth tokens, creates provider subscriptions,
 fetches calendar changes itself, and reconciles alarms. The server stores:
 
-- the APNs token and environment, a SHA-256 hash of the install secret, and heartbeat preferences;
+- the APNs token and environment, a SHA-256 hash of the install secret, and the freshness settings
+  (whether the device polls EventKit calendars, its active hours and time zone);
 - SHA-256 hashes of opaque alarm IDs with their trigger times (no titles or calendar IDs);
-- provider subscription mappings: SHA-256 hashes of the subscription ID (as the document key), of
-  the Google `resourceId`, and of the channel token or `clientState`, plus the expiration.
+- provider subscription mappings: SHA-256 hashes of the subscription ID, of the Google
+  `resourceId`, and of the channel token or `clientState`, plus the expiration;
+- push bookkeeping: when the last push was accepted and of which kind, when the device last
+  reported a sync, pending work, failures and rate-limit counters.
 
 It never receives OAuth tokens, event content, meeting links, raw channel tokens or `clientState`
-values, or provider notification payloads beyond the fields needed to route them.
+values, or provider notification payloads beyond the fields needed to route them. Cloudflare
+processes this data for us (Workers and Durable Objects storage). There is no other database.
+
+Version 1 of this protocol ran on Firebase Functions (`/v1/...`) and was retired before the iOS
+app shipped; v2 is not backwards compatible with it and v1 routes answer `404`.
 
 ## 1. Conventions
 
-- Base URLs (project `always-on-time-zombit-2026`, region `us-central1`):
-  - Device API: `https://us-central1-<project>.cloudfunctions.net/iosPushApi`
-  - Google webhook: `https://us-central1-<project>.cloudfunctions.net/iosGoogleWebhook`
-  - Graph webhook: `https://us-central1-<project>.cloudfunctions.net/iosMicrosoftWebhook`
+- Base URL: `https://aot-ios-relay.kylemail2003.workers.dev` (a custom domain may replace it
+  before launch; the paths stay the same).
+  - Device API: `<base>/v2/...`
+  - Google webhook: `<base>/webhooks/google`
+  - Graph webhook: `<base>/webhooks/microsoft`
 - Request and response bodies are UTF-8 JSON. Device API bodies are limited to 32 KiB.
 - Every object is strict: a missing required field or any unknown field is a `400`.
 - Times are Unix epoch milliseconds (integers) unless stated otherwise.
@@ -31,15 +39,20 @@ values, or provider notification payloads beyond the fields needed to route them
 
 | Status | Meaning |
 | --- | --- |
-| `200` / `201` / `204` | Success, as listed per endpoint |
+| `200` / `201` / `202` / `204` | Success, as listed per endpoint |
 | `400` | Invalid JSON, schema mismatch, or invalid value |
 | `401` | Missing or invalid App Check token or install credentials (also: install no longer exists) |
+| `403` | Google webhook with a wrong channel token |
 | `404` | Unknown route |
 | `405` | Method not allowed; see the `Allow` header |
 | `409` | Install ID or subscription ID owned by someone else; subscription limit reached |
 | `413` | Body too large |
 | `429` | Rate limited; retry with exponential backoff starting at 30 s |
 | `500` | Server error; retry with backoff |
+
+Order of checks on authenticated calls: a missing or malformed `Authorization` header is `401`,
+then an App Check token that was sent but is invalid is `401`, then the body is validated (`400`
+/ `413`), then the install secret and rate limit are checked (`401` / `429`).
 
 ## 2. Install identity and authentication
 
@@ -51,16 +64,21 @@ the NSE (accessible after first unlock):
 
 The server stores only `sha256(installSecret)`. Every call after registration sends
 `Authorization: Bearer <installSecret>`. Authenticated calls are limited to 60 per install per
-minute (`429` beyond that).
+minute (`429` beyond that); every authenticated endpoint counts, including `/synced`.
 
 Firebase App Check (`X-Firebase-AppCheck: <token>`):
 
-- `POST /v1/installations` requires a valid token. (The server can relax this with the
-  `IOS_PUSH_ENFORCE_APP_CHECK=false` parameter for development; an invalid token is still rejected.)
+- `POST /v2/installations` requires a valid token. (The `ENFORCE_APP_CHECK` Worker variable can be
+  set to `false` for development; an invalid token is still rejected.)
 - All other device calls accept but do not require a token, because the NSE may not be able to
   obtain one. If a token is sent, it must be valid.
-- The server verifies with `verifyToken` and no replay protection (`consume`), so clients send
-  ordinary cached tokens, not limited-use ones.
+- The relay verifies the token itself: an RS256 JWT whose signature matches a key from
+  `https://firebaseappcheck.googleapis.com/v1/jwks` (keys cached for up to 6 hours, refetched at
+  most once a minute for an unknown key ID), with issuer
+  `https://firebaseappcheck.googleapis.com/1054144143721`, an audience that includes
+  `projects/1054144143721` (project `always-on-time-zombit-2026`), the iOS app ID
+  `1:1054144143721:ios:20196992cb6f6edb9f5df8` as subject, and an `exp` in the future. There is no
+  replay protection, so clients send ordinary cached tokens, not limited-use ones.
 
 The iOS app gets tokens from the Firebase App Check SDK: App Attest on devices, the debug
 provider only in Debug simulator builds (its debug token must be registered for the iOS app in
@@ -68,8 +86,8 @@ Firebase). It sends a token on registration only. A token it cannot obtain means
 registration is not sent; a refused token (`401`) is retried once with a fresh one, then
 reported. Either way the app shows background updates as not registered and retries with
 backoff from 30 s. The NSE does not use App Attest and sends no token, so its lost-install
-re-registration (section 2) succeeds only with enforcement off; otherwise the app registers
-again at its next launch.
+re-registration succeeds only with enforcement off; otherwise the app registers again at its next
+launch.
 
 If any authenticated call returns `401` and the bearer secret is correct, the install no longer
 exists on the server (deleted, or disabled by APNs and pruned after 30 days). Generate a new
@@ -77,7 +95,7 @@ exists on the server (deleted, or disabled by APNs and pruned after 30 days). Ge
 
 ## 3. Device API
 
-### 3.1 Register: `POST /v1/installations`
+### 3.1 Register: `POST /v2/installations`
 
 ```json
 {
@@ -85,42 +103,45 @@ exists on the server (deleted, or disabled by APNs and pruned after 30 days). Ge
   "installSecret": "<43 base64url characters>",
   "apnsToken": "<APNs device token, lowercase hex, 64-200 characters>",
   "environment": "production",
-  "heartbeat": {
-    "intervalMinutes": 20,
-    "activeHours": { "start": "07:00", "end": "22:00" },
+  "freshness": {
+    "polling": true,
+    "activeHours": { "start": "06:00", "end": "23:00" },
     "timeZone": "America/Los_Angeles"
   }
 }
 ```
 
 - `environment`: `development` (sandbox APNs, debug builds) or `production` (TestFlight/App Store).
-- `heartbeat.intervalMinutes`: integer 15-30.
-- `heartbeat.activeHours`: `HH:mm` 24-hour local times in `timeZone` (an IANA name). `start` is
+- `freshness.polling`: `true` when at least one selected calendar is read only through EventKit
+  (after the app deselects EventKit copies of accounts signed in inside the app), otherwise
+  `false`. Polling installs get meeting-window prechecks and hourly heartbeats (section 6);
+  non-polling installs rely on provider webhooks plus two prechecks per alarm.
+- `freshness.activeHours`: `HH:mm` 24-hour local times in `timeZone` (an IANA name). `start` is
   included, `end` excluded, ranges may cross midnight (`22:00`-`06:00`), and `start` may not equal
-  `end`. Heartbeats are sent only inside active hours. Prechecks, changes, and renewals are not
-  restricted by active hours.
+  `end`. They limit heartbeats only. The app's default is `06:00`-`23:00`.
 
 Responses: `201 {"installId": "..."}` when created; `200 {"installId": "..."}` when the same
 `installId` and `installSecret` are repeated (safe to retry, updates the fields above and
 re-enables the install); `409` if the `installId` exists with a different secret.
 
-Rate limit: 20 registration attempts per client network per hour (IPv4 address or IPv6 /64).
-New installs are also capped overall per hour; an install that is already registered can always
-register again.
+Rate limit: 20 registration attempts per client network per hour (IPv4 address or IPv6 /64, from
+Cloudflare's `CF-Connecting-IP`). New installs are also capped at 2,000 per hour overall; an
+install that is already registered can always register again.
 
-### 3.2 Update: `PUT /v1/installations/{installId}`
+### 3.2 Update: `PUT /v2/installations/{installId}`
 
-Body: `apnsToken`, `environment`, and `heartbeat` exactly as in 3.1. Returns `204`. Call this on
-every app launch and whenever the APNs token, time zone, or heartbeat preference changes. It
-re-enables an install that APNs disabled.
+Body: `apnsToken`, `environment`, and `freshness` exactly as in 3.1. Returns `204`. Call this on
+every app launch and whenever the APNs token, time zone, active hours or `polling` changes (for
+example after signing in to or out of a provider changes which calendars are read through
+EventKit). It re-enables an install that APNs disabled.
 
-### 3.3 Delete: `DELETE /v1/installations/{installId}`
+### 3.3 Delete: `DELETE /v2/installations/{installId}`
 
 Returns `204`. Deletes the install, its alarm triggers, and all its subscription mappings. Call
 it when the user turns off background refresh or signs out of every provider, after stopping the
 provider subscriptions.
 
-### 3.4 Alarm triggers: `PUT /v1/installations/{installId}/alarms`
+### 3.4 Alarm triggers: `PUT /v2/installations/{installId}/alarms`
 
 ```json
 {
@@ -143,10 +164,10 @@ provider subscriptions.
 ### 3.5 Provider subscriptions
 
 ```text
-PUT    /v1/installations/{installId}/subscriptions/google/{channelId}
-DELETE /v1/installations/{installId}/subscriptions/google/{channelId}
-PUT    /v1/installations/{installId}/subscriptions/microsoft/{subscriptionId}
-DELETE /v1/installations/{installId}/subscriptions/microsoft/{subscriptionId}
+PUT    /v2/installations/{installId}/subscriptions/google/{channelId}
+DELETE /v2/installations/{installId}/subscriptions/google/{channelId}
+PUT    /v2/installations/{installId}/subscriptions/microsoft/{subscriptionId}
+DELETE /v2/installations/{installId}/subscriptions/microsoft/{subscriptionId}
 ```
 
 Google `PUT` body:
@@ -170,9 +191,10 @@ Microsoft `PUT` body:
 
 - `expiresAtMs` must be in the future and at most 366 days ahead.
 - `PUT` creates or replaces the mapping (send it again after every renewal with the new
-  expiration) and returns `204`. At most 64 subscriptions per install (`409` beyond that).
-  A subscription ID registered to a different install returns `409`.
-- `DELETE` returns `204`, including when the mapping does not exist.
+  expiration) and returns `204`. At most 64 live subscriptions per install (`409` beyond that).
+  A subscription ID registered to a different install returns `409`, unless that install no
+  longer holds it (deleted or pruned), in which case the new install takes it over.
+- `DELETE` returns `204`, including when the mapping does not exist or belongs to someone else.
 
 Provider setup the device must use:
 
@@ -184,26 +206,55 @@ Provider setup the device must use:
   webhook URL, `clientState`: at least 32 random bytes base64url-encoded (Graph allows up to 128
   characters). Renew with `PATCH` and `PUT` the new expiration.
 
+### 3.6 Report a sync: `POST /v2/installations/{installId}/synced`
+
+```json
+{ "syncedAtMs": 1791403200000 }
+```
+
+Call this after a successful full sync (provider deltas fetched, EventKit re-read, alarms
+reconciled) that did **not** come from a relay push: app open, an EventKit change while running,
+background app refresh, alarm intents. Do not call it from the NSE for a relay push; the server
+already counts accepted pushes.
+
+- `syncedAtMs` is when the sync **started** reading calendars, so a change the server recorded
+  after that moment is not considered covered. It may be at most 60 seconds ahead of the server
+  clock (`400` beyond that) and is clamped to the server clock.
+- A value at or before the install's newest accepted push or reported sync is ignored (still
+  `204`).
+- Returns `204`.
+
+The server treats a reported sync like an accepted push for freshness (section 6): it resets the
+heartbeat clock and the 5-minute meeting-window gap, satisfies precheck stages that started at or
+before `syncedAtMs`, and clears a pending change recorded at or before `syncedAtMs`. It does not
+satisfy renewals (only the device renewing its subscriptions does) and does not count toward the
+2-minute push coalescing, which limits pushes, not syncs.
+
 ## 4. Webhooks (server behavior)
 
-Google (`POST` to the Google webhook):
+Routing: the relay stores, for each subscription, an index entry (`sha256` subscription key ->
+install ID) in the shard chosen by a hash of the subscription key (section 8). A webhook looks the
+subscription up there, then asks the install's shard to verify and record it. Nothing scans.
 
-1. Look up `X-Goog-Channel-ID`. Unknown or expired channel: `204`, no push.
+Google (`POST <base>/webhooks/google`):
+
+1. `X-Goog-Channel-ID` is required (`400` otherwise). Unknown or expired channel: `204`, no push.
 2. `sha256(X-Goog-Channel-Token)` must equal the stored hash, else `403`.
 3. `sha256(X-Goog-Resource-ID)` must equal the stored `resourceId` hash, else `204`, no push.
 4. `X-Goog-Resource-State`: `sync` is acknowledged without a push; `exists` and `not_exists`
    record a change for the install. Other values are ignored. Bodies are never read.
 
-Microsoft Graph (the Graph webhook):
+Microsoft Graph (`<base>/webhooks/microsoft`):
 
 - Validation: a `POST` (or `GET`) with `?validationToken=...` is answered `200` with the decoded
-  token as `text/plain`.
+  token as `text/plain` (`400` if empty or over 2,048 characters).
 - Notifications: `POST` with a `value` array (at most 1,000 items naming at most 100 distinct
-  subscriptions, 1 MiB; larger batches get `400`). Each item is matched by
-  `subscriptionId`; unknown subscriptions and items whose `sha256(clientState)` does not match
-  are skipped. Items without `lifecycleEvent` and `missed` lifecycle events record a change.
-  `reauthorizationRequired` and `subscriptionRemoved` request an immediate renew push. Multiple
-  items for one install produce at most one push. The response is `202`.
+  subscriptions, 1 MiB; larger batches get `400` / `413`). Each item is matched by
+  `subscriptionId`; items without a string `clientState`, unknown subscriptions and items whose
+  `sha256(clientState)` does not match are skipped. Items without `lifecycleEvent` and `missed`
+  lifecycle events record a change. `reauthorizationRequired` and `subscriptionRemoved` request
+  an immediate renew push. Multiple items for one install produce at most one push. The response
+  is `202`.
 - Expired subscriptions: change notifications for a subscription past its recorded
   `expiresAtMs` are skipped. Lifecycle events (`reauthorizationRequired`, `subscriptionRemoved`,
   `missed`) for it are still verified and routed, because Graph only sends them for a
@@ -212,21 +263,13 @@ Microsoft Graph (the Graph webhook):
   Expired mappings are kept for 7 days for this, and do not count against the 64-subscription
   limit.
 
-Delivery:
-
-- Google: a recorded change is sent immediately from the webhook request if the install may
-  receive a push (section 6).
-- Microsoft Graph expects an answer within about 3 seconds, and Cloud Run may throttle CPU once
-  a response is sent, so the Graph webhook never calls APNs. In one Firestore transaction per
-  install it records the change and renewal requests and, if a push may go out now, creates an
-  `iosPushDispatches` document; then it answers `202`. The `deliverIosPushDispatch` function,
-  triggered by that document, plans and sends the push under the same claim, coalescing and
-  collapse rules as the scheduler, then deletes the document. At most one dispatch is created per
-  install per 30 seconds, since a dispatch reads the install's current state when it runs.
-- In both cases a change that cannot go out now stays pending in Firestore and the scheduler
-  sends it as soon as coalescing allows. The same applies if a dispatch is lost, fails, or hits a
-  transient APNs failure (the trigger is not retried; the scheduler is). Webhooks return success
-  once the work is recorded and only return `500` when it could not be stored.
+Delivery: neither webhook calls APNs while the provider waits. The install's shard records the
+change or renewal request in SQLite and, if a push may go out now, sets its Durable Object alarm to
+fire immediately; the alarm sends the push (typically within a second). Graph's ~3-second answer
+limit is therefore never at risk. A change that cannot go out yet (coalescing, backoff, a push in
+flight) stays pending and the shard alarm sends it as soon as allowed; a transient APNs failure is
+retried the same way. Webhooks return success once the work is recorded and `500` only when it
+could not be stored. Disabled installs record nothing.
 
 ## 5. Push format
 
@@ -239,7 +282,7 @@ APNs request headers:
 | `apns-push-type` | `alert` |
 | `apns-topic` | the app bundle ID (`APNS_TOPIC`) |
 | `apns-priority` | `5` for `heartbeat`; `10` for `change`, `precheck`, `renew` |
-| `apns-collapse-id` | `aot-sync` for every relay push (it was `aot-<installId>` before October 2026; the app removes delivered notifications with the old ID once) |
+| `apns-collapse-id` | `aot-sync` for every relay push |
 | `apns-expiration` | send time + 24 hours |
 
 Relay payload (always exactly these keys; `aot.provider` is optional):
@@ -257,7 +300,7 @@ Relay payload (always exactly these keys; `aot.provider` is optional):
 
 | Field | Values |
 | --- | --- |
-| `aot.v` | Payload version, currently `1` |
+| `aot.v` | Payload version, still `1` (the payload did not change with the v2 device API) |
 | `aot.kind` | `change`, `heartbeat`, `precheck`, or `renew`; `assistant` for the assistant connector's pushes, which add fields of their own ([assistant protocol](ASSISTANT_PROTOCOL.md#apns-iphone)) |
 | `aot.provider` | `google` or `microsoft`; present on `change` and on `renew` when every subscription due for renewal belongs to one provider |
 | `aot.at` | Server send time, epoch ms |
@@ -282,18 +325,19 @@ NSE handling rules:
 
 ## 6. Scheduling and coalescing
 
-`scheduleIosPushes` runs every minute. **Paused until the iOS app ships:** on 2026-10-23 its Cloud
-Scheduler job was paused, because with no iPhones registered it was still waking 1,440 times a day
-and running about three Firestore queries each time. Deploys don't change a job's paused state, so
-resume it before iOS testers or users need on-time pushes:
-`gcloud scheduler jobs resume firebase-schedule-scheduleIosPushes-us-central1 --location us-central1 --project always-on-time-zombit-2026`.
-While paused, heartbeats, prechecks, renewals and retries of deferred changes don't run; webhooks
-and the dispatch trigger still send immediate change pushes.
+Freshness target: a calendar change reaches the phone within 5 minutes around meetings without
+draining the battery. Each install's **freshness point** is the newer of its last accepted push
+and its last reported sync (3.6).
 
-Each install stores `nextWakeAtMs`, the next time anything
-could be due, and the scheduler only reads installs whose time has passed plus subscriptions whose
-renewal is due. Installs also store `priorityWakeAtMs`, the next precheck or pending change; the
-scheduler visits those installs first, so heartbeats and renewals can't delay them.
+| Push | Who | When | `apns-priority` |
+| --- | --- | --- | --- |
+| `change` | everyone | a Google or Graph webhook recorded a change; immediately, subject to coalescing | 10 |
+| `renew` | everyone | 24 hours before a subscription expires, after a Graph `reauthorizationRequired` / `subscriptionRemoved`; then every 6 hours | 10 |
+| `precheck` (meeting window) | `polling: true` | for each alarm trigger T, inside [T-30 min, T), whenever at least 5 minutes have passed since the freshness point. About six pushes per isolated alarm (T-30, -25, ... -5); overlapping windows share pushes. Not limited by active hours. | 10 |
+| `precheck` (stages) | `polling: false` | at T-20 and T-8 for each alarm, a safety net for silently dead provider channels. Not limited by active hours. | 10 |
+| `heartbeat` | `polling: true` only | 60 minutes after the freshness point (or registration), inside active hours | 5 |
+
+Rules shared by all kinds:
 
 - Coalescing: at most one push per install per 2 minutes, counted from the last push APNs
   accepted. While a push is in flight the install is claimed (the claim expires after 2 minutes if
@@ -301,59 +345,69 @@ scheduler visits those installs first, so heartbeats and renewals can't delay th
   2, 4, 8, 16, then 30 minutes; pending work is kept.
 - When several things are due at once, one push is sent, chosen in this order: `precheck`,
   `change`, `renew`, `heartbeat`. Deferred work goes out at the next allowed time.
-- Heartbeat: due when `intervalMinutes` have passed since the last accepted push of any kind (or
-  since registration) and the local time is within active hours. A heartbeat is therefore skipped
-  whenever another push went out recently.
-- Prechecks: for each alarm, stages at T-20 and T-8 minutes. A stage is due from its start for 2
-  minutes. A priority-10 push (`change`, `precheck`, `renew`) sent within the 2 minutes before a
-  stage starts also satisfies it; a heartbeat due in that span is sent as a `precheck` instead. Each
-  stage is sent at most once per trigger time.
+- A heartbeat due when a meeting window opens within the next 2 minutes is sent as a priority-10
+  `precheck` instead.
+- Stages (non-polling): a stage is due from its start for 2 minutes. A priority-10 push sent within
+  the 2 minutes before a stage starts also satisfies it, as does a reported sync that started at
+  or after the stage start. Each stage is sent at most once per trigger time.
 - Renewal: a subscription becomes due 24 hours before `expiresAtMs`, or immediately after a Graph
-  `reauthorizationRequired` / `subscriptionRemoved` (also after expiry, see section 4). After an
-  accepted `renew` push the server asks again every 6 hours until the device `PUT`s a new
-  expiration or the subscription expires.
+  lifecycle request (also after expiry, see section 4). After an accepted `renew` push the server
+  asks again every 6 hours until the device `PUT`s a new expiration or the subscription expires.
 - APNs `410`, or `400` with reason `BadDeviceToken`, disables the install (unless its token changed
-  while the push was in flight). Disabled installs get no pushes until the app sends 3.1 or 3.2.
-  Disabled installs are deleted after 30 days.
+  while the push was in flight). Disabled installs get no pushes and record no webhook work until
+  the app sends 3.1 or 3.2. Disabled installs are deleted after 30 days.
+
+Each install stores `next_wake_at` (the next time anything could be due) and `priority_wake_at`
+(the next precheck or pending change). A shard sets its Durable Object alarm to the earliest
+`next_wake_at` among its installs (or its next retention cleanup). An alarm run sends at most 40
+pushes, prechecks and changes first, with up to 8 APNs requests in flight; if more are due the next
+run starts immediately. So heartbeats and renewals cannot delay the pushes that keep alarms right,
+and each run stays within the Workers subrequest limit.
 
 ## 7. Versioning
 
 - `aot.v` versions the push payload. Within v1, optional fields may be added; clients must ignore
   unknown fields. Changing the meaning of an existing field or kind requires `v: 2`. A new `kind`
   value is allowed within v1 because rule 4 above makes clients treat it as a sync.
-- The device API is versioned by path (`/v1/...`). Within v1 the server will not add required
-  request fields or remove response fields. Incompatible changes get a `/v2` route, served
-  alongside `/v1` until old app versions are retired.
+- The device API is versioned by path (`/v2/...`). Within v2 the server will not add required
+  request fields or remove response fields; new optional endpoints (like 3.6) may be added.
+  Incompatible changes get a `/v3` route, served alongside `/v2` until old app versions are
+  retired.
 
-## 8. Server configuration
+## 8. Server configuration and storage
+
+The Worker `aot-ios-relay` is deployed by hand from [`workers/ios-relay/`](../workers/ios-relay/)
+with `npx wrangler deploy` ([deploying](DEPLOYING.md#ios-relay-cloudflare-worker)).
 
 | Name | Kind | Purpose |
 | --- | --- | --- |
-| `APNS_AUTH_KEY_P8` | Secret Manager secret | APNs token-auth `.p8` key (EC P-256, PEM) |
-| `APNS_KEY_ID` | string param | 10-character key ID |
-| `APNS_TEAM_ID` | string param | 10-character Apple team ID |
-| `APNS_TOPIC` | string param | App bundle ID |
-| `IOS_PUSH_ENFORCE_APP_CHECK` | boolean param, default `true` | Require App Check for registration |
+| `APNS_AUTH_KEY_P8` | Worker secret | APNs token-auth `.p8` key (EC P-256, PEM); the same key as the Firebase secret of that name |
+| `APNS_KEY_ID` | var | 10-character key ID |
+| `APNS_TEAM_ID` | var | 10-character Apple team ID |
+| `APNS_TOPIC` | var | App bundle ID |
+| `ENFORCE_APP_CHECK` | var, `"true"` | Require App Check for registration |
+| `APP_CHECK_PROJECT_NUMBER` | var | Firebase project number for the App Check issuer and audience |
+| `APP_CHECK_APP_IDS` | var | Comma-separated Firebase app IDs accepted as the token subject |
 
 APNs uses token-based authentication: an ES256 JWT (`kid` = key ID, `iss` = team ID, `iat`)
-reused for 40 minutes over a pooled HTTP/2 connection per APNs environment.
+signed with WebCrypto and reused for 40 minutes per Worker isolate (dropped after a
+`403 ExpiredProviderToken` / `InvalidProviderToken` once it is 20 minutes old). Requests go to
+`api.push.apple.com` or `api.sandbox.push.apple.com` by the install's `environment` over the
+Workers `fetch` API (HTTP/2); a request that fails before APNs answers is retried once. `wrangler
+dev` has no HTTP/2, so APNs works only deployed; the tests mock it.
 
-Firestore collections (`iosPushInstalls`, `iosPushSubscriptions`, `iosPushRateLimits`,
-`iosPushDispatches`) are written only by the functions through the Admin SDK; client rules deny
-all access. Registration rate-limit documents are keyed by an unsalted `sha256` of the client
-network, which is not plaintext but is guessable for IPv4; they hold only a count and are deleted
-by the scheduler once the hour-long window ends. Subscription mappings are deleted 7 days after
-they expire. Dispatch documents hold an install ID and hashed subscription document IDs; the
-trigger deletes them, and the scheduler prunes any left after an hour.
+Storage: 64 `InstallShard` Durable Objects with SQLite storage, named `shard-0` to `shard-63`.
+A key's shard is the first 32 bits of `sha256(key)` modulo 64; the count cannot change without
+migrating data. Keys are `install:<installId>` for an install and everything it owns (alarm
+triggers, subscription mappings, push bookkeeping and per-install rate limit),
+`subscription:<subscription key>` for the subscription index entry, and `rate:<sha256 of the
+rate-limit key>` for registration counters. A subscription key is
+`<provider>_<sha256("<provider>:<subscriptionId>")>`. Pushes cost only SQLite writes in the
+install's shard.
 
-Functions: `iosPushApi`, `iosGoogleWebhook` and `iosMicrosoftWebhook` (HTTPS), `scheduleIosPushes`
-(every minute), and `deliverIosPushDispatch` (Firestore `onDocumentCreated` on
-`iosPushDispatches/{dispatchId}`, region `us-central1`, not retried). The APNs secret is bound to
-the Google webhook, the scheduler and the dispatch trigger, and, for the assistant connector's
-iPhone pushes ([assistant protocol](ASSISTANT_PROTOCOL.md#push-messages)), to `assistantMcp` and
-`undoAssistantChange`. The key and params are declared once, in
-[`functions/apns-config.js`](../functions/apns-config.js).
-
-Because the codebase now declares these params and the secret, expect any functions deploy from
-it, including one that only updates the feedback trigger, to prompt for or require them. Create
-them before the next functions deploy.
+Retention, run from each shard's alarm: registration counters are deleted when their hour ends
+(they are keyed by an unsalted `sha256` of the client network, which is guessable for IPv4 but
+holds only a count); subscription mappings and index entries 7 days after they expire; alarm
+triggers a day after they pass; installs 30 days after APNs disabled them, with their mappings and
+index entries. Deleting an install (3.3) removes everything at once. Logs (Workers Logs) carry
+install IDs, push kinds and APNs status codes, never tokens or secrets.
