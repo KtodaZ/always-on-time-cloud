@@ -66,9 +66,13 @@ async function fetchJwks(nowMs: number): Promise<JwksCache> {
 }
 
 async function keyFor(kid: string, nowMs: number): Promise<CryptoKey | undefined> {
+  // Every fetch attempt, failed ones included, waits JWKS_MIN_REFRESH_MS after the previous one, so
+  // an outage does not make each registration wait on another timed-out fetch.
+  const mayFetch = lastFetchAttemptMs === 0 || nowMs - lastFetchAttemptMs >= JWKS_MIN_REFRESH_MS;
+  if (!jwksCache && !mayFetch) throw new Error("App Check JWKS unavailable");
   const stale = !jwksCache || nowMs - jwksCache.fetchedAtMs >= jwksCache.maxAgeMs;
-  const unknownKid = jwksCache && !jwksCache.keys.has(kid) && nowMs - lastFetchAttemptMs >= JWKS_MIN_REFRESH_MS;
-  if (stale || unknownKid) {
+  const unknownKid = jwksCache && !jwksCache.keys.has(kid);
+  if ((stale || unknownKid) && mayFetch) {
     try {
       jwksCache = await fetchJwks(nowMs);
     } catch (error) {

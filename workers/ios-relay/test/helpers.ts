@@ -4,6 +4,7 @@ import { vi } from "vitest";
 
 import { APP_CHECK_JWKS_URL, resetAppCheckCache } from "../src/appcheck";
 import { resetApnsCache } from "../src/apns";
+import { resetSharedTokenCache } from "../src/apns-token";
 import type { InstallShard } from "../src/shard";
 import { sha256Hex, shardFor, subscriptionKey } from "../src/util";
 
@@ -49,6 +50,8 @@ export interface Harness {
   /** Every APNs request the mock saw. */
   allApns: ApnsCall[];
   jwksFetches: number;
+  /** HTTP status the mocked JWKS endpoint answers with. */
+  jwksStatus: number;
   respond: ApnsResponder;
   appCheck(claims?: Record<string, unknown>, options?: { kid?: string; key?: CryptoKey }): Promise<string>;
   now(): number;
@@ -106,6 +109,7 @@ export async function harness({ freshness = FRESHNESS }: { freshness?: typeof FR
   vi.setSystemTime(START);
   resetAppCheckCache();
   resetApnsCache();
+  resetSharedTokenCache();
   const keys = await rsaKeys();
   const jwk = await crypto.subtle.exportKey("jwk", keys.publicKey) as JsonWebKey;
 
@@ -119,6 +123,7 @@ export async function harness({ freshness = FRESHNESS }: { freshness?: typeof FR
     },
     allApns: [],
     jwksFetches: 0,
+    jwksStatus: 200,
     respond: () => ({ status: 200 }),
     async appCheck(claims = {}, options = {}) {
       const nowSeconds = Math.floor(Date.now() / 1000);
@@ -216,6 +221,7 @@ export async function harness({ freshness = FRESHNESS }: { freshness?: typeof FR
     const request = new Request(input, init);
     if (request.url === APP_CHECK_JWKS_URL) {
       h.jwksFetches += 1;
+      if (h.jwksStatus !== 200) return new Response("unavailable", { status: h.jwksStatus });
       return Response.json({ keys: [{ ...jwk, kid: "test-kid", alg: "RS256", use: "sig" }] }, { headers: { "cache-control": "public, max-age=21600" } });
     }
     if (request.url.startsWith("https://api.sandbox.push.apple.com/") || request.url.startsWith("https://api.push.apple.com/")) {

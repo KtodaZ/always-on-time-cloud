@@ -8,7 +8,8 @@
 
 import { DurableObject } from "cloudflare:workers";
 
-import { ApnsConfigError, sendRelayPush, validateApnsConfig, type ApnsEnvironment, type ApnsResult } from "./apns";
+import { ApnsConfigError, sendRelayPush, type ApnsEnvironment, type ApnsResult } from "./apns";
+import { apnsConfigFromEnv, sharedProviderToken } from "./apns-token";
 import type { Env } from "./env";
 import {
   DAY_MS,
@@ -43,9 +44,37 @@ export const EXPIRED_SUBSCRIPTION_RETENTION_MS = 7 * DAY_MS;
 const PAST_ALARM_RETENTION_MS = DAY_MS;
 export const INSTALL_RATE = Object.freeze({ limit: 60, windowMs: MINUTE_MS });
 /** Pushes per alarm run (one APNs subrequest each); more due work continues in the next run. */
-export const PUSH_BATCH_SIZE = 40;
+/** Upper bound on pushes per alarm run, whatever the subrequest budget (keeps runs short). */
+export const PUSH_BATCH_SIZE = 200;
 const PUSH_CONCURRENCY = 8;
 const PRUNE_INSTALLS_PER_RUN = 20;
+/** Default and floor for MAX_SUBREQUESTS_PER_RUN; 40 fits the Workers Free limit of 50. */
+export const DEFAULT_SUBREQUESTS_PER_RUN = 40;
+const MIN_SUBREQUESTS_PER_RUN = 10;
+/** Worst case per push: the APNs request and its one retry. */
+const SUBREQUESTS_PER_PUSH = 2;
+/** Per run: fetching the shared provider token and reporting a rejected one. */
+const TOKEN_SUBREQUESTS = 2;
+/** Prune index releases may use at most this share of a run's budget (at least one install). */
+const PRUNE_BUDGET_SHARE = 0.25;
+/**
+ * A webhook that finds an index entry without its subscription releases the entry only once it is
+ * this old: a subscription PUT writes the index entry just before the mapping, and a webhook (often
+ * Google's `sync`) can arrive in between.
+ */
+export const INDEX_RELEASE_GRACE_MS = 5 * MINUTE_MS;
+
+/** Pushes one alarm run may send within `budget` outbound calls after `pruneCalls` were used. */
+export function pushesPerRun(budget: number, pruneCalls = 0): number {
+  return Math.min(PUSH_BATCH_SIZE, Math.max(1, Math.floor((budget - pruneCalls - TOKEN_SUBREQUESTS) / SUBREQUESTS_PER_PUSH)));
+}
+
+/** The configured per-run subrequest budget. */
+export function subrequestBudget(env: Pick<Env, "MAX_SUBREQUESTS_PER_RUN">): number {
+  const value = Number(env.MAX_SUBREQUESTS_PER_RUN);
+  if (!Number.isInteger(value) || value <= 0) return DEFAULT_SUBREQUESTS_PER_RUN;
+  return Math.max(MIN_SUBREQUESTS_PER_RUN, value);
+}
 
 export interface RegistrationInput {
   apnsToken: string;
@@ -602,11 +631,17 @@ export class InstallShard extends DurableObject<Env> {
     return owners;
   }
 
-  /** Removes index entries, each only if it still names that install. */
-  indexRelease(entries: Array<{ key: string; installId: string }>): number {
+  /**
+   * Removes index entries, each only if it still names that install. With `minAgeMs`, only entries
+   * last claimed at least that long ago (see INDEX_RELEASE_GRACE_MS).
+   */
+  indexRelease(entries: Array<{ key: string; installId: string }>, minAgeMs = 0): number {
+    const claimedBefore = this.now() - minAgeMs;
     let removed = 0;
     for (const { key, installId } of entries) {
-      removed += this.sql.exec("DELETE FROM sub_index WHERE sub_key = ? AND install_id = ?", key, installId).rowsWritten;
+      removed += this.sql.exec(
+        "DELETE FROM sub_index WHERE sub_key = ? AND install_id = ? AND updated_at <= ?", key, installId, claimedBefore,
+      ).rowsWritten;
     }
     return removed;
   }
@@ -720,13 +755,7 @@ export class InstallShard extends DurableObject<Env> {
   private async deliver(claim: Claim, sentAt: number): Promise<"sent" | "failed" | "disabled"> {
     let result: ApnsResult;
     try {
-      const config = validateApnsConfig({
-        keyPem: this.env.APNS_AUTH_KEY_P8,
-        keyId: this.env.APNS_KEY_ID,
-        teamId: this.env.APNS_TEAM_ID,
-        topic: this.env.APNS_TOPIC,
-      });
-      result = await sendRelayPush(config, {
+      result = await sendRelayPush(apnsConfigFromEnv(this.env), sharedProviderToken(this.env, () => this.now()), {
         environment: claim.environment,
         token: claim.apnsToken,
         kind: claim.plan.kind,
@@ -761,23 +790,26 @@ export class InstallShard extends DurableObject<Env> {
   }
 
   /**
-   * DO alarm: prune, then send pushes for due installs (prechecks and changes first), at most
-   * PUSH_BATCH_SIZE per run so each run stays within the subrequest limit; the next run follows
-   * immediately when more is due. Never throws, so the runtime does not retry a half-done run.
+   * DO alarm: prune, then send pushes for due installs (prechecks and changes first), as many as
+   * MAX_SUBREQUESTS_PER_RUN allows (pushesPerRun); the next run follows immediately when more is
+   * due. Never throws, so the runtime does not retry a half-done run.
    */
   override async alarm(): Promise<void> {
     const nowMs = this.now();
+    const budget = subrequestBudget(this.env);
+    let pruneCalls = 0;
     try {
-      await this.prune(nowMs);
+      pruneCalls = await this.prune(nowMs, Math.floor(budget * PRUNE_BUDGET_SHARE));
     } catch (error) {
       log("warn", "Pruning failed", { error: errorName(error) });
     }
+    const pushLimit = pushesPerRun(budget, pruneCalls);
     // priority_wake_at is never earlier than next_wake_at, so every install with a precheck or
     // change due is in this range; they go first.
     const ids = this.sql.exec<{ install_id: string }>(
       `SELECT install_id FROM installs WHERE next_wake_at IS NOT NULL AND next_wake_at <= ?
        ORDER BY CASE WHEN priority_wake_at <= ? THEN 0 ELSE 1 END, next_wake_at LIMIT ?`,
-      nowMs, nowMs, PUSH_BATCH_SIZE,
+      nowMs, nowMs, pushLimit,
     ).toArray().map((row) => row.install_id);
     const counts: Record<string, number> = { installs: ids.length };
     await forEachLimited(ids, PUSH_CONCURRENCY, async (installId) => {
@@ -819,7 +851,7 @@ export class InstallShard extends DurableObject<Env> {
    * expiry, old alarm triggers, and installs disabled for 30 days (releasing their index entries
    * in other shards).
    */
-  private async prune(nowMs: number): Promise<void> {
+  private async prune(nowMs: number, indexCallBudget: number): Promise<number> {
     this.sql.exec("DELETE FROM rate_limits WHERE expires_at <= ?", nowMs);
     this.sql.exec("DELETE FROM sub_index WHERE expires_at <= ?", nowMs - EXPIRED_SUBSCRIPTION_RETENTION_MS);
     this.sql.exec("DELETE FROM subscriptions WHERE expires_at <= ?", nowMs - EXPIRED_SUBSCRIPTION_RETENTION_MS);
@@ -828,16 +860,27 @@ export class InstallShard extends DurableObject<Env> {
       "SELECT install_id FROM installs WHERE disabled_at IS NOT NULL AND enabled = 0 AND disabled_at <= ? LIMIT ?",
       nowMs - DISABLED_INSTALL_RETENTION_MS, PRUNE_INSTALLS_PER_RUN,
     ).toArray();
+    // Each index shard named costs one call; stop at the budget (always making progress) and let
+    // the next run, due immediately, continue.
     const released: Array<{ key: string; installId: string }> = [];
+    const shards = new Set<string>();
+    let deleted = 0;
     for (const { install_id: installId } of disabled) {
+      const keys = this.sql.exec<{ sub_key: string }>("SELECT sub_key FROM subscriptions WHERE install_id = ?", installId).toArray().map((row) => row.sub_key);
+      const needed = new Set(shards);
+      for (const key of keys) needed.add(await shardFor(`subscription:${key}`));
+      if (deleted > 0 && needed.size > indexCallBudget) break;
+      for (const name of needed) shards.add(name);
+      deleted += 1;
       for (const key of this.deleteInstallRecords(installId)) released.push({ key, installId });
     }
     if (released.length > 0) await releaseIndexEntries(this.env, released);
+    return shards.size;
   }
 }
 
 /** Releases index entries in whichever shards hold them. Best effort: stale entries self-heal. */
-export async function releaseIndexEntries(env: Env, entries: Array<{ key: string; installId: string }>): Promise<void> {
+export async function releaseIndexEntries(env: Env, entries: Array<{ key: string; installId: string }>, minAgeMs = 0): Promise<void> {
   const byShard = new Map<string, Array<{ key: string; installId: string }>>();
   for (const entry of entries) {
     const name = await shardFor(`subscription:${entry.key}`);
@@ -846,7 +889,7 @@ export async function releaseIndexEntries(env: Env, entries: Array<{ key: string
   }
   await Promise.all([...byShard].map(async ([name, group]) => {
     try {
-      await env.SHARDS.getByName(name).indexRelease(group);
+      await env.SHARDS.getByName(name).indexRelease(group, minAgeMs);
     } catch (error) {
       log("warn", "Could not release subscription index entries", { error: errorName(error) });
     }

@@ -73,8 +73,9 @@ Firebase App Check (`X-Firebase-AppCheck: <token>`):
 - All other device calls accept but do not require a token, because the NSE may not be able to
   obtain one. If a token is sent, it must be valid.
 - The relay verifies the token itself: an RS256 JWT whose signature matches a key from
-  `https://firebaseappcheck.googleapis.com/v1/jwks` (keys cached for up to 6 hours, refetched at
-  most once a minute for an unknown key ID), with issuer
+  `https://firebaseappcheck.googleapis.com/v1/jwks` (keys cached for up to 6 hours and refetched
+  for an unknown key ID, but fetched at most once a minute, failed fetches included; stale keys
+  stay in use while Google is unreachable), with issuer
   `https://firebaseappcheck.googleapis.com/1054144143721`, an audience that includes
   `projects/1054144143721` (project `always-on-time-zombit-2026`), the iOS app ID
   `1:1054144143721:ios:20196992cb6f6edb9f5df8` as subject, and an `exp` in the future. There is no
@@ -116,7 +117,8 @@ exists on the server (deleted, or disabled by APNs and pruned after 30 days). Ge
   (after the app deselects EventKit copies of accounts signed in inside the app), otherwise
   `false`. Polling installs get meeting-window prechecks and hourly heartbeats (section 6);
   non-polling installs rely on provider webhooks plus two prechecks per alarm.
-- `freshness.activeHours`: `HH:mm` 24-hour local times in `timeZone` (an IANA name). `start` is
+- `freshness.activeHours`: `HH:mm` 24-hour local times in `timeZone` (an IANA name, matched
+  case-insensitively and stored in its canonical spelling). `start` is
   included, `end` excluded, ranges may cross midnight (`22:00`-`06:00`), and `start` may not equal
   `end`. They limit heartbeats only. The app's default is `06:00`-`23:00`.
 
@@ -126,7 +128,9 @@ re-enables the install); `409` if the `installId` exists with a different secret
 
 Rate limit: 20 registration attempts per client network per hour (IPv4 address or IPv6 /64, from
 Cloudflare's `CF-Connecting-IP`). New installs are also capped at 2,000 per hour overall; an
-install that is already registered can always register again.
+install that is already registered can always register again. (A future option is to require
+limited-use App Check tokens with replay protection for registration, which would let the
+overall cap rise.)
 
 ### 3.2 Update: `PUT /v2/installations/{installId}`
 
@@ -234,7 +238,10 @@ satisfy renewals (only the device renewing its subscriptions does) and does not 
 
 Routing: the relay stores, for each subscription, an index entry (`sha256` subscription key ->
 install ID) in the shard chosen by a hash of the subscription key (section 8). A webhook looks the
-subscription up there, then asks the install's shard to verify and record it. Nothing scans.
+subscription up there, then asks the install's shard to verify and record it. Nothing scans. A
+`PUT` (3.5) writes the index entry just before the subscription mapping, so a webhook that finds
+an entry without its mapping removes the entry only when it was last written at least 5 minutes
+ago; a Google `sync` notification racing the channel's own `PUT` cannot orphan it.
 
 Google (`POST <base>/webhooks/google`):
 
@@ -360,10 +367,13 @@ Rules shared by all kinds:
 
 Each install stores `next_wake_at` (the next time anything could be due) and `priority_wake_at`
 (the next precheck or pending change). A shard sets its Durable Object alarm to the earliest
-`next_wake_at` among its installs (or its next retention cleanup). An alarm run sends at most 40
-pushes, prechecks and changes first, with up to 8 APNs requests in flight; if more are due the next
-run starts immediately. So heartbeats and renewals cannot delay the pushes that keep alarms right,
-and each run stays within the Workers subrequest limit.
+`next_wake_at` among its installs (or its next retention cleanup). An alarm run makes at most
+`MAX_SUBREQUESTS_PER_RUN` outbound calls (default 40, within the Workers Free limit of 50
+subrequests per invocation). It reserves 2 for the shared APNs provider token and 2 per push (the
+request and its one retry), and retention may use a quarter for index releases (always at least
+one install), so the default sends up to 19 pushes per run, never more than 200. Prechecks and
+changes go first, with up to 8 APNs requests in flight; if more are due the next run starts
+immediately. So heartbeats and renewals cannot delay the pushes that keep alarms right.
 
 ## 7. Versioning
 
@@ -389,10 +399,16 @@ with `npx wrangler deploy` ([deploying](DEPLOYING.md#ios-relay-cloudflare-worker
 | `ENFORCE_APP_CHECK` | var, `"true"` | Require App Check for registration |
 | `APP_CHECK_PROJECT_NUMBER` | var | Firebase project number for the App Check issuer and audience |
 | `APP_CHECK_APP_IDS` | var | Comma-separated Firebase app IDs accepted as the token subject |
+| `MAX_SUBREQUESTS_PER_RUN` | var, `"40"` | Outbound calls per shard alarm run (section 6). Safe for Workers Free; on Workers Paid (10,000 subrequests) raise it, e.g. to `"400"` |
+| `SHARDS` | Durable Object binding | The 64 `InstallShard` objects |
+| `APNS_TOKEN` | Durable Object binding | One `ApnsTokenAuthority` object holding the shared APNs provider token |
 
 APNs uses token-based authentication: an ES256 JWT (`kid` = key ID, `iss` = team ID, `iat`)
-signed with WebCrypto and reused for 40 minutes per Worker isolate (dropped after a
-`403 ExpiredProviderToken` / `InvalidProviderToken` once it is 20 minutes old). Requests go to
+signed with WebCrypto. One token serves the whole relay, so Apple never sees more than one token
+update per 40 minutes (`TooManyProviderTokenUpdates` cannot occur): the `ApnsTokenAuthority`
+Durable Object signs it, keeps it in its storage, and replaces it when it is 40 minutes old or
+after APNs answers `403 ExpiredProviderToken` / `InvalidProviderToken`, but never within 20 minutes
+of signing. Shards cache it in isolate memory until it is 40 minutes old. Requests go to
 `api.push.apple.com` or `api.sandbox.push.apple.com` by the install's `environment` over the
 Workers `fetch` API (HTTP/2); a request that fails before APNs answers is retried once. `wrangler
 dev` has no HTTP/2, so APNs works only deployed; the tests mock it.
@@ -411,5 +427,10 @@ Retention, run from each shard's alarm: registration counters are deleted when t
 (they are keyed by an unsalted `sha256` of the client network, which is guessable for IPv4 but
 holds only a count); subscription mappings and index entries 7 days after they expire; alarm
 triggers a day after they pass; installs 30 days after APNs disabled them, with their mappings and
-index entries. Deleting an install (3.3) removes everything at once. Logs (Workers Logs) carry
-install IDs, push kinds and APNs status codes, never tokens or secrets.
+index entries. Deleting an install (3.3) removes everything at once.
+
+Logs: Workers Logs keep only the Worker's own JSON lines, which carry install IDs, push kinds,
+APNs status codes and error names, never tokens, secrets, IP addresses or request headers.
+Invocation logs (`observability.logs.invocation_logs: false`) are off, because they would record
+request metadata such as `X-Goog-Resource-URI` (which names the calendar), App Check tokens and
+client IPs.

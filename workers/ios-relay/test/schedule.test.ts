@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_SUBREQUESTS_PER_RUN, PUSH_BATCH_SIZE, pushesPerRun, subrequestBudget } from "../src/shard";
 import {
+  canonicalTimeZone,
   failureBackoffMs,
   isWithinActiveHours,
   nextActiveTime,
@@ -174,5 +176,30 @@ describe("everyone", () => {
     // 2030-11-03 is the end of DST in Los Angeles; 06:00 local is 14:00Z that day.
     const beforeDst = Date.parse("2030-11-03T07:30:00.000Z"); // 00:30 PDT
     expect(new Date(nextActiveTime(beforeDst, hours("06:00", "23:00"))).toISOString()).toBe("2030-11-03T14:00:00.000Z");
+  });
+});
+
+describe("time zones and run budgets", () => {
+  it("canonicalizes time zone spellings and rejects unknown zones", () => {
+    expect(canonicalTimeZone("america/los_angeles")).toBe("America/Los_Angeles");
+    expect(canonicalTimeZone("AMERICA/LOS_ANGELES")).toBe("America/Los_Angeles");
+    expect(canonicalTimeZone("utc")).toBe("UTC");
+    expect(canonicalTimeZone("Mars/Olympus")).toBeNull();
+    expect(canonicalTimeZone("x".repeat(101))).toBeNull();
+    expect(canonicalTimeZone(5)).toBeNull();
+  });
+
+  it("reads MAX_SUBREQUESTS_PER_RUN and sizes push batches from it", () => {
+    expect(subrequestBudget({ MAX_SUBREQUESTS_PER_RUN: "40" })).toBe(40);
+    expect(subrequestBudget({ MAX_SUBREQUESTS_PER_RUN: "400" })).toBe(400);
+    expect(subrequestBudget({ MAX_SUBREQUESTS_PER_RUN: "" })).toBe(DEFAULT_SUBREQUESTS_PER_RUN);
+    expect(subrequestBudget({ MAX_SUBREQUESTS_PER_RUN: "abc" })).toBe(DEFAULT_SUBREQUESTS_PER_RUN);
+    expect(subrequestBudget({ MAX_SUBREQUESTS_PER_RUN: "3" })).toBe(10);
+    // 2 for the provider token, 2 per push (request and retry).
+    expect(pushesPerRun(40)).toBe(19);
+    expect(pushesPerRun(40, 10)).toBe(14);
+    expect(pushesPerRun(400)).toBe(199);
+    expect(pushesPerRun(10_000)).toBe(PUSH_BATCH_SIZE);
+    expect(pushesPerRun(10, 10)).toBe(1);
   });
 });

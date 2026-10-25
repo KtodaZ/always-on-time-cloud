@@ -1,5 +1,6 @@
 // APNs token-based delivery over the Workers fetch API (HTTP/2 to Apple). The provider token is an
-// ES256 JWT signed with WebCrypto and reused for 40 minutes per isolate.
+// ES256 JWT signed with WebCrypto. One token is shared by every shard (see apns-token.ts), so the
+// relay stays well inside Apple's limit on provider token updates.
 
 import type { Provider, PushKind } from "./schedule";
 
@@ -16,8 +17,8 @@ export const SYNC_COLLAPSE_ID = "aot-sync";
 /** APNs keeps only the newest undelivered notification per collapse ID, so a long expiry is free. */
 export const TTL_SECONDS = 24 * 60 * 60;
 // Apple rejects provider tokens older than an hour and throttles refreshes faster than every 20 min.
-const PROVIDER_TOKEN_MAX_AGE_MS = 40 * 60 * 1000;
-const PROVIDER_TOKEN_MIN_AGE_MS = 20 * 60 * 1000;
+export const PROVIDER_TOKEN_MAX_AGE_MS = 40 * 60 * 1000;
+export const PROVIDER_TOKEN_MIN_AGE_MS = 20 * 60 * 1000;
 const PROVIDER_TOKEN_ERRORS = new Set(["ExpiredProviderToken", "InvalidProviderToken"]);
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -77,49 +78,46 @@ function pemToPkcs8(pem: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-interface TokenCacheEntry {
-  fingerprint: string;
-  key: CryptoKey;
-  token: string | null;
-  issuedAtMs: number;
+let signingKeyCache: { fingerprint: string; key: CryptoKey } | null = null;
+
+/** Identifies the configured key, so a rotated key never reuses a token signed by the old one. */
+export function keyFingerprint(config: ApnsConfig): string {
+  return `${config.keyId}:${config.teamId}:${config.keyPem.length}:${config.keyPem.slice(-24)}`;
 }
 
-let tokenCache: TokenCacheEntry | null = null;
-
-async function signingKey(config: ApnsConfig): Promise<TokenCacheEntry> {
-  const fingerprint = `${config.keyId}:${config.teamId}:${config.keyPem.length}:${config.keyPem.slice(-24)}`;
-  if (tokenCache?.fingerprint === fingerprint) return tokenCache;
+async function signingKey(config: ApnsConfig): Promise<CryptoKey> {
+  const fingerprint = keyFingerprint(config);
+  if (signingKeyCache?.fingerprint === fingerprint) return signingKeyCache.key;
   let key: CryptoKey;
   try {
     key = await crypto.subtle.importKey("pkcs8", pemToPkcs8(config.keyPem), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
   } catch {
     throw new ApnsConfigError("APNS_AUTH_KEY_P8 is not a readable EC P-256 private key");
   }
-  tokenCache = { fingerprint, key, token: null, issuedAtMs: 0 };
-  return tokenCache;
+  signingKeyCache = { fingerprint, key };
+  return key;
 }
 
-/** ES256 provider token {alg, kid}.{iss, iat}, cached for 40 minutes. */
-export async function providerToken(config: ApnsConfig, nowMs = Date.now()): Promise<string> {
-  const entry = await signingKey(config);
-  if (entry.token && nowMs - entry.issuedAtMs < PROVIDER_TOKEN_MAX_AGE_MS) return entry.token;
+/** Signs a new ES256 provider token {alg, kid}.{iss, iat}. Callers cache it (apns-token.ts). */
+export async function signProviderToken(config: ApnsConfig, nowMs = Date.now()): Promise<string> {
+  const key = await signingKey(config);
   const header = base64url(JSON.stringify({ alg: "ES256", kid: config.keyId }));
   const claims = base64url(JSON.stringify({ iss: config.teamId, iat: Math.floor(nowMs / 1000) }));
   const input = `${header}.${claims}`;
   // WebCrypto ECDSA signatures are already IEEE P1363 (r || s), the JOSE format.
-  const signature = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, entry.key, new TextEncoder().encode(input)));
-  entry.token = `${input}.${base64url(signature)}`;
-  entry.issuedAtMs = nowMs;
-  return entry.token;
+  const signature = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(input)));
+  return `${input}.${base64url(signature)}`;
 }
 
-function invalidateProviderToken(nowMs: number): void {
-  if (tokenCache && nowMs - tokenCache.issuedAtMs >= PROVIDER_TOKEN_MIN_AGE_MS) tokenCache.token = null;
+/** Where a sender gets the provider token, and reports one APNs rejected as expired or invalid. */
+export interface ProviderTokenSource {
+  get(): Promise<string>;
+  rejected(token: string): Promise<void>;
 }
 
-/** Test hook: forget the cached key and token. */
+/** Test hook: forget the imported signing key. */
 export function resetApnsCache(): void {
-  tokenCache = null;
+  signingKeyCache = null;
 }
 
 export interface PushRequest {
@@ -135,13 +133,14 @@ export interface PushRequest {
  * request that fails before APNs answers is retried once; the shared collapse ID makes a duplicate
  * harmless. Rejects for configuration errors and transport failures.
  */
-export async function sendRelayPush(config: ApnsConfig, request: PushRequest): Promise<ApnsResult> {
+export async function sendRelayPush(config: ApnsConfig, tokens: ProviderTokenSource, request: PushRequest): Promise<ApnsResult> {
   if (!Object.hasOwn(APNS_HOSTS, request.environment)) throw new TypeError("invalid APNs environment");
   if (!/^[0-9a-f]{64,200}$/.test(request.token)) throw new TypeError("invalid APNs token");
   const body = buildPayload(request.kind, request.provider, request.at);
   const url = `${APNS_HOSTS[request.environment]}/3/device/${request.token}`;
+  const providerToken = await tokens.get();
   const headers = {
-    authorization: `bearer ${await providerToken(config)}`,
+    authorization: `bearer ${providerToken}`,
     "content-type": "application/json",
     "apns-push-type": "alert",
     "apns-priority": apnsPriority(request.kind),
@@ -171,6 +170,9 @@ export async function sendRelayPush(config: ApnsConfig, request: PushRequest): P
   } else {
     await response.body?.cancel();
   }
-  if (response.status === 403 && reason && PROVIDER_TOKEN_ERRORS.has(reason)) invalidateProviderToken(Date.now());
+  if (response.status === 403 && reason && PROVIDER_TOKEN_ERRORS.has(reason)) {
+    // Best effort: if the report fails, the token is replaced at its normal age anyway.
+    await tokens.rejected(providerToken).catch(() => undefined);
+  }
   return { status: response.status, ...(reason ? { reason } : {}) };
 }

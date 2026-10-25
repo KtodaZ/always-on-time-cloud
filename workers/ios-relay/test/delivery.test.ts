@@ -2,7 +2,9 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PUSH_BATCH_SIZE } from "../src/shard";
+import { pushesPerRun, subrequestBudget } from "../src/shard";
+
+const PER_RUN = pushesPerRun(subrequestBudget(env));
 import { DAY, FRESHNESS, HOUR, MINUTE, POLLING, harness, sha256Hex, shardFor, subscriptionKey, type Harness } from "./helpers";
 
 afterEach(() => {
@@ -322,25 +324,60 @@ describe("shard alarm", () => {
     expect(alarm === null || alarm === pruneFloor || alarm > h.now() + DAY - 1).toBe(true);
   });
 
-  it(`sends at most ${PUSH_BATCH_SIZE} pushes per run and continues immediately`, async () => {
-    const h = await registered(FRESHNESS);
-    const stub = await h.shard();
-    const total = PUSH_BATCH_SIZE + 5;
-    await runInDurableObject(stub, (_instance, state) => {
-      for (let index = 0; index < total; index += 1) {
+  /** Adds `count` installs to the harness's shard, all with a change due now and its APNs token. */
+  async function bulkInstalls(h: Harness, count: number, prefix = "bulk"): Promise<void> {
+    await runInDurableObject(await h.shard(), (_instance, state) => {
+      for (let index = 0; index < count; index += 1) {
         state.storage.sql.exec(
           `INSERT INTO installs (install_id, secret_hash, apns_token, apns_environment, polling, active_start, active_end, time_zone,
              enabled, created_at, updated_at, pending_change_at, pending_change_provider, next_wake_at, priority_wake_at)
            VALUES (?, 'x', ?, 'development', 0, '06:00', '23:00', 'America/Los_Angeles', 1, ?, ?, ?, 'google', ?, ?)`,
-          `bulk${String(index).padStart(18, "0")}`, h.apnsToken, h.now(), h.now(), h.now(), h.now(), h.now(),
+          `${prefix}${String(index).padStart(18, "0")}`, h.apnsToken, h.now(), h.now(), h.now(), h.now(), h.now(),
         );
       }
     });
     await h.update(); // reschedules the alarm
+  }
+
+  it(`sends at most ${PER_RUN} pushes per run with the default budget and continues immediately`, async () => {
+    expect(PER_RUN).toBe(19);
+    const h = await registered(FRESHNESS);
+    const total = PER_RUN + 5;
+    await bulkInstalls(h, total);
     expect(await h.tick()).toBe(true);
-    expect(h.apns).toHaveLength(PUSH_BATCH_SIZE);
+    expect(h.apns).toHaveLength(PER_RUN);
     expect(await h.alarmAt()).toBeLessThanOrEqual(h.now());
     expect(await h.tick()).toBe(true);
     expect(h.apns).toHaveLength(total);
+  });
+
+  it("keeps a run within MAX_SUBREQUESTS_PER_RUN even when every request is retried", async () => {
+    const h = await registered(FRESHNESS);
+    h.respond = () => new Error("connection reset");
+    await bulkInstalls(h, 30, "retry");
+    expect(await h.tick()).toBe(true);
+    // Each push failed twice (request and retry); the token authority call is not a fetch.
+    expect(h.apns).toHaveLength(2 * PER_RUN);
+    expect(h.apns.length).toBeLessThanOrEqual(subrequestBudget(env));
+  });
+
+  it("uses one APNs provider token across shards", async () => {
+    let first: Harness | null = null;
+    let second: Harness | null = null;
+    for (let attempt = 0; attempt < 20 && !second; attempt += 1) {
+      const candidate = await registered(FRESHNESS);
+      if (!first) first = candidate;
+      else if (await shardFor(`install:${candidate.installId}`) !== await shardFor(`install:${first.installId}`)) second = candidate;
+    }
+    if (!first || !second) throw new Error("no second shard found");
+    await changeNow(first);
+    await changeNow(second);
+    await first.tick();
+    await second.tick();
+    // The newest harness owns the fetch mock and sees both pushes.
+    const auth = second.allApns.map((call) => call.headers.authorization);
+    expect(auth).toHaveLength(2);
+    expect(auth[0]).toMatch(/^bearer ey/);
+    expect(auth[1]).toBe(auth[0]);
   });
 });

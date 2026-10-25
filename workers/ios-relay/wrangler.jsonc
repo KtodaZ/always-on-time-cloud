@@ -6,18 +6,29 @@
   "compatibility_date": "2026-10-15",
   "workers_dev": true,
   "preview_urls": false,
-  "observability": { "enabled": true },
+  // Only the Worker's own log lines (src/util.ts log()) are kept. Invocation logs would record
+  // request headers such as X-Goog-Resource-URI, App Check tokens and client IPs.
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } },
   "durable_objects": {
-    "bindings": [{ "name": "SHARDS", "class_name": "InstallShard" }]
+    "bindings": [
+      { "name": "SHARDS", "class_name": "InstallShard" },
+      { "name": "APNS_TOKEN", "class_name": "ApnsTokenAuthority" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["InstallShard"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["InstallShard"] },
+    { "tag": "v2", "new_sqlite_classes": ["ApnsTokenAuthority"] }
+  ],
   "vars": {
     "APNS_KEY_ID": "98YK9VVN67",
     "APNS_TEAM_ID": "LRTR5A87Y6",
     "APNS_TOPIC": "com.zombitstudios.alwaysontime",
     "ENFORCE_APP_CHECK": "true",
     "APP_CHECK_PROJECT_NUMBER": "1054144143721",
-    "APP_CHECK_APP_IDS": "1:1054144143721:ios:20196992cb6f6edb9f5df8"
+    "APP_CHECK_APP_IDS": "1:1054144143721:ios:20196992cb6f6edb9f5df8",
+    // Outbound calls one shard alarm run may make (APNs requests, token and index calls). 40 fits
+    // the Workers Free limit of 50 subrequests per invocation; on Workers Paid raise it (e.g. 400).
+    "MAX_SUBREQUESTS_PER_RUN": "40"
   }
   // Secret (wrangler secret put): APNS_AUTH_KEY_P8
 }

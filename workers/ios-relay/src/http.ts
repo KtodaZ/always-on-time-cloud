@@ -1,6 +1,6 @@
 // HTTP helpers and request validation for the device API and webhooks.
 
-import { isValidTimeZone, type Freshness, type Provider } from "./schedule";
+import { canonicalTimeZone, type Freshness, type Provider } from "./schedule";
 import type { ApnsEnvironment } from "./apns";
 
 export const MAX_API_BODY_BYTES = 32 * 1024;
@@ -100,8 +100,9 @@ export function validateFreshness(value: unknown): Freshness {
   if (typeof start !== "string" || typeof end !== "string" || !CLOCK.test(start) || !CLOCK.test(end) || start === end) {
     throw new HttpError(400, "freshness.activeHours needs distinct HH:mm start and end");
   }
-  if (!isValidTimeZone(value.timeZone)) throw new HttpError(400, "freshness.timeZone must be an IANA time zone");
-  return { polling: value.polling, activeHours: { start, end }, timeZone: value.timeZone };
+  const timeZone = canonicalTimeZone(value.timeZone);
+  if (timeZone === null) throw new HttpError(400, "freshness.timeZone must be an IANA time zone");
+  return { polling: value.polling, activeHours: { start, end }, timeZone };
 }
 
 export interface RegistrationFields {

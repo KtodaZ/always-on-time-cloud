@@ -79,24 +79,30 @@ export interface PushPlan {
   renewalKeys: string[];
 }
 
+// Keyed by canonical zone names only (validation stores the canonical name), so the cache is bounded
+// by the IANA zone list however callers spell a zone.
 const formatterCache = new Map<string, Intl.DateTimeFormat>();
 
+function newFormatter(timeZone: string): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat("en-US", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+}
+
 function localFormatter(timeZone: string): Intl.DateTimeFormat {
-  let formatter = formatterCache.get(timeZone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-US", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-    formatterCache.set(timeZone, formatter);
-  }
+  const cached = formatterCache.get(timeZone);
+  if (cached) return cached;
+  const formatter = newFormatter(timeZone);
+  const canonical = formatter.resolvedOptions().timeZone;
+  if (canonical === timeZone) formatterCache.set(canonical, formatter);
   return formatter;
 }
 
-export function isValidTimeZone(timeZone: unknown): timeZone is string {
-  if (typeof timeZone !== "string" || timeZone.length === 0 || timeZone.length > 100) return false;
+/** The canonical IANA name for a zone (e.g. "america/new_york" -> "America/New_York"), or null. */
+export function canonicalTimeZone(timeZone: unknown): string | null {
+  if (typeof timeZone !== "string" || timeZone.length === 0 || timeZone.length > 100) return null;
   try {
-    localFormatter(timeZone);
-    return true;
+    return newFormatter(timeZone).resolvedOptions().timeZone;
   } catch {
-    return false;
+    return null;
   }
 }
 

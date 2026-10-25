@@ -76,6 +76,43 @@ describe("registration", () => {
     expect(h.jwksFetches).toBeLessThanOrEqual(2);
   });
 
+  it("fetches the App Check keys at most once a minute while Google is failing", async () => {
+    const h = await harness();
+    expect((await h.register()).status).toBe(201);
+    expect(h.jwksFetches).toBe(1);
+    // Keys are stale and Google is down: one attempt, then the stale keys serve without retrying.
+    h.advance(7 * 60 * MINUTE);
+    h.jwksStatus = 503;
+    expect((await h.register()).status).toBe(200);
+    expect(h.jwksFetches).toBe(2);
+    h.advance(30 * 1000);
+    expect((await h.register()).status).toBe(200);
+    expect(h.jwksFetches).toBe(2);
+    h.advance(31 * 1000);
+    h.jwksStatus = 200;
+    expect((await h.register()).status).toBe(200);
+    expect(h.jwksFetches).toBe(3);
+
+    // With no keys at all, a failed fetch is not retried for a minute either.
+    const cold = await harness();
+    cold.jwksStatus = 503;
+    expect((await cold.register()).status).toBe(401);
+    expect((await cold.register()).status).toBe(401);
+    expect(cold.jwksFetches).toBe(1);
+    cold.advance(MINUTE);
+    cold.jwksStatus = 200;
+    expect((await cold.register()).status).toBe(201);
+    expect(cold.jwksFetches).toBe(2);
+  });
+
+  it("stores time zones in their canonical spelling", async () => {
+    const h = await harness();
+    expect((await h.register({ freshness: { ...FRESHNESS, timeZone: "america/los_angeles" } })).status).toBe(201);
+    expect((await h.row())?.time_zone).toBe("America/Los_Angeles");
+    expect((await h.update({ freshness: { ...FRESHNESS, timeZone: "EUROPE/LONDON" } })).status).toBe(204);
+    expect((await h.row())?.time_zone).toBe("Europe/London");
+  });
+
   it("validates every field and rejects unknown ones", async () => {
     const h = await harness();
     const cases: Array<Record<string, unknown>> = [

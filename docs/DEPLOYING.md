@@ -138,6 +138,10 @@ firebase functions:secrets:access APNS_AUTH_KEY_P8 --project always-on-time-zomb
   | npx wrangler secret put APNS_AUTH_KEY_P8
 ```
 
+`MAX_SUBREQUESTS_PER_RUN` (default `"40"`) keeps each shard alarm run within the Workers Free
+limit of 50 subrequests. If the account is on Workers Paid, raise it in `wrangler.jsonc` (for
+example to `"400"`) and redeploy, so a busy shard sends more pushes per run.
+
 Durable Object classes change only through the `migrations` list in `wrangler.jsonc`, and the
 shard count in [`src/util.ts`](../workers/ios-relay/src/util.ts) cannot change without migrating
 data. `wrangler dev` cannot reach APNs (no HTTP/2), so push delivery is tested with mocks and

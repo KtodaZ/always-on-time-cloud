@@ -22,10 +22,11 @@ import {
   validateUpdate,
   type ApiRoute,
 } from "./http";
-import { InstallShard, MAX_SUBSCRIPTIONS_PER_INSTALL, releaseIndexEntries, type DeviceOp, type GraphItem } from "./shard";
+import { INDEX_RELEASE_GRACE_MS, InstallShard, MAX_SUBSCRIPTIONS_PER_INSTALL, releaseIndexEntries, type DeviceOp, type GraphItem } from "./shard";
 import { alarmKey, errorName, log, sha256Hex, shardFor, subscriptionKey } from "./util";
 
 export { InstallShard };
+export { ApnsTokenAuthority } from "./apns-token";
 
 export const REGISTRATION_RATE = Object.freeze({ limit: 20, windowMs: 60 * 60 * 1000 });
 /** New installs per hour from all networks together; installs re-registering don't count. */
@@ -202,7 +203,7 @@ async function googleWebhook(request: Request, env: Env, ctx: ExecutionContext):
       resourceIdHash: await sha256Hex(request.headers.get("x-goog-resource-id") ?? ""),
       state: request.headers.get("x-goog-resource-state") ?? "",
     });
-    if (outcome === "missing") ctx.waitUntil(index.indexRelease([{ key, installId }]));
+    if (outcome === "missing") ctx.waitUntil(index.indexRelease([{ key, installId }], INDEX_RELEASE_GRACE_MS));
     if (outcome === "forbidden") {
       log("warn", "Google webhook channel token mismatch");
       return json(403, { error: "invalid channel token" });
@@ -285,7 +286,7 @@ async function microsoftWebhook(request: Request, env: Env, ctx: ExecutionContex
     }));
     if (mismatches > 0) log("warn", "Graph notifications with a mismatched clientState were ignored", { count: mismatches });
     if (late > 0) log("info", "Graph lifecycle events after the recorded expiry were routed", { count: late });
-    if (missing.length > 0) ctx.waitUntil(releaseIndexEntries(env, missing));
+    if (missing.length > 0) ctx.waitUntil(releaseIndexEntries(env, missing, INDEX_RELEASE_GRACE_MS));
     // Graph wants an answer within about 3 seconds: pushes go out from the shard alarms.
     return json(202);
   } catch (error) {

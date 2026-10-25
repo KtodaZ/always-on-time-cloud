@@ -1,7 +1,25 @@
 import { env, exports } from "cloudflare:workers";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CLIENT_STATE, DAY, MINUTE, harness, shardFor, subscriptionKey, tickShard, type Harness } from "./helpers";
+import worker from "../src/index";
+import { INDEX_RELEASE_GRACE_MS } from "../src/shard";
+import { CHANNEL_TOKEN, CLIENT_STATE, DAY, MINUTE, RESOURCE_ID, harness, sha256Hex, shardFor, subscriptionKey, tickShard, type Harness } from "./helpers";
+
+/** Calls the Worker directly and waits for its waitUntil work (index releases) to finish. */
+async function fetchAndSettle(url: string, init: RequestInit): Promise<Response> {
+  const ctx = createExecutionContext();
+  const response = await worker.fetch(new Request(url, init), env, ctx);
+  await waitOnExecutionContext(ctx);
+  return response;
+}
+
+const googleHeaders = (channelId: string, state = "exists") => ({
+  "x-goog-channel-id": channelId,
+  "x-goog-channel-token": CHANNEL_TOKEN,
+  "x-goog-resource-id": RESOURCE_ID,
+  "x-goog-resource-state": state,
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -91,13 +109,44 @@ describe("Google webhook", () => {
     expect(h.apns).toHaveLength(0);
   });
 
-  it("drops an index entry whose install no longer has the subscription", async () => {
+  it("drops an index entry whose install no longer has the subscription, once it is 5 minutes old", async () => {
     const { h, channelId } = await withGoogle();
     const key = await subscriptionKey("google", channelId);
-    await h.sql(await h.shard(), "DELETE FROM subscriptions WHERE sub_key = ?", key);
-    expect((await h.google(channelId)).status).toBe(204);
     const index = env.SHARDS.getByName(await shardFor(`subscription:${key}`));
-    await vi.waitFor(async () => expect(await h.sql(index, "SELECT * FROM sub_index WHERE sub_key = ?", key)).toEqual([]));
+    await h.sql(await h.shard(), "DELETE FROM subscriptions WHERE sub_key = ?", key);
+    h.advance(INDEX_RELEASE_GRACE_MS - MINUTE);
+    expect((await fetchAndSettle("https://relay.test/webhooks/google", { method: "POST", headers: googleHeaders(channelId) })).status).toBe(204);
+    expect(await h.sql(index, "SELECT install_id FROM sub_index WHERE sub_key = ?", key)).toEqual([{ install_id: h.installId }]);
+    h.advance(MINUTE);
+    expect((await fetchAndSettle("https://relay.test/webhooks/google", { method: "POST", headers: googleHeaders(channelId) })).status).toBe(204);
+    expect(await h.sql(index, "SELECT * FROM sub_index WHERE sub_key = ?", key)).toEqual([]);
+  });
+
+  it("keeps a new channel's index entry when its sync notification races the PUT", async () => {
+    const h = await harness();
+    expect((await h.register()).status).toBe(201);
+    const channelId = `chan-${crypto.randomUUID()}`;
+    const key = await subscriptionKey("google", channelId);
+    const index = env.SHARDS.getByName(await shardFor(`subscription:${key}`));
+    const expiresAt = h.now() + 7 * DAY;
+    // The PUT's first step claims the index entry...
+    expect(await index.indexClaim(key, h.installId, expiresAt)).toEqual({ status: "ok", created: true });
+    // ...then Google's sync notification for the new channel arrives before the mapping exists...
+    expect((await fetchAndSettle("https://relay.test/webhooks/google", { method: "POST", headers: googleHeaders(channelId, "sync") })).status).toBe(204);
+    // ...and only then does the PUT write the mapping.
+    const stored = await (await h.shard()).upsertSubscription(h.installId, key, {
+      provider: "google",
+      resourceIdHash: await sha256Hex(RESOURCE_ID),
+      verificationHash: await sha256Hex(CHANNEL_TOKEN),
+      expiresAt,
+    });
+    expect(stored.status).toBe("ok");
+    expect(await h.sql(index, "SELECT install_id FROM sub_index WHERE sub_key = ?", key)).toEqual([{ install_id: h.installId }]);
+    expect(await h.sql(await h.shard(), "SELECT sub_key FROM subscriptions WHERE sub_key = ?", key)).toEqual([{ sub_key: key }]);
+    // A later change on the channel still pushes.
+    expect((await h.google(channelId)).status).toBe(204);
+    await h.tick();
+    expect(h.kinds()).toEqual(["change"]);
   });
 });
 
@@ -179,6 +228,60 @@ describe("Microsoft Graph webhook", () => {
     await first.h.tick(second.h.installId);
     // The newest harness owns the fetch mock.
     expect(second.h.allApns.filter((call) => call.url.endsWith(first.h.apnsToken) || call.url.endsWith(second.h.apnsToken))).toHaveLength(2);
+  });
+
+  it("keeps a new subscription's index entry when a notification races the PUT", async () => {
+    const h = await harness();
+    expect((await h.register()).status).toBe(201);
+    const subscriptionId = `graph-${crypto.randomUUID()}`;
+    const key = await subscriptionKey("microsoft", subscriptionId);
+    const index = env.SHARDS.getByName(await shardFor(`subscription:${key}`));
+    await index.indexClaim(key, h.installId, h.now() + DAY);
+    const response = await fetchAndSettle("https://relay.test/webhooks/microsoft", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: [graphItem(subscriptionId)] }),
+    });
+    expect(response.status).toBe(202);
+    expect(await h.sql(index, "SELECT install_id FROM sub_index WHERE sub_key = ?", key)).toEqual([{ install_id: h.installId }]);
+  });
+
+  it("prunes disabled installs within the run budget, continuing in the next run", async () => {
+    const h = await harness();
+    expect((await h.register()).status).toBe(201);
+    const shard = await h.shard();
+    const owners = ["prunedA00000000000000", "prunedB00000000000000"];
+    const keys = new Map<string, string[]>();
+    for (const owner of owners) {
+      const ownerKeys = await Promise.all(Array.from({ length: 16 }, () => subscriptionKey("microsoft", crypto.randomUUID())));
+      keys.set(owner, ownerKeys);
+      await h.sql(shard, `INSERT INTO installs (install_id, secret_hash, apns_token, apns_environment, polling, active_start, active_end,
+          time_zone, enabled, disabled_at, created_at, updated_at) VALUES (?, 'x', ?, 'development', 0, '06:00', '23:00', 'UTC', 0, ?, 0, 0)`,
+        owner, h.apnsToken, h.now() - 31 * DAY);
+      for (const key of ownerKeys) {
+        await h.sql(shard, `INSERT INTO subscriptions (sub_key, install_id, provider, verification_hash, expires_at, created_at, updated_at)
+            VALUES (?, ?, 'microsoft', 'x', ?, 0, 0)`, key, owner, h.now() + DAY);
+        await env.SHARDS.getByName(await shardFor(`subscription:${key}`)).indexClaim(key, owner, h.now() + DAY);
+      }
+    }
+    await h.update(); // reschedules the alarm
+    const remaining = async () => (await h.sql<{ install_id: string }>(shard, "SELECT install_id FROM installs WHERE install_id IN (?, ?)", ...owners)).map((row) => row.install_id);
+    const indexed = async (owner: string) => {
+      let count = 0;
+      for (const key of keys.get(owner) ?? []) {
+        count += (await h.sql(env.SHARDS.getByName(await shardFor(`subscription:${key}`)), "SELECT 1 FROM sub_index WHERE sub_key = ?", key)).length;
+      }
+      return count;
+    };
+    // 16 keys name more than 10 index shards (a quarter of the 40-call budget): one install per run.
+    expect(await h.tick()).toBe(true);
+    expect(await remaining()).toEqual([owners[1]]);
+    expect(await indexed(owners[0])).toBe(0);
+    expect(await indexed(owners[1])).toBe(16);
+    expect(await h.alarmAt()).toBeLessThanOrEqual(h.now());
+    expect(await h.tick()).toBe(true);
+    expect(await remaining()).toEqual([]);
+    expect(await indexed(owners[1])).toBe(0);
   });
 
   it("keeps expired mappings for 7 days, then prunes them and their index entries", async () => {
