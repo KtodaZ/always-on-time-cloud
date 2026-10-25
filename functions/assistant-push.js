@@ -7,7 +7,7 @@
 const { MAX_DEVICES, readDevices, refs } = require("./assistant-data");
 const { logEvent } = require("./assistant-log");
 const { cleanText } = require("./assistant-snapshot");
-const { ApnsConfigError, MAX_PAYLOAD_BYTES, PAYLOAD_VERSION, SYNC_COLLAPSE_ID } = require("./ios-push-apns");
+const { ApnsConfigError, MAX_PAYLOAD_BYTES, PAYLOAD_VERSION, SYNC_COLLAPSE_ID } = require("./apns-transport");
 
 const TTL_MS = { sync: 10 * 60 * 1000, publish: 2 * 60 * 1000, ping: 2 * 60 * 1000, state: 60 * 60 * 1000 };
 // Tokens FCM will never accept again; their device documents are removed.
@@ -15,8 +15,8 @@ const PERMANENT_ERRORS = new Set([
   "messaging/registration-token-not-registered",
   "messaging/invalid-registration-token",
 ]);
-// APNs answers for a token that will never work again: status 410, or 400 BadDeviceToken, as for
-// the relay. DeviceTokenNotForTopic is not one: a wrong APNS_TOPIC would remove every iPhone.
+// APNs answers for a token that will never work again: status 410, or 400 BadDeviceToken, as the
+// iOS relay treats them. DeviceTokenNotForTopic is not one: a wrong APNS_TOPIC would remove every iPhone.
 const PERMANENT_APNS_REASONS = new Set(["BadDeviceToken"]);
 const APNS_TOKEN = /^[0-9a-f]{64,200}$/;
 const APNS_ENVIRONMENTS = new Set(["development", "production"]);

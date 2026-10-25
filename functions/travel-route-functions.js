@@ -5,7 +5,7 @@ const { logger } = require("firebase-functions");
 const { defineBoolean, defineSecret } = require("firebase-functions/params");
 const { HttpsError, onCall } = require("firebase-functions/v2/https");
 
-const { clientNetworkKey } = require("./ios-push-service");
+const { clientNetworkKey } = require("./client-network");
 const { RouteRequestError, routeTrip } = require("./travel-route");
 const { createRouteMetrics } = require("./travel-route-usage");
 

@@ -6,18 +6,15 @@ const http2 = require("node:http2");
 const test = require("node:test");
 
 const {
-  APNS_HOSTS,
   ApnsConfigError,
+  PAYLOAD_VERSION,
   ProviderTokenCache,
-  buildApnsRequest,
-  buildPayload,
-  createApnsSender,
+  SYNC_COLLAPSE_ID,
   createApnsTransport,
   makeProviderToken,
   validateApnsConfig,
-} = require("../ios-push-apns");
+} = require("../apns-transport");
 
-const INSTALL_ID = "AbCdEfGhIjKlMnOpQrStUv";
 const INSTALL = { apnsToken: "ab".repeat(32), apnsEnvironment: "development" };
 const AT = Date.parse("2026-10-07T16:00:00.000Z");
 
@@ -76,47 +73,9 @@ async function startFakeApns(respond) {
   };
 }
 
-test("payload v1 is passive, mutable, content free, and validates kind and provider", () => {
-  assert.deepEqual(buildPayload({ kind: "change", provider: "google", at: AT }), {
-    aps: {
-      alert: { title: "Keeping your alarms up to date", body: "Checking for calendar updates." },
-      "mutable-content": 1,
-      "interruption-level": "passive",
-    },
-    aot: { v: 1, kind: "change", provider: "google", at: AT },
-  });
-  for (const kind of ["heartbeat", "precheck", "renew"]) {
-    assert.deepEqual(buildPayload({ kind, at: AT }).aot, { v: 1, kind, at: AT });
-  }
-  assert.throws(() => buildPayload({ kind: "sync", at: AT }), TypeError);
-  assert.throws(() => buildPayload({ kind: "change", provider: "icloud", at: AT }), TypeError);
-  assert.throws(() => buildPayload({ kind: "change", at: 1.5 }), TypeError);
-});
-
-test("APNs request headers: alert type, the shared aot-sync collapse id, priority by kind", () => {
-  const priorities = {};
-  for (const kind of ["change", "heartbeat", "precheck", "renew"]) {
-    const request = buildApnsRequest({ installId: INSTALL_ID, install: INSTALL, kind, at: AT, topic: CONFIG.topic });
-    priorities[kind] = request.headers["apns-priority"];
-    assert.equal(request.origin, APNS_HOSTS.development);
-    assert.equal(request.path, `/3/device/${INSTALL.apnsToken}`);
-    assert.equal(request.headers["apns-push-type"], "alert");
-    assert.equal(request.headers["apns-collapse-id"], "aot-sync");
-    assert.equal(request.headers["apns-topic"], CONFIG.topic);
-    assert.equal(request.headers["apns-expiration"], String(AT / 1000 + 86400));
-    assert.match(request.headers["apns-id"], /^[0-9a-f-]{36}$/);
-  }
-  assert.deepEqual(priorities, { change: "10", heartbeat: "5", precheck: "10", renew: "10" });
-  const production = buildApnsRequest({
-    installId: INSTALL_ID,
-    install: { ...INSTALL, apnsEnvironment: "production" },
-    kind: "heartbeat",
-    at: AT,
-    topic: CONFIG.topic,
-  });
-  assert.equal(production.origin, "https://api.push.apple.com");
-  assert.throws(() => buildApnsRequest({ installId: "short", install: INSTALL, kind: "change", at: AT, topic: "a.b" }), TypeError);
-  assert.throws(() => buildApnsRequest({ installId: INSTALL_ID, install: { ...INSTALL, apnsToken: "XYZ" }, kind: "change", at: AT, topic: "a.b" }), TypeError);
+test("the shared payload version and collapse ID match the iOS relay protocol", () => {
+  assert.equal(PAYLOAD_VERSION, 1);
+  assert.equal(SYNC_COLLAPSE_ID, "aot-sync");
 });
 
 test("ES256 provider token has the APNs header and claims and verifies with the public key", () => {
@@ -164,14 +123,14 @@ test("APNs config rejects missing or malformed credentials without echoing them"
   }
 });
 
-test("HTTP/2 sender posts the payload with a bearer JWT and reuses one connection", async (t) => {
+test("HTTP/2 transport posts the payload with a bearer JWT and reuses one connection", async (t) => {
   const apns = await startFakeApns(() => ({ status: 200 }));
   t.after(apns.close);
-  const send = createApnsSender({ ...CONFIG, connect: apns.connect, now: () => AT });
+  const send = createSender({ ...CONFIG, connect: apns.connect, now: () => AT });
   t.after(() => send.close());
 
-  const first = await send({ installId: INSTALL_ID, install: INSTALL, kind: "precheck", at: AT });
-  const second = await send({ installId: INSTALL_ID, install: INSTALL, kind: "heartbeat", at: AT });
+  const first = await send({ install: INSTALL });
+  const second = await send({ install: INSTALL, priority: "5" });
   assert.equal(first.status, 200);
   assert.equal(second.status, 200);
   assert.equal(apns.sessions.size, 1, "both pushes share one HTTP/2 connection");
@@ -183,12 +142,12 @@ test("HTTP/2 sender posts the payload with a bearer JWT and reuses one connectio
   assert.equal(request.headers["apns-priority"], "10");
   assert.equal(apns.requests[1].headers["apns-priority"], "5");
   assert.equal(request.headers["apns-collapse-id"], "aot-sync");
-  assert.deepEqual(request.body.aot, { v: 1, kind: "precheck", at: AT });
+  assert.deepEqual(request.body.aot, { v: 1, kind: "assistant", at: AT });
   const jwt = decodeJwt(request.headers.authorization.replace(/^bearer /, ""));
   assert.deepEqual(jwt.claims, { iss: CONFIG.teamId, iat: AT / 1000 });
 });
 
-test("HTTP/2 sender returns APNs rejections and refreshes the token after ExpiredProviderToken", async (t) => {
+test("HTTP/2 transport returns APNs rejections and refreshes the token after ExpiredProviderToken", async (t) => {
   let clock = AT;
   const apns = await startFakeApns((_request, count) => (
     count === 1 ? { status: 410, reason: "Unregistered" }
@@ -196,27 +155,27 @@ test("HTTP/2 sender returns APNs rejections and refreshes the token after Expire
         : { status: 200 }
   ));
   t.after(apns.close);
-  const send = createApnsSender({ ...CONFIG, connect: apns.connect, now: () => clock });
+  const send = createSender({ ...CONFIG, connect: apns.connect, now: () => clock });
   t.after(() => send.close());
 
   assert.deepEqual(
-    pick(await send({ installId: INSTALL_ID, install: INSTALL, kind: "change", at: AT })),
+    pick(await send({ install: INSTALL })),
     { status: 410, reason: "Unregistered" },
   );
   clock += 25 * 60 * 1000;
-  assert.equal((await send({ installId: INSTALL_ID, install: INSTALL, kind: "change", at: AT })).status, 403);
-  await send({ installId: INSTALL_ID, install: INSTALL, kind: "change", at: AT });
+  assert.equal((await send({ install: INSTALL })).status, 403);
+  await send({ install: INSTALL });
   const tokens = apns.requests.map((request) => request.headers.authorization);
   assert.equal(tokens[0], tokens[1]);
   assert.notEqual(tokens[2], tokens[1], "a rejected provider token is replaced");
 });
 
-test("HTTP/2 sender retries once on a fresh connection when the connection drops", async (t) => {
+test("HTTP/2 transport retries once on a fresh connection when the connection drops", async (t) => {
   const apns = await startFakeApns((_request, count) => (count === 1 ? { close: true } : { status: 200 }));
   t.after(apns.close);
-  const send = createApnsSender({ ...CONFIG, connect: apns.connect, now: () => AT });
+  const send = createSender({ ...CONFIG, connect: apns.connect, now: () => AT });
   t.after(() => send.close());
-  const result = await send({ installId: INSTALL_ID, install: INSTALL, kind: "change", at: AT });
+  const result = await send({ install: INSTALL });
   assert.equal(result.status, 200);
   assert.equal(apns.requests.length, 2);
 });
@@ -224,20 +183,20 @@ test("HTTP/2 sender retries once on a fresh connection when the connection drops
 test("a reset stream is retried on the same connection instead of tearing it down", async (t) => {
   const apns = await startFakeApns((_request, count) => (count === 1 ? { reset: true } : { status: 200 }));
   t.after(apns.close);
-  const send = createApnsSender({ ...CONFIG, connect: apns.connect, now: () => AT });
+  const send = createSender({ ...CONFIG, connect: apns.connect, now: () => AT });
   t.after(() => send.close());
-  const result = await send({ installId: INSTALL_ID, install: INSTALL, kind: "change", at: AT });
+  const result = await send({ install: INSTALL });
   assert.equal(result.status, 200);
   assert.equal(apns.requests.length, 2);
   assert.equal(apns.sessions.size, 1);
 });
 
-test("HTTP/2 sender rejects after the retry also fails", async (t) => {
+test("HTTP/2 transport rejects after the retry also fails", async (t) => {
   const apns = await startFakeApns(() => ({ close: true }));
   t.after(apns.close);
-  const send = createApnsSender({ ...CONFIG, connect: apns.connect, now: () => AT });
+  const send = createSender({ ...CONFIG, connect: apns.connect, now: () => AT });
   t.after(() => send.close());
-  await assert.rejects(send({ installId: INSTALL_ID, install: INSTALL, kind: "change", at: AT }));
+  await assert.rejects(send({ install: INSTALL }));
   assert.equal(apns.requests.length, 2);
 });
 
@@ -267,19 +226,18 @@ test("the transport sends any alert push, adding the topic and an apns-id, and v
   assert.equal(apns.requests.length, 1, "invalid input never reaches APNs");
 });
 
-test("the relay sender can share a transport and sends exactly what buildApnsRequest builds", async () => {
-  const calls = [];
-  const transport = { topic: CONFIG.topic, send: async (request) => { calls.push(request); return { status: 200 }; }, close() {} };
-  const send = createApnsSender({ transport });
-  assert.equal((await send({ installId: INSTALL_ID, install: INSTALL, kind: "renew", at: AT })).status, 200);
-  const [call] = calls;
-  assert.equal(call.environment, "development");
-  assert.equal(call.token, INSTALL.apnsToken);
-  const expected = buildApnsRequest({ installId: INSTALL_ID, install: INSTALL, kind: "renew", at: AT, topic: CONFIG.topic });
-  assert.deepEqual(Object.keys(call.headers), Object.keys(expected.headers));
-  assert.deepEqual({ ...call.headers, "apns-id": null }, { ...expected.headers, "apns-id": null });
-  assert.equal(call.body, expected.body);
-});
+/** A sender over the transport that posts a minimal alert push of the given priority. */
+function createSender(options) {
+  const transport = createApnsTransport(options);
+  const send = ({ install, priority = "10" }) => transport.send({
+    environment: install.apnsEnvironment,
+    token: install.apnsToken,
+    headers: { "apns-push-type": "alert", "apns-priority": priority, "apns-collapse-id": SYNC_COLLAPSE_ID, "apns-expiration": "0" },
+    body: JSON.stringify({ aps: { alert: { title: "t", body: "b" }, "mutable-content": 1 }, aot: { v: 1, kind: "assistant", at: AT } }),
+  });
+  send.close = () => transport.close();
+  return send;
+}
 
 function pick({ status, reason }) {
   return { status, reason };

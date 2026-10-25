@@ -30,7 +30,7 @@ Secrets stay in Secret Manager and are bound to functions at deploy time:
 | --- | --- |
 | `FEEDBACK_DISCORD_WEBHOOK_URL` | `publishFeedbackNotification`, `sendAssistantUsageSummary` |
 | `TOMTOM_API_KEY`, `TRAVEL_ROUTE_API_KEY` | `calculateTravelRoute` |
-| `APNS_AUTH_KEY_P8` | iOS relay push functions, `assistantMcp`, `undoAssistantChange` |
+| `APNS_AUTH_KEY_P8` | `assistantMcp`, `undoAssistantChange` (the iOS relay Worker keeps its own copy, see below) |
 
 A function with a new kind of trigger can need a role granted to a Google service agent first: the
 first Storage trigger needs Cloud Storage's agent (`service-<project number>@gs-project-accounts`)
@@ -41,7 +41,11 @@ re-runs the deploy.
 
 Non-secret params are in [`functions/.env.always-on-time-zombit-2026`](../functions/.env.always-on-time-zombit-2026).
 The deploy does not pass `--force`, so if the source no longer exports a live function the deploy
-stops instead of deleting it. The Firebase CLI version is pinned in the root `package-lock.json`.
+stops instead of deleting it. To remove functions on purpose, name them in the run's
+**delete_functions** input (comma-separated): after the dry run, the deploy job deletes exactly
+those, refusing any the commit still exports, and then deploys. Deleting a scheduled function also
+deletes its Cloud Scheduler job. Because the deploy account does this through CI, Verify live
+treats it as part of the deploy; deleting functions or scheduler jobs by hand would fail it. The Firebase CLI version is pinned in the root `package-lock.json`.
 
 ## Signing what was deployed
 
@@ -110,6 +114,42 @@ pool and providers, their IAM bindings, the gcf-sources bucket read access, and 
 machine; the first signed deploy replaced every function, rules file and hosting file. The
 maintainer also enabled the Cloud Billing API during that deploy, because the Firebase CLI reads the
 project's billing plan; that change is listed in the Verify report.
+
+## iOS relay (Cloudflare Worker)
+
+The iOS calendar refresh relay ([protocol](IOS_PUSH_PROTOCOL.md)) is not a Firebase function. It
+is the Cloudflare Worker `aot-ios-relay` with Durable Objects, in
+[`workers/ios-relay/`](../workers/ios-relay/), on the maintainer's Cloudflare account at
+`https://aot-ios-relay.kylemail2003.workers.dev`. There is no CI token for Cloudflare yet, so it
+is deployed by hand from the maintainer's machine:
+
+```sh
+cd workers/ios-relay
+npm ci && npm run typecheck && npm test
+npx wrangler deploy
+```
+
+Non-secret settings are `vars` in [`wrangler.jsonc`](../workers/ios-relay/wrangler.jsonc). The one
+secret, `APNS_AUTH_KEY_P8`, is the same APNs key the Firebase functions use, copied without
+printing it:
+
+```sh
+firebase functions:secrets:access APNS_AUTH_KEY_P8 --project always-on-time-zombit-2026 \
+  | npx wrangler secret put APNS_AUTH_KEY_P8
+```
+
+`MAX_SUBREQUESTS_PER_RUN` (default `"40"`) keeps each shard alarm run within the Workers Free
+limit of 50 subrequests. If the account is on Workers Paid, raise it in `wrangler.jsonc` (for
+example to `"400"`) and redeploy, so a busy shard sends more pushes per run.
+
+Durable Object classes change only through the `migrations` list in `wrangler.jsonc`, and the
+shard count in [`src/util.ts`](../workers/ios-relay/src/util.ts) cannot change without migrating
+data. `wrangler dev` cannot reach APNs (no HTTP/2), so push delivery is tested with mocks and
+proven only against a deployed Worker.
+
+The Deploy and Verify live workflows above do not cover the Worker: it carries no signature, and
+the audit log they read is Google Cloud's, not Cloudflare's. Cloudflare's dashboard lists its
+deployments and versions.
 
 ## Hosting domains
 

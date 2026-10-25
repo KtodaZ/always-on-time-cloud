@@ -13,6 +13,10 @@ on:
         description: "Validate and show what would change without deploying"
         type: boolean
         default: false
+      delete_functions:
+        description: "Live functions to delete first, comma-separated (only ones this commit no longer exports)"
+        default: ""
+        required: false
 
 permissions: {}
 
@@ -103,6 +107,28 @@ jobs:
               -e 's/.*`\(gcloud projects add-iam-policy-binding[^`]*\)`.*/\1/p' preflight.log
             exit 1
           fi
+      # Deploys never pass --force, so removing a function from the source needs this explicit,
+      # named deletion. It runs as the deploy account through CI, so Verify live accepts it, and it
+      # refuses any function the source still exports. Deleting a scheduled function also deletes
+      # its Cloud Scheduler job.
+      - name: Delete removed functions
+        if: ${{ !inputs.dry_run && inputs.delete_functions != '' }}
+        env:
+          DELETE_FUNCTIONS: ${{ inputs.delete_functions }}
+        run: |
+          names="$(printf '%s' "$DELETE_FUNCTIONS" | tr ',' ' ')"
+          for name in $names; do
+            if ! printf '%s' "$name" | grep -Eq '^[A-Za-z][A-Za-z0-9]{0,62}$'; then
+              echo "::error::Not a function name: $name"
+              exit 1
+            fi
+          done
+          node -e '
+            const exported = Object.keys(require("./functions"));
+            const kept = process.argv.slice(1).filter((name) => exported.includes(name));
+            if (kept.length) { console.error(`::error::Still exported by this commit: ${kept.join(", ")}`); process.exit(1); }
+          ' $names
+          npx --no-install firebase functions:delete $names --region us-central1 --project always-on-time-zombit-2026 --force --non-interactive
       # verify-live reads this name to find deploys; a dry run keeps the suffix though the step is skipped.
       - name: Deploy ${{ inputs.only }} at ${{ github.sha }}${{ inputs.dry_run && ' (dry run)' || '' }}
         if: ${{ !inputs.dry_run }}
