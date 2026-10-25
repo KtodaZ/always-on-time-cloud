@@ -1,0 +1,23 @@
+// Always On Time iOS push relay. Deployed by hand: `npx wrangler deploy` (see docs/DEPLOYING.md).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "aot-ios-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-15",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "SHARDS", "class_name": "InstallShard" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["InstallShard"] }],
+  "vars": {
+    "APNS_KEY_ID": "98YK9VVN67",
+    "APNS_TEAM_ID": "LRTR5A87Y6",
+    "APNS_TOPIC": "com.zombitstudios.alwaysontime",
+    "ENFORCE_APP_CHECK": "true",
+    "APP_CHECK_PROJECT_NUMBER": "1054144143721",
+    "APP_CHECK_APP_IDS": "1:1054144143721:ios:20196992cb6f6edb9f5df8"
+  }
+  // Secret (wrangler secret put): APNS_AUTH_KEY_P8
+}

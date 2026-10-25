@@ -1,0 +1,23 @@
+{
+  "name": "aot-ios-relay",
+  "private": true,
+  "description": "Always On Time iOS push relay (Cloudflare Worker + Durable Objects)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "wrangler types src/worker-configuration.d.ts >/dev/null && tsc --noEmit -p . && tsc --noEmit -p test",
+    "types": "wrangler types src/worker-configuration.d.ts",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.7",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5",
+    "wrangler": "^4.152.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "workerd@1.20261019.1": true
+  }
+}

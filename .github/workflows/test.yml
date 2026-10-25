@@ -22,6 +22,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             functions/package-lock.json
+            workers/ios-relay/package-lock.json
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
@@ -32,6 +33,12 @@ jobs:
       - name: Unit tests
         run: npm test
         working-directory: functions
+      - name: iOS relay Worker tests
+        working-directory: workers/ios-relay
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
       - name: Deploy and verification script tests
         run: node --test 'scripts/test/*.test.mjs'
       - name: Emulator placeholders
