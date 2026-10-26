@@ -126,7 +126,8 @@ exports.assistantDeviceApi = onRequest(
  */
 async function requireActiveAccount(request) {
   const auth = request.auth;
-  if (!auth || !auth.token?.firebase?.identities?.["google.com"]?.length) {
+  // Not a password session (firestore.rules isGoogleAccount explains why).
+  if (!auth || !auth.token?.firebase?.identities?.["google.com"]?.length || auth.token.firebase.sign_in_provider === "password") {
     throw new HttpsError("unauthenticated", "Sign in with Google first.");
   }
   const db = getFirestore();

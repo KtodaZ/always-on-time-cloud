@@ -163,7 +163,9 @@ or a Google account. One account, the Firebase uid in the `ASSISTANT_DEMO_UID` p
 that; the param is empty by default, which means there is none.
 
 - It signs in on the consent page with "Sign in with email" (email and password). The server
-  accepts a password sign-in from that uid only.
+  accepts a password sign-in from that uid only, and account sync (the rules and callables) refuses
+  every password session, so a password account made on someone's address can't reach their data
+  once they sign in with Google.
 - The server plays its phone ([`assistant-demo-phone.js`](../functions/assistant-demo-phone.js)).
   When a tool runs for that account, the server registers an Android device named "Pixel 9 (demo)"
   (marked `demoPhone`, no push token) and publishes a snapshot of a fictional week in
@@ -191,7 +193,8 @@ The script asks for the password (or reads `REVIEW_ACCOUNT_PASSWORD`; it never p
 the email and password user or sets its password, marks the account active the way account sync
 does, restores the demo settings and clears the account's changes, history and snapshot while
 keeping its connections, then prints the uid. It refuses an address that already signs in another
-way. Set `ASSISTANT_DEMO_UID` to that uid in
+way. With `--keep-password` it reads no password: an existing user keeps its own, and a new one
+gets a random password to be replaced through a password reset email. Set `ASSISTANT_DEMO_UID` to that uid in
 [`functions/.env.always-on-time-zombit-2026`](../functions/.env.always-on-time-zombit-2026) and
 deploy; the project needs the Email/Password sign-in provider. Run the script again to reset the
 account between reviews. With `FIREBASE_AUTH_EMULATOR_HOST` and `FIRESTORE_EMULATOR_HOST` set it

@@ -67,9 +67,13 @@ service cloud.firestore {
   }
 
   match /databases/{database}/documents {
+    // A Google-linked account, signed in this session with Google rather than a password: a
+    // password account on someone's address before they first sign in with Google would
+    // otherwise gain their account once Google is linked to it.
     function isGoogleAccount(uid) {
       return request.auth != null && request.auth.uid == uid
-        && request.auth.token.firebase.identities.keys().hasAny(['google.com']);
+        && request.auth.token.firebase.identities.keys().hasAny(['google.com'])
+        && request.auth.token.firebase.sign_in_provider != 'password';
     }
     function activeAccount(uid) {
       return isGoogleAccount(uid)

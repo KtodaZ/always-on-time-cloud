@@ -5,11 +5,14 @@
 // sync leaves it, and its alarm settings, activity and history back to the demo state. Existing
 // assistant connections are kept. Prints only the account's uid, which is the ASSISTANT_DEMO_UID
 // param. The password is read from REVIEW_ACCOUNT_PASSWORD or standard input and never printed.
+// With --keep-password nothing is read: an existing user keeps its password and a new one gets a
+// random password nobody knows, to be set through a password reset email.
 //
 // Usage (Admin SDK credentials from Application Default Credentials):
-//   node scripts/seed-review-account.js --project <project id> --email <email> [--uid <uid>]
+//   node scripts/seed-review-account.js --project <project id> --email <email> [--uid <uid>] [--keep-password]
 // Against the emulators, also set FIREBASE_AUTH_EMULATOR_HOST and FIRESTORE_EMULATOR_HOST.
 
+const { randomBytes } = require("node:crypto");
 const { createRequire } = require("node:module");
 const path = require("node:path");
 const { parseArgs } = require("node:util");
@@ -60,7 +63,8 @@ async function readPassword() {
 }
 
 /**
- * The review user, created or given this password. Refuses an existing user that signs in any
+ * The review user, created or given this password (an existing user keeps its own when `password`
+ * is null; a new one then gets a random one). Refuses an existing user that signs in any
  * other way (a real person's account) or that has a different uid than `--uid`.
  */
 async function upsertUser(auth, { email, password, uid }) {
@@ -70,21 +74,27 @@ async function upsertUser(auth, { email, password, uid }) {
   } catch (error) {
     if (error.code !== "auth/user-not-found") throw error;
   }
-  if (!user) return auth.createUser({ ...(uid ? { uid } : {}), email, password, emailVerified: true, displayName: "App review" });
+  if (!user) {
+    return auth.createUser({
+      ...(uid ? { uid } : {}), email, password: password ?? randomBytes(32).toString("base64url"), emailVerified: true, displayName: "App review",
+    });
+  }
   if (uid && user.uid !== uid) throw new Error(`${email} already belongs to another uid`);
   if (user.providerData.some((provider) => provider.providerId !== "password")) {
     throw new Error(`${email} already signs in another way (${user.providerData.map((provider) => provider.providerId).join(", ")}); use a separate address`);
   }
-  return auth.updateUser(user.uid, { password, emailVerified: true, disabled: false });
+  return auth.updateUser(user.uid, { ...(password === null ? {} : { password }), emailVerified: true, disabled: false });
 }
 
 async function main() {
-  const { values } = parseArgs({ options: { project: { type: "string" }, email: { type: "string" }, uid: { type: "string" } } });
+  const { values } = parseArgs({
+    options: { project: { type: "string" }, email: { type: "string" }, uid: { type: "string" }, "keep-password": { type: "boolean" } },
+  });
   const projectId = values.project ?? process.env.GCLOUD_PROJECT;
   if (!projectId || !values.email) throw new Error("usage: node scripts/seed-review-account.js --project <project id> --email <email> [--uid <uid>]");
   if (values.uid !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(values.uid)) throw new Error("--uid may use letters, digits, _ and - only");
-  const password = await readPassword();
-  if (password.length < MIN_PASSWORD) throw new Error(`the password needs at least ${MIN_PASSWORD} characters`);
+  const password = values["keep-password"] ? null : await readPassword();
+  if (password !== null && password.length < MIN_PASSWORD) throw new Error(`the password needs at least ${MIN_PASSWORD} characters`);
   const app = initializeApp({ projectId });
   try {
     const user = await upsertUser(getAuth(app), { email: values.email, password, uid: values.uid });

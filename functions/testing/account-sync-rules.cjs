@@ -16,11 +16,16 @@ const fs = require('node:fs');
     // Alice's uid without a Google identity (e.g. an anonymous session that kept the uid).
     const aliceWithoutGoogle = environment.authenticatedContext('alice', { firebase: { identities: {}, sign_in_provider: 'anonymous' } }).firestore();
     const signedOut = environment.unauthenticatedContext().firestore();
+    // Alice's uid in a password session that has her Google identity (a password account made on
+    // her address before she first signed in with Google): refused like a stranger.
+    const alicePassword = environment.authenticatedContext('alice', { firebase: { identities: { 'google.com': ['alice-google'], email: ['alice@example.com'] }, sign_in_provider: 'password' } }).firestore();
     await assertSucceeds(setDoc(doc(alice, 'accounts/alice'), { active: true, schemaVersion: 1 }));
     await assertFails(setDoc(doc(anonymous, 'accounts/anon'), { active: true, schemaVersion: 1 }));
     await assertSucceeds(setDoc(doc(alice, 'accounts/alice/values/p_alarm_volume'), { payload: '70' }));
     await assertSucceeds(getDocs(collection(alice, 'accounts/alice/values')));
     await assertFails(getDoc(doc(bob, 'accounts/alice/values/p_alarm_volume')));
+    await assertFails(getDoc(doc(alicePassword, 'accounts/alice/values/p_alarm_volume')));
+    await assertFails(setDoc(doc(alicePassword, 'accounts/alice/values/p_alarm_volume'), { payload: '50' }));
     await assertFails(setDoc(doc(bob, 'accounts/alice/values/p_alarm_volume'), { payload: '50' }));
     await assertFails(setDoc(doc(alice, 'accounts/alice/values/p_alarm_volume'), { payload: '70', unexpected: 'private' }));
     await assertFails(setDoc(doc(alice, 'accounts/alice/values/invalid'), { payload: '70' }));

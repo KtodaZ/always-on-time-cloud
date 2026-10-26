@@ -4,7 +4,8 @@ const { deleteAllGrants } = require('./assistant-oauth');
 const HISTORY_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
 function requireRecentGoogleAccount(auth, now = Date.now()) {
-  if (!auth || !auth.token?.firebase?.identities?.['google.com']?.length) {
+  // Not a password session (firestore.rules isGoogleAccount explains why).
+  if (!auth || !auth.token?.firebase?.identities?.['google.com']?.length || auth.token.firebase.sign_in_provider === 'password') {
     const error = new Error('Sign in with Google before deleting your account.');
     error.code = 'unauthenticated';
     throw error;
