@@ -11,6 +11,7 @@ test('deletion requires a Google-linked account and recent authentication', () =
   assert.equal(requireRecentGoogleAccount(valid, now), 'user');
   assert.throws(() => requireRecentGoogleAccount(null, now), { code: 'unauthenticated' });
   assert.throws(() => requireRecentGoogleAccount({ ...valid, token: { ...valid.token, firebase: { identities: {} } } }, now), { code: 'unauthenticated' });
+  assert.throws(() => requireRecentGoogleAccount({ ...valid, token: { ...valid.token, firebase: { ...valid.token.firebase, sign_in_provider: 'password' } } }, now), { code: 'unauthenticated' });
   assert.throws(() => requireRecentGoogleAccount({ ...valid, token: { ...valid.token, auth_time: 0 } }, now), { code: 'failed-precondition' });
 });
 

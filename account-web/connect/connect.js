@@ -1,12 +1,14 @@
 // Consent page for connecting an AI assistant (docs/ASSISTANT_CONNECTOR.md). The user signs in with
 // the Google account they use in the app; approving sends the Firebase ID token and the pending
 // request id to /oauth/approve, which returns the assistant's redirect with a one-time code.
+// "Sign in with email" exists for the review account the assistant directories test with; the
+// server accepts a password sign-in from that account only.
 // Only Claude, Claude Code and ChatGPT (by their exact client metadata URLs) are named; any other app shows
 // as "Unverified app" with the site its codes go to, and cancelling it shows a page, not a redirect.
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
 import {
   initializeAuth, inMemoryPersistence, browserPopupRedirectResolver, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut,
-  connectAuthEmulator,
+  signInWithEmailAndPassword, connectAuthEmulator,
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
 
 const element = id => document.getElementById(id);
@@ -32,7 +34,7 @@ function show(message, tone = '') {
 
 /** Ends the flow on a page that only says what happened: state is error, info, approved or cancelled. */
 function stop(title, message, state = 'error') {
-  for (const id of ['details', 'sign-in', 'account', 'not-ready', 'approve', 'cancel']) element(id).hidden = true;
+  for (const id of ['details', 'sign-in', 'email-sign-in', 'account', 'not-ready', 'approve', 'cancel']) element(id).hidden = true;
   page.dataset.state = state;
   delete page.dataset.busy;
   element('heading').textContent = title;
@@ -124,14 +126,18 @@ async function start() {
   const auth = initializeAuth(app, { persistence: inMemoryPersistence, popupRedirectResolver: browserPopupRedirectResolver });
   if (local) connectAuthEmulator(auth, 'http://127.0.0.1:9199', { disableWarnings: true });
   let currentUser = null;
+  // Why the last account was signed out, kept across the sign-out's own state change.
+  let notice = '';
 
   onAuthStateChanged(auth, async user => {
     currentUser = user;
     element('sign-in').hidden = Boolean(user);
+    element('email-sign-in').hidden = Boolean(user);
     element('account').hidden = !user;
     element('approve').hidden = true;
     element('not-ready').hidden = true;
-    show('');
+    show(notice, notice ? 'error' : '');
+    notice = '';
     if (!user) {
       element('intro').textContent = 'Sign in to review and approve this connection.';
       return;
@@ -146,7 +152,7 @@ async function start() {
       element('approve').hidden = status.account !== 'ready';
     } catch (error) {
       if (error.code === 'expired') stop(...EXPIRED);
-      else if (error.code === 'login_required') { show('Sign in with a Google account.', 'error'); await signOut(auth); }
+      else if (error.code === 'login_required') { notice = 'Sign in with a Google account.'; await signOut(auth); }
       else if (error.status === 429) show(RATE_LIMITED, 'error');
       else show('Couldn’t check this account. Please try again.', 'error');
     }
@@ -157,6 +163,25 @@ async function start() {
     try { await signInWithPopup(auth, new GoogleAuthProvider()); }
     catch (error) { if (error.code !== 'auth/popup-closed-by-user') show('Couldn’t sign in. Please try again.', 'error'); }
     finally { element('sign-in').disabled = false; }
+  });
+  element('email-toggle').addEventListener('click', () => {
+    const open = element('email-form').hidden;
+    element('email-form').hidden = !open;
+    element('email-toggle').setAttribute('aria-expanded', String(open));
+    if (open) element('email-address').focus();
+  });
+  element('email-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    element('email-submit').disabled = true;
+    show('');
+    try {
+      await signInWithEmailAndPassword(auth, element('email-address').value.trim(), element('email-password').value);
+      element('email-password').value = '';
+    } catch (error) {
+      show(error.code === 'auth/too-many-requests' ? RATE_LIMITED : 'Couldn’t sign in. Check the email and password.', 'error');
+    } finally {
+      element('email-submit').disabled = false;
+    }
   });
   element('sign-out').addEventListener('click', () => signOut(auth));
   element('approve').addEventListener('click', () => decide('approve', currentUser));

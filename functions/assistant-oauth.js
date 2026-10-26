@@ -1,7 +1,8 @@
 "use strict";
 
 // OAuth 2.1 authorization server for the assistant connector. Firebase Auth (Google sign-in on the
-// consent page) identifies the user; this module issues opaque tokens for the MCP endpoint.
+// consent page; a password only for the review account, assistant-demo-phone.js) identifies the
+// user; this module issues opaque tokens for the MCP endpoint.
 //
 // - Authorization codes, access tokens and refresh tokens are 256-bit random strings, stored only
 //   as SHA-256 hashes. Codes last 10 minutes and work once; access tokens last an hour; refresh
@@ -24,6 +25,7 @@ const {
 } = require("./assistant-oauth-clients");
 const { clientIdForLog, errorFields, logEvent } = require("./assistant-log");
 const { createInstanceLimiters } = require("./assistant-limits");
+const { isDemoAccount } = require("./assistant-demo-phone");
 const { sendToDevices } = require("./assistant-push");
 
 const PRODUCTION_ORIGIN = "https://alwaysontime.zombit.io";
@@ -145,6 +147,8 @@ const hostOf = (uri) => {
 
 function createOAuth(deps) {
   const { db, now = Date.now, verifyIdToken, fetchMetadata, messaging, apns = null, logger, usage = async () => {} } = deps;
+  // The review account (assistant-demo-phone.js): the one account that may approve after a password sign-in.
+  const demoUid = deps.demoUid || null;
   const origin = deps.origin ?? PRODUCTION_ORIGIN;
   const u = urls(origin);
   const collection = (name) => db.collection(COLLECTIONS[name]);
@@ -229,7 +233,10 @@ function createOAuth(deps) {
     return { ref: doc.ref, ...doc.data() };
   }
 
-  /** Verifies a Firebase ID token from the consent page: a Google-linked account. */
+  /**
+   * Verifies a Firebase ID token from the consent page: a Google sign-in, or a password sign-in to
+   * the review account. Anonymous and other password accounts can't approve a connection.
+   */
   async function signedInUser(idToken) {
     if (typeof idToken !== "string" || idToken.length === 0) throw new OAuthError("login_required", "Sign in with Google first.", 401);
     let decoded;
@@ -238,7 +245,10 @@ function createOAuth(deps) {
     } catch {
       throw new OAuthError("login_required", "Your sign-in expired. Sign in again.", 401);
     }
-    if (!decoded?.firebase?.identities?.["google.com"]?.length) throw new OAuthError("login_required", "Sign in with Google first.", 401);
+    const provider = decoded?.firebase?.sign_in_provider;
+    const google = provider === "google.com" && decoded.firebase.identities?.["google.com"]?.length > 0;
+    const reviewer = provider === "password" && isDemoAccount(decoded.uid, demoUid);
+    if (!google && !reviewer) throw new OAuthError("login_required", "Sign in with Google first.", 401);
     const accountDoc = await refs.account(db, decoded.uid).get();
     return { uid: decoded.uid, email: decoded.email ?? null, accountReady: accountDoc.exists && accountDoc.data().active === true };
   }
@@ -493,7 +503,7 @@ function createOAuth(deps) {
   /** Tells the account's phones to re-read assistant/state. Never fails the caller. */
   async function notifyState(uid, devices = null, logId = null) {
     try {
-      await sendToDevices({ db, messaging, apns, logger, logId, now }, uid, "state", {}, devices);
+      await sendToDevices({ db, messaging, apns, logger, logId, now, demoUid }, uid, "state", {}, devices);
     } catch (error) {
       log("warn", "push.state_failed", { logId, errorName: error?.name, errorCode: error?.code });
     }

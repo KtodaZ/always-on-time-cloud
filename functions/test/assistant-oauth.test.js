@@ -25,7 +25,7 @@ const T0 = Date.parse("2026-10-16T12:00:00Z");
 const VERIFIER = "v".repeat(43) + "erifier-with-enough-entropy";
 const CHALLENGE = createHash("sha256").update(VERIFIER).digest("base64url");
 
-function setup({ metadata } = {}) {
+function setup({ metadata, demoUid } = {}) {
   const db = new FakeFirestore();
   const logs = [];
   const logger = Object.fromEntries(["info", "warn", "error"].map((level) => [level, (message, fields) => logs.push({ level, message, ...fields })]));
@@ -39,10 +39,21 @@ function setup({ metadata } = {}) {
     messaging,
     logger,
     usage: async (c) => counts.push(c),
+    demoUid,
     verifyIdToken: async (token) => {
+      // "pw:<uid>" is a password sign-in; "pwg:<uid>" one to an account that also has Google linked.
+      const password = /^pwg?:/.exec(token);
+      if (password) {
+        const uid = token.slice(password[0].length);
+        return { uid, email: `${uid}@example.com`, firebase: { sign_in_provider: "password", identities: {
+          email: [`${uid}@example.com`], ...(password[0] === "pwg:" ? { "google.com": ["g"] } : {}),
+        } } };
+      }
       if (!token.startsWith("id:")) throw new Error("bad token");
       const uid = token.slice(3);
-      return { uid, email: `${uid}@example.com`, firebase: { identities: uid.startsWith("anon") ? {} : { "google.com": ["g"] } } };
+      return { uid, email: `${uid}@example.com`, firebase: uid.startsWith("anon")
+        ? { sign_in_provider: "anonymous", identities: {} }
+        : { sign_in_provider: "google.com", identities: { "google.com": ["g"] } } };
     },
     fetchMetadata: async (url) => {
       fetches.push(url);
@@ -318,6 +329,28 @@ test("authorize refuses unknown clients and unregistered redirects without redir
   assert.equal(error(await oauth.authorize({ ...base, resource: "https://evil.example/mcp" })), "invalid_target");
   // With a single registered redirect, redirect_uri may be omitted.
   assert.ok((await oauth.authorize({ ...base, redirect_uri: undefined })).redirect.includes("/connect/?request="));
+});
+
+test("only a Google sign-in can approve, except a password sign-in to the configured review account", async () => {
+  for (const demoUid of [undefined, "", "reviewer"]) {
+    const { db, oauth } = setup({ demoUid });
+    for (const uid of ["reviewer", "mallory", "linked"]) db.documents.set(`accounts/${uid}`, { active: true, schemaVersion: 1 });
+    const { redirect } = await oauth.authorize({ response_type: "code", client_id: CLAUDE_ID, redirect_uri: CLAUDE_REDIRECT, code_challenge: CHALLENGE, code_challenge_method: "S256" });
+    const request = requestIdFrom(redirect);
+    // Other password accounts, anonymous accounts and password sign-ins that happen to have Google linked never can.
+    for (const idToken of ["pw:mallory", "pwg:linked", "id:anon"]) {
+      await assert.rejects(oauth.consentInfo({ request, idToken }), { error: "login_required" }, idToken);
+      await assert.rejects(oauth.decide({ request, idToken, decision: "approve" }), { error: "login_required" }, idToken);
+    }
+    if (demoUid !== "reviewer") {
+      await assert.rejects(oauth.decide({ request, idToken: "pw:reviewer", decision: "approve" }), { error: "login_required" });
+      continue;
+    }
+    assert.equal((await oauth.consentInfo({ request, idToken: "pw:reviewer" })).account, "ready");
+    const approved = new URL((await oauth.decide({ request, idToken: "pw:reviewer", decision: "approve" })).redirect);
+    assert.ok(approved.searchParams.get("code"));
+    assert.equal(Object.values(db.dump()).find((doc) => doc.codeChallenge === CHALLENGE).uid, "reviewer");
+  }
 });
 
 test("the consent page learns who is asking and whether the account is ready; cancelling denies", async () => {

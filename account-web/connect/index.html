@@ -74,6 +74,16 @@
     <button id="sign-in" class="google" hidden><img src="/google-g.svg" alt="">Sign in with Google</button>
     <button id="approve" class="primary" hidden>Approve</button>
   </div>
+  <div id="email-sign-in" class="email-sign-in" hidden>
+    <button id="email-toggle" class="link" type="button" aria-expanded="false" aria-controls="email-form">Sign in with email</button>
+    <form id="email-form" class="email-form" hidden>
+      <label for="email-address">Email</label>
+      <input id="email-address" type="email" autocomplete="username" required>
+      <label for="email-password">Password</label>
+      <input id="email-password" type="password" autocomplete="current-password" required>
+      <button id="email-submit" type="submit">Sign in</button>
+    </form>
+  </div>
   <p id="sign-in-note" class="secondary">Sign in with the Google account you use in the Always On Time app. Signing in here does not give the assistant your Google account or calendar. <a href="https://zombit.io/always-on-time/privacy/">Privacy policy</a></p>
 </main>
 <footer class="site-footer"><a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Always On Time</a> by Zombit Studios · <a href="https://zombit.io/always-on-time/privacy/">Privacy policy</a></footer>

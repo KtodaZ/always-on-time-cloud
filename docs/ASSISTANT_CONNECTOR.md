@@ -24,7 +24,7 @@ All on `https://alwaysontime.zombit.io` (Hosting rewrites to the functions):
 | `POST /oauth/consent`, `POST /oauth/approve` | `assistantOauth` | Used by the consent page |
 | `POST /oauth/token` | `assistantOauth` | Code and refresh token exchange |
 | `POST /oauth/revoke` | `assistantOauth` | RFC 7009 revocation (revokes the whole connection) |
-| `/connect/` | Hosting | Consent page: Google sign-in, what the assistant can see and change, Approve/Cancel |
+| `/connect/` | Hosting | Consent page: Google sign-in (email sign-in for the [review account](#review-account)), what the assistant can see and change, Approve/Cancel |
 | `/open/**` | Hosting | Fallback for App Links and Universal Links when the app did not open them |
 | `/.well-known/assetlinks.json` | Hosting | Android App Links verification |
 | `/.well-known/apple-app-site-association` | Hosting | iOS Universal Links verification (`/open` and `/open/*` for `LRTR5A87Y6.com.zombitstudios.alwaysontime`) |
@@ -81,7 +81,9 @@ parameter (RFC 9207).
 - The consent page asks the user to sign in with the Google account they use in the app, every
   time: the sign-in is kept in memory only, so it never carries over from another visit or tab. It
   asks the user to continue only if they started the connection from that assistant themselves just
-  now. Approval works only for an account that has turned on account sync.
+  now. Approval works only for an account that has turned on account sync, and only after a Google
+  sign-in (`sign_in_provider` `google.com`); anonymous and password sign-ins are refused, except a
+  password sign-in to the [review account](#review-account).
 - Tokens are random and opaque; only their SHA-256 hashes are stored. Access tokens last 1 hour,
   refresh tokens 90 days and rotate on every use. Reusing a spent authorization code or refresh
   token within 30 seconds is refused (`invalid_grant`) without other effect, which covers a client
@@ -153,6 +155,50 @@ caller is the visitor in `Fastly-Client-IP`. Any other request is a direct call 
 own URL (Cloud Run ingress settings can't close that URL, because Hosting itself calls it): it is
 keyed by its hop, never by headers it sent, and direct calls have their own overall budgets, so
 they can't use up the budgets of traffic that came through Hosting.
+
+## Review account
+
+Reviewers for Claude's and ChatGPT's connector directories need to try every tool without a phone
+or a Google account. One account, the Firebase uid in the `ASSISTANT_DEMO_UID` param, is set up for
+that; the param is empty by default, which means there is none.
+
+- It signs in on the consent page with "Sign in with email" (email and password). The server
+  accepts a password sign-in from that uid only, and account sync (the rules and callables) refuses
+  every password session, so a password account made on someone's address can't reach their data
+  once they sign in with Google.
+- The server plays its phone ([`assistant-demo-phone.js`](../functions/assistant-demo-phone.js)).
+  When a tool runs for that account, the server registers an Android device named "Pixel 9 (demo)"
+  (marked `demoPhone`, no push token) and publishes a snapshot of a fictional week in
+  `America/Los_Angeles`: Work and Personal calendars with a weekday standup, a weekly 1:1, a design
+  review, a flight and so on. The snapshot is rebuilt from the account's settings whenever it is
+  missing, an hour old, or behind a saved change. Messages to this phone are handled in-process
+  instead of over FCM: `sync` and `publish` rebuild the snapshot (`valuesAppliedThrough` is the
+  newest `updatedAt` among the values; `publish` echoes its `requestId`), `ping` records `lastPing`,
+  and `state` removes the phone after the last disconnect, as the app does. It also writes a few
+  days of alarm history. Alarms follow an approximation of the app's rules (lead times from the
+  occurrence, series, calendar or app default; `enabled`, `addedLeadTimes`, unwatched calendars,
+  invitation and all-day filters, pauses); the app remains the reference.
+- Other accounts are unaffected: the uid is compared with the param before anything is read, and a
+  device marked `demoPhone` in any other account is treated as a phone without a push token (the
+  rules don't let phones write that field).
+
+To create or reset the account, with Admin SDK credentials (Application Default Credentials for an
+account that can manage Firebase Auth users and Firestore):
+
+```sh
+node scripts/seed-review-account.js --project always-on-time-zombit-2026 --email <review email>
+```
+
+The script asks for the password (or reads `REVIEW_ACCOUNT_PASSWORD`; it never prints it), creates
+the email and password user or sets its password, marks the account active the way account sync
+does, restores the demo settings and clears the account's changes, history and snapshot while
+keeping its connections, then prints the uid. It refuses an address that already signs in another
+way. With `--keep-password` it reads no password: an existing user keeps its own, and a new one
+gets a random password to be replaced through a password reset email. Set `ASSISTANT_DEMO_UID` to that uid in
+[`functions/.env.always-on-time-zombit-2026`](../functions/.env.always-on-time-zombit-2026) and
+deploy; the project needs the Email/Password sign-in provider. Run the script again to reset the
+account between reviews. With `FIREBASE_AUTH_EMULATOR_HOST` and `FIRESTORE_EMULATOR_HOST` set it
+seeds the emulators instead; the end-to-end test does that for the uid `e2e-review-account`.
 
 ## What is stored
 
@@ -245,7 +291,7 @@ npx @modelcontextprotocol/inspector
 In Inspector choose Streamable HTTP and `http://127.0.0.1:5012/mcp`, then connect. The consent page
 signs in through the Auth emulator, which the production Content-Security-Policy doesn't allow:
 `firebase.emulators.json` (written by `scripts/emulator-config.mjs`, not committed) adds it; create `accounts/{uid}` with `active: true, schemaVersion: 1`
-in the Emulator UI so the account counts as set up. Without a phone, tools report that no phone has
-shared its alarms; [`functions/testing/assistant-e2e.cjs`](../functions/testing/assistant-e2e.cjs)
+in the Emulator UI so the account counts as set up, or seed the [review account](#review-account)
+(its uid as `ASSISTANT_DEMO_UID` in `functions/.env.local`) and sign in with email. Without a phone, tools report that no phone has shared its alarms; [`functions/testing/assistant-e2e.cjs`](../functions/testing/assistant-e2e.cjs)
 shows how to write a device and snapshot to stand in for one. In the emulator, FCM messages are
 logged instead of sent, and APNs pushes are recorded in the `emulatorApnsPushes` collection.

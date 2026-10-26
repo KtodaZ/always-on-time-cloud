@@ -435,6 +435,26 @@ button.link {
   font-weight: 600;
 }
 
+/* ---- Email sign-in (the review account; Google stays the main path) ---- */
+.email-sign-in { margin: 12px 0 0; text-align: center; }
+.email-form {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  text-align: start;
+}
+.email-form label { margin-top: 6px; font-size: 0.875rem; font-weight: 600; color: var(--ink-soft); }
+.email-form input {
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1px solid var(--outline);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink);
+  font: 400 1rem/1.2 var(--font-sans);
+}
+.email-form button { margin-top: 10px; }
+
 /* ---- Small print ---- */
 .secondary {
   margin: 24px 0 0;

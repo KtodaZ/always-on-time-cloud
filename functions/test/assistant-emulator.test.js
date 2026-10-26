@@ -49,7 +49,7 @@ test("connector writes, connections and cleanup work on real Firestore", { skip 
     const challenge = createHash("sha256").update(verifier).digest("base64url");
     const oauth = createOAuth({
       db, messaging: createRecordingMessaging(), usage: createUsage({ db, increment: (n) => FieldValue.increment(n) }),
-      verifyIdToken: async () => ({ uid, firebase: { identities: { "google.com": ["g"] } } }),
+      verifyIdToken: async () => ({ uid, firebase: { sign_in_provider: "google.com", identities: { "google.com": ["g"] } } }),
       fetchMetadata: async (url) => ({ client_id: url, client_name: "Claude", redirect_uris: ["https://claude.ai/api/mcp/auth_callback"] }),
     });
     const clientId = "https://claude.ai/oauth/mcp-oauth-client-metadata";
@@ -73,6 +73,41 @@ test("connector writes, connections and cleanup work on real Firestore", { skip 
     const window = { limit: 3, windowMs: 60_000 };
     const results = await Promise.all(Array.from({ length: 6 }, () => consume(db, `test|${uid}`, window, Date.now())));
     assert.equal(results.filter(Boolean).length, 3);
+  } finally {
+    await deleteApp(app);
+  }
+});
+
+test("the review account's stand-in phone confirms a change on real Firestore", { skip }, async () => {
+  const { initializeApp, deleteApp } = require("firebase-admin/app");
+  const { getFirestore } = require("firebase-admin/firestore");
+  const { recordChange, refs } = require("../assistant-data");
+  const { DEMO_DEVICE_ID, ensureDemoPhone, resetDemoAccount } = require("../assistant-demo-phone");
+  const { createRecordingMessaging, sendToDevices } = require("../assistant-push");
+
+  const app = initializeApp({ projectId: "demo-account-sync" }, `assistant-demo-${Date.now()}`);
+  const db = getFirestore(app);
+  const uid = `reviewer-${Date.now()}`;
+  try {
+    await resetDemoAccount(db, uid);
+    await refs.state(db, uid).set({ connected: true, connections: 1 });
+    assert.equal(await ensureDemoPhone(db, uid, Date.now(), uid), "registered");
+    assert.equal(await ensureDemoPhone(db, uid, Date.now(), uid), "current");
+    const change = await recordChange(db, uid, {
+      recordIds: ["p_alarms_paused_until"], build: () => ({ p_alarms_paused_until: -1 }), assistant: "Claude", tool: "pause_alarms", summary: "Paused", now: Date.now(),
+    });
+    const writtenAt = (await refs.activity(db, uid).doc(change.changeId).get()).data().writtenAt.toMillis();
+    const device = await refs.devices(db, uid).doc(DEMO_DEVICE_ID).get();
+    const messaging = createRecordingMessaging();
+    const sent = await sendToDevices({ db, messaging, logger: console, now: Date.now, demoUid: uid }, uid, "sync", { changeId: change.changeId }, [{ id: device.id, ...device.data() }]);
+    assert.equal(sent.sent.length, 1);
+    assert.equal(messaging.sent.length, 0);
+    const payload = JSON.parse((await refs.snapshots(db, uid).doc(DEMO_DEVICE_ID).get()).data().payload);
+    assert.equal(payload.valuesAppliedThrough, writtenAt);
+    assert.deepEqual(payload.paused, { until: -1 });
+    // A value written after the snapshot (its message lost) is picked up on the next tool call.
+    await refs.values(db, uid).doc("p_alarm_volume").set({ payload: "40", updatedAt: new Date(writtenAt + 1000) });
+    assert.equal(await ensureDemoPhone(db, uid, Date.now(), uid), "published");
   } finally {
     await deleteApp(app);
   }
