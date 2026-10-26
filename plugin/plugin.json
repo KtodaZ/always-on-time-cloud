@@ -1,0 +1,94 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "always-on-time",
+  "version": "1.0.0",
+  "description": "Check and change the meeting alarms Always On Time rings on your Android phone.",
+  "author": {
+    "name": "Zombit Studios",
+    "email": "zombit.studios@gmail.com",
+    "url": "https://zombit.io"
+  },
+  "homepage": "https://zombit.io/always-on-time/assistants/",
+  "repository": "https://github.com/KtodaZ/always-on-time-cloud",
+  "license": "Apache-2.0",
+  "keywords": ["alarms", "calendar", "meetings", "reminders", "adhd", "productivity"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Always On Time",
+        "shortDescription": "Alarms for your meetings",
+        "longDescription": "Always On Time is an Android app that turns calendar meetings into full-screen alarms, so the next meeting doesn't slip past. Connect it to ChatGPT to ask what will ring and to change your alarms in plain language.\n\nAsk which alarms ring tomorrow morning, why a meeting has the alarms it has, or which calendars the app watches. Make one meeting ring 15 minutes earlier, give a recurring standup its own alarms, turn alarms off for a calendar, or pause every alarm until Monday. Each change reaches your phone within moments and can be undone from ChatGPT or from Connected assistants in the app.\n\nSecure and private: you sign in with the Google account you use for Always On Time's Account & sync, and you approve the connection on a consent page. ChatGPT sees only meeting titles and times from the calendars your phone watches, recent alarm history and the app's alarm settings. Your calendar stays as it is: meetings are never created or edited, and locations, links, notes and attendees stay on your phone.\n\nWhat you need: Always On Time on an Android phone, signed in under Settings > Account & sync. The connection is free and doesn't need Always On Time Plus.",
+        "developerName": "Zombit Studios",
+        "category": "Productivity",
+        "capabilities": ["Read", "Write"],
+        "websiteURL": "https://zombit.io/always-on-time/assistants/",
+        "supportURL": "https://zombit.io/support",
+        "privacyPolicyURL": "https://zombit.io/always-on-time/privacy/",
+        "termsOfServiceURL": "https://zombit.io/terms",
+        "defaultPrompt": [
+          "What alarms ring tomorrow morning?",
+          "Make my next meeting ring 15 minutes earlier.",
+          "Pause my alarms until Monday."
+        ],
+        "brandColor": "#7B3FE4",
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/icon.png"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "List the alarms that ring soon",
+              "prompt": "What alarms ring tomorrow?",
+              "tools_triggered": "list_upcoming_alarms",
+              "expected_behavior": "Lists tomorrow's meetings from the demo account with each alarm's time and how long before the meeting it rings, in the phone's time zone."
+            },
+            {
+              "description": "Explain why a meeting has its alarms",
+              "prompt": "Why does my design review have the alarms it has?",
+              "tools_triggered": "find_events, explain_alarm",
+              "expected_behavior": "Finds the design review and explains where its alarms come from (the app default, its calendar, its series or the meeting itself)."
+            },
+            {
+              "description": "Change one meeting's alarms and confirm",
+              "prompt": "Make my next design review ring 15 minutes before it starts as well.",
+              "tools_triggered": "find_events, set_event_alarms, confirm_change",
+              "expected_behavior": "Adds a 15-minute alarm to that one meeting, reports the change ID, confirms the phone applied it, and the meeting then lists the new alarm."
+            },
+            {
+              "description": "Pause and resume all alarms",
+              "prompt": "Pause my alarms until tomorrow at 9am, then show me what's paused.",
+              "tools_triggered": "pause_alarms, list_upcoming_alarms",
+              "expected_behavior": "Pauses alarms until 9:00 the next morning in the phone's time zone; alarms before then are listed as paused. Saying \"resume my alarms\" turns them back on (resume_alarms)."
+            },
+            {
+              "description": "Undo a change",
+              "prompt": "Undo that last change.",
+              "tools_triggered": "undo",
+              "expected_behavior": "Reverses the most recent change made in the conversation and reports that the earlier alarms are back."
+            }
+          ],
+          "negative": [
+            {
+              "description": "Creating calendar events is out of scope",
+              "prompt": "Add a dentist appointment to my calendar for Friday at 3pm."
+            },
+            {
+              "description": "Meeting details that aren't shared",
+              "prompt": "What's the Zoom link and location for my design review?"
+            },
+            {
+              "description": "Another person's alarms",
+              "prompt": "Turn off my coworker's alarms for the standup."
+            }
+          ]
+        },
+        "commerce": false,
+        "commerce_description": "Always On Time's assistant connection is free and doesn't sell anything."
+      },
+      "publication": {
+        "release_notes": "First release: read and change Always On Time alarms, pause and resume them, and undo changes."
+      }
+    }
+  }
+}
