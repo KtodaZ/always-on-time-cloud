@@ -9,7 +9,7 @@ const { COLLECTIONS } = require("./assistant-data");
 const { errorFields, logEvent } = require("./assistant-log");
 const { LAST_USED_RESOLUTION_MS, SCOPES, grantLogId, movedUrl, urls, verifyAccessToken } = require("./assistant-oauth");
 const { ToolError } = require("./assistant-snapshot");
-const { createToolContext } = require("./assistant-tool-context");
+const { createToolContext, prepareContext } = require("./assistant-tool-context");
 const { INSTRUCTIONS, TOOLS, noPhone } = require("./assistant-tools");
 const { day, week } = require("./assistant-usage");
 
@@ -41,7 +41,8 @@ const bearer = (req) => {
 
 /**
  * Builds the MCP request handler. `deps`: db, messaging, apns (APNs transport),
- * usage(counts), accountEmails(uid), logger, now, sleep, origin, legacyHosts, sdk ({McpServer,
+ * usage(counts), accountEmails(uid), logger, now, sleep, origin, legacyHosts, demoUid (the review
+ * account, assistant-demo-phone.js), sdk ({McpServer,
  * StreamableHTTPServerTransport}; loaded lazily so other functions don't pay for it).
  */
 function createMcpHandler(deps) {
@@ -92,6 +93,7 @@ function createMcpHandler(deps) {
         annotations: { title: tool.title, ...tool.annotations },
       }, async (args) => runTool(tool, createToolContext({
         db, uid: grant.uid, grant, origin: u.origin, now, sleep, messaging: deps.messaging, apns: deps.apns, logger, accountEmails: deps.accountEmails,
+        demoUid: deps.demoUid,
       }), args ?? {}));
     }
     return server;
@@ -117,6 +119,7 @@ function createMcpHandler(deps) {
         refused = true;
         throw new ToolError("Too many requests in a short time. Wait a few minutes and try again.");
       }
+      await prepareContext(ctx);
       const out = await tool.handler(ctx, args);
       response = { content: [{ type: "text", text: out.text }], structuredContent: out.data ?? {} };
     } catch (error) {

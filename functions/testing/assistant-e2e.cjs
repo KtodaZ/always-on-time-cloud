@@ -4,8 +4,13 @@
 // refresh token and disconnects. The emulators cannot deliver FCM or APNs, so the Android "phone" is
 // simulated by writing its documents directly, and the iPhone's notification service extension by
 // reading the APNs pushes the emulator records in emulatorApnsPushes and calling assistantDeviceApi.
+// Then the review account: seeded by scripts/seed-review-account.js, signed in with a password,
+// and served by the server's stand-in phone (its uid is ASSISTANT_DEMO_UID in functions/.env.local).
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const { createHash, randomBytes, randomUUID } = require('node:crypto');
+const { readFileSync } = require('node:fs');
+const path = require('node:path');
 process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8180';
 require('firebase-admin/app').initializeApp({ projectId: 'demo-account-sync' });
 const { getFirestore, Timestamp } = require('firebase-admin/firestore');
@@ -165,6 +170,78 @@ const json = { 'Content-Type': 'application/json' };
   assert.equal((await deviceApi('POST', '/v1/sync', { since: 0 })).status, 401);
   const after = await fetch(`${site}/mcp`, { method: 'POST', headers: { ...json, Accept: 'application/json, text/event-stream', Authorization: `Bearer ${rotated.access_token}` }, body: '{}' });
   assert.equal(after.status, 401);
-  console.log('PASS: assistant connector OAuth, MCP tools, iPhone pushes and device API, app callables and disconnect work end to end through Hosting.');
+
+  // The review account. The seed script creates it with a password and prints only its uid.
+  const demoUid = /^ASSISTANT_DEMO_UID=(.+)$/m.exec(readFileSync(path.join(__dirname, '../.env.local'), 'utf8'))?.[1]?.trim();
+  assert.ok(demoUid, 'set ASSISTANT_DEMO_UID in functions/.env.local (see the README)');
+  const reviewEmail = 'review@example.test';
+  const reviewPassword = randomBytes(18).toString('base64url');
+  const seed = () => spawnSync(process.execPath, [path.join(__dirname, '../../scripts/seed-review-account.js'), '--project', 'demo-account-sync', '--email', reviewEmail, '--uid', demoUid], {
+    env: { ...process.env, FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9199', FIRESTORE_EMULATOR_HOST: '127.0.0.1:8180', REVIEW_ACCOUNT_PASSWORD: reviewPassword }, encoding: 'utf8',
+  });
+  const seeded = seed();
+  assert.equal(seeded.status, 0, seeded.stderr);
+  assert.equal(seeded.stdout, `${demoUid}\n`);
+  assert.ok(!seeded.stdout.includes(reviewPassword) && !seeded.stderr.includes(reviewPassword));
+  assert.equal((await db.doc(`accounts/${demoUid}`).get()).data().active, true);
+  const passwordSignIn = (email, password) => fetch('http://127.0.0.1:9199/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=test', {
+    method: 'POST', headers: json, body: JSON.stringify({ email, password, returnSecureToken: true }),
+  }).then(r => r.json());
+  const reviewer = await passwordSignIn(reviewEmail, reviewPassword);
+  assert.equal(reviewer.localId, demoUid, JSON.stringify(reviewer));
+  // Any other password account is refused at consent, even with account sync set up.
+  const stranger = await fetch('http://127.0.0.1:9199/identitytoolkit.googleapis.com/v1/accounts:signUp?key=test', {
+    method: 'POST', headers: json, body: JSON.stringify({ email: `${randomUUID()}@example.test`, password: randomBytes(18).toString('base64url'), returnSecureToken: true }),
+  }).then(r => r.json());
+  await db.doc(`accounts/${stranger.localId}`).set({ active: true, schemaVersion: 1 });
+
+  /** Registration, authorize, consent and approval with `idToken`; returns the tokens. */
+  const connectWith = async idToken => {
+    const verifierText = 'e2e-review-' + randomBytes(24).toString('base64url');
+    const authorized = await fetch(`${site}/oauth/authorize?${new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri,
+      code_challenge: createHash('sha256').update(verifierText).digest('base64url'), code_challenge_method: 'S256', resource: resource.resource })}`, { redirect: 'manual' });
+    const requestId = new URL(authorized.headers.get('location')).searchParams.get('request');
+    const consentFor = await fetch(`${site}/oauth/consent`, { method: 'POST', headers: json, body: JSON.stringify({ request: requestId, idToken }) });
+    if (consentFor.status !== 200) return { refused: consentFor.status, body: await consentFor.json() };
+    assert.equal((await consentFor.json()).account, 'ready');
+    const approvedFor = await fetch(`${site}/oauth/approve`, { method: 'POST', headers: json, body: JSON.stringify({ request: requestId, idToken, decision: 'approve' }) }).then(r => r.json());
+    return fetch(`${site}/oauth/token`, form({ grant_type: 'authorization_code', code: new URL(approvedFor.redirect).searchParams.get('code'), code_verifier: verifierText,
+      client_id: client.client_id, redirect_uri: redirectUri })).then(r => r.json());
+  };
+  const refused = await connectWith(stranger.idToken);
+  assert.deepEqual([refused.refused, refused.body.error], [401, 'login_required']);
+
+  const tool = async (token, name, args = {}) => {
+    const out = await rpc(token, 'tools/call', { name, arguments: args });
+    assert.equal(out.isError, undefined, `${name}: ${JSON.stringify(out)}`);
+    return { ...out, text: out.content.map(item => item.text).join('\n') };
+  };
+  const review = await connectWith(reviewer.idToken);
+  assert.ok(review.access_token, JSON.stringify(review));
+  // The stand-in phone registers on the first tool call and answers like a phone.
+  assert.match((await tool(review.access_token, 'get_status')).text, /Phone: Pixel 9 \(demo\) \(Android; can receive changes instantly/);
+  assert.deepEqual((await tool(review.access_token, 'test_connection', { waitSeconds: 10 })).structuredContent.received, ['Pixel 9 (demo)']);
+  const standup = (await tool(review.access_token, 'find_events', { query: 'team standup' })).structuredContent.events[0];
+  assert.equal(standup.recurring, true);
+  const series = await tool(review.access_token, 'set_series_alarms', { event: standup.eventKey, leadTimes: [25] });
+  assert.deepEqual(series.structuredContent.sentTo, ['Pixel 9 (demo)']);
+  const seriesConfirmed = await tool(review.access_token, 'confirm_change', { changeId: series.structuredContent.changeId, waitSeconds: 5 });
+  assert.equal(seriesConfirmed.structuredContent.outcome, 'confirmed', seriesConfirmed.text);
+  const week = await tool(review.access_token, 'list_upcoming_alarms', { to: new Date(Date.now() + 7 * 86400000).toISOString() });
+  assert.match(week.text, /"Team standup", 25 min before/);
+  assert.match((await tool(review.access_token, 'explain_alarm', { event: standup.eventKey })).text, /series/);
+  assert.equal((await tool(review.access_token, 'refresh', { waitSeconds: 10 })).structuredContent.fresh, true);
+  // Disconnecting deletes the phone like a real one; reconnecting brings it back, with the settings kept.
+  const revoked = await fetch(`${site}/oauth/revoke`, form({ token: review.refresh_token, client_id: client.client_id }));
+  assert.equal(revoked.status, 200);
+  assert.equal((await db.collection(`accounts/${demoUid}/assistantDevices`).get()).size, 0);
+  const again = await connectWith((await passwordSignIn(reviewEmail, reviewPassword)).idToken);
+  const back = await tool(again.access_token, 'find_events', { query: 'team standup' });
+  assert.match(back.text, /rings 25 min before/);
+  // Seeding again resets the settings but keeps the connection.
+  assert.equal(seed().status, 0);
+  assert.match((await tool(again.access_token, 'find_events', { query: 'team standup' })).text, /rings 10 min before, at start/);
+
+  console.log('PASS: assistant connector OAuth, MCP tools, iPhone pushes and device API, app callables, disconnect and the review account work end to end through Hosting.');
   process.exit(0);
 })().catch(error => { console.error(error); process.exit(1); });

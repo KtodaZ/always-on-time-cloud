@@ -5,6 +5,7 @@
 // the account before acting, so they carry no uid, settings or event data.
 
 const { MAX_DEVICES, readDevices, refs } = require("./assistant-data");
+const { deliverToDemoPhone, isDemoAccount, isDemoPhone } = require("./assistant-demo-phone");
 const { logEvent } = require("./assistant-log");
 const { cleanText } = require("./assistant-snapshot");
 const { ApnsConfigError, MAX_PAYLOAD_BYTES, PAYLOAD_VERSION, SYNC_COLLAPSE_ID } = require("./apns-transport");
@@ -35,8 +36,11 @@ const hasApnsToken = (device) => device.platform === "ios"
   && typeof device.apnsToken === "string" && APNS_TOKEN.test(device.apnsToken)
   && APNS_ENVIRONMENTS.has(device.apnsEnvironment);
 
-/** Whether the server can send this device push messages (FCM or APNs). */
-const canReceive = (device) => hasApnsToken(device) || hasFcmToken(device);
+/**
+ * Whether the server can send this device push messages (FCM or APNs). `demoPhone`: the device is
+ * the review account's stand-in phone (assistant-demo-phone.js isDemoDelivery), answered in-process.
+ */
+const canReceive = (device, demoPhone = false) => demoPhone || hasApnsToken(device) || hasFcmToken(device);
 
 /** Deletes a device whose push token was rejected for good, unless the phone has registered a new token since. */
 async function removeDevice(db, uid, deviceId, field, failedToken) {
@@ -102,18 +106,23 @@ function buildAssistantApnsRequest({ type, data = {}, deviceId, at, alert = null
  * changeAlert); iPhones then show it with Undo. `apns` is the APNs transport ({send}); without one,
  * or when it isn't configured, iPhones fail with `apns:unconfigured` and FCM is unaffected.
  * Failures are logged under `logId` (the account's log pseudonym), never the uid.
- * Returns which devices it reached, which failed (with `errors[deviceId]` = FCM error code or
- * `apns:<reason>`), which were skipped and which cannot receive messages (no push token).
+ * For the review account (`demoUid`, the ASSISTANT_DEMO_UID param) its stand-in phone handles the
+ * message in-process (assistant-demo-phone.js); a device marked as one in any other account is
+ * treated like a phone without a push token.
+ * Returns which devices it reached, which failed (with `errors[deviceId]` = FCM error code,
+ * `apns:<reason>` or `demo:unavailable`), which were skipped and which cannot receive messages (no
+ * push token).
  */
-async function sendToDevices({ db, messaging, apns = null, logger, logId = null, now = Date.now }, uid, type, data = {}, devices = null, options = {}) {
+async function sendToDevices({ db, messaging, apns = null, logger, logId = null, now = Date.now, demoUid = null }, uid, type, data = {}, devices = null, options = {}) {
   const list = (devices ?? await readDevices(db, uid)).slice(0, MAX_DEVICES);
-  const iphones = list.filter(hasApnsToken);
-  const withToken = list.filter((device) => !iphones.includes(device) && hasFcmToken(device));
+  const demo = isDemoAccount(uid, demoUid) ? list.filter(isDemoPhone) : [];
+  const iphones = list.filter((device) => !demo.includes(device) && hasApnsToken(device));
+  const withToken = list.filter((device) => !demo.includes(device) && !iphones.includes(device) && hasFcmToken(device));
   const result = {
     sent: [], failed: [], removed: [], errors: {}, skipped: [],
-    noToken: list.filter((device) => !iphones.includes(device) && !withToken.includes(device)),
+    noToken: list.filter((device) => !demo.includes(device) && !iphones.includes(device) && !withToken.includes(device)),
   };
-  if (withToken.length === 0 && iphones.length === 0) return result;
+  if (withToken.length === 0 && iphones.length === 0 && demo.length === 0) return result;
 
   const fail = async (device, code, field, token, permanent) => {
     result.failed.push(device);
@@ -163,8 +172,18 @@ async function sendToDevices({ db, messaging, apns = null, logger, logId = null,
     await fail(device, `apns:${reason}`, "apnsToken", device.apnsToken, permanent);
   }
 
+  // Fails like an unreachable phone: never throws into the caller.
+  async function sendDemo(device) {
+    try {
+      await deliverToDemoPhone(db, uid, device.id, type, data, now());
+      result.sent.push(device);
+    } catch {
+      await fail(device, "demo:unavailable", null, null, false);
+    }
+  }
+
   if (type === "state") result.skipped.push(...iphones);
-  await Promise.all([sendFcm(), ...(type === "state" ? [] : iphones.map(sendApns))]);
+  await Promise.all([sendFcm(), ...(type === "state" ? [] : iphones.map(sendApns)), ...demo.map(sendDemo)]);
   return result;
 }
 

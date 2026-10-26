@@ -7,8 +7,9 @@
 
 const { LIMITS, consume } = require("./assistant-limits");
 const { COLLECTIONS, readDevices, readLatestSnapshot, readSnapshot, recordChange } = require("./assistant-data");
+const { ensureDemoPhone, isDemoAccount, isDemoDelivery } = require("./assistant-demo-phone");
 const { deliveryFields, errorFields, logEvent } = require("./assistant-log");
-const { deviceName, sendToDevices } = require("./assistant-push");
+const { canReceive, deviceName, sendToDevices } = require("./assistant-push");
 const { RecordError } = require("./assistant-records");
 const { changeAlert } = require("./assistant-settings");
 const { ToolError, appLink, normalizeSnapshot } = require("./assistant-snapshot");
@@ -17,7 +18,8 @@ const POLL_MS = 1500;
 
 /**
  * `deps`: db, uid, grant ({grantId, logId, clientName, assistant, scopes, setupConfirmedAt}), logId
- * (when the grant has none), origin, now, sleep, messaging, apns, logger, accountEmails(uid). Usage counts
+ * (when the grant has none), origin, now, sleep, messaging, apns, logger, accountEmails(uid), demoUid
+ * (the review account, assistant-demo-phone.js; empty for none). Usage counts
  * and the debugging trace for one call collect on the context (ctx.counts, ctx.trace). Log lines
  * name the account by ctx.logId, never ctx.uid (assistant-log.js).
  */
@@ -35,6 +37,7 @@ function createToolContext(deps) {
     messaging: deps.messaging,
     apns: deps.apns ?? null,
     logger,
+    demoUid: deps.demoUid || null,
     counts,
     trace: {},
     count: (name, amount = 1) => {
@@ -49,6 +52,23 @@ function createToolContext(deps) {
   };
   return ctx;
 }
+
+/**
+ * Before a tool runs for the review account, makes sure its stand-in phone is registered and
+ * current (assistant-demo-phone.js). Does nothing for any other account, and a failure only
+ * leaves the account without a phone for this call.
+ */
+async function prepareContext(ctx) {
+  if (!isDemoAccount(ctx.uid, ctx.demoUid)) return;
+  try {
+    await ensureDemoPhone(ctx.db, ctx.uid, ctx.now(), ctx.demoUid);
+  } catch (error) {
+    logEvent(ctx.logger, "warn", "demo_phone.failed", { logId: ctx.logId, ...errorFields(error) });
+  }
+}
+
+/** Whether a device of this account can be messaged right away (a push token, or the review account's stand-in phone). */
+const canMessage = (ctx, device) => canReceive(device, isDemoDelivery(ctx.uid, device, ctx.demoUid));
 
 function result(text, data = {}) {
   return { text, data };
@@ -105,7 +125,7 @@ async function push(ctx, type, data, devices, options = {}) {
     sent = { limited: true, sent: [], failed: [], removed: [], errors: {}, skipped: [], noToken: devices ?? [] };
   } else {
     sent = await sendToDevices({
-      db: ctx.db, messaging: ctx.messaging, apns: ctx.apns, logger: ctx.logger, logId: ctx.logId, now: ctx.now,
+      db: ctx.db, messaging: ctx.messaging, apns: ctx.apns, logger: ctx.logger, logId: ctx.logId, now: ctx.now, demoUid: ctx.demoUid,
     }, ctx.uid, type, data, devices, options);
   }
   trace(ctx, { push: deliveryFields(type, sent) });
@@ -168,6 +188,7 @@ async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite })
 module.exports = {
   accountEmails,
   applyChange,
+  canMessage,
   createToolContext,
   hasCapability,
   hasPlus,
@@ -175,6 +196,7 @@ module.exports = {
   latestSnapshot,
   names,
   noPhone,
+  prepareContext,
   push,
   requireSnapshot,
   result,

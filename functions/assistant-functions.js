@@ -8,7 +8,7 @@ const { getAuth } = require("firebase-admin/auth");
 const { FieldValue, getFirestore } = require("firebase-admin/firestore");
 const { getMessaging } = require("firebase-admin/messaging");
 const { logger } = require("firebase-functions");
-const { defineSecret } = require("firebase-functions/params");
+const { defineSecret, defineString } = require("firebase-functions/params");
 const { HttpsError, onCall, onRequest } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 
@@ -28,6 +28,13 @@ const { discordPayload } = require("./feedback-notification");
 
 const REGION = "us-central1";
 const feedbackWebhookUrl = defineSecret("FEEDBACK_DISCORD_WEBHOOK_URL");
+// The review account for the assistant directories (docs/ASSISTANT_CONNECTOR.md "Review account"):
+// its uid may approve a connection after a password sign-in and gets a stand-in phone. Empty
+// means no review account.
+const assistantDemoUid = defineString("ASSISTANT_DEMO_UID", {
+  default: "",
+  description: "Firebase uid of the assistant review account (empty for none)",
+});
 
 const emulated = process.env.FUNCTIONS_EMULATOR === "true";
 // Local testing through the Hosting emulator can point the issuer at it; production never reads this.
@@ -49,6 +56,7 @@ function services() {
       ? createRecordingApns({ onSend: (request) => db.collection("emulatorApnsPushes").add({ token: request.token, payload: request.body, at: new Date() }) })
       : { send: (request) => getApnsTransport().send(request) };
     const usage = createUsage({ db, increment: (amount) => FieldValue.increment(amount), logger });
+    const demoUid = assistantDemoUid.value();
     const oauth = createOAuth({
       db,
       origin,
@@ -56,9 +64,10 @@ function services() {
       apns,
       logger,
       usage,
+      demoUid,
       verifyIdToken: (token) => getAuth().verifyIdToken(token, true),
     });
-    shared = { db, messaging, apns, usage, oauth };
+    shared = { db, messaging, apns, usage, oauth, demoUid };
   }
   return shared;
 }
@@ -79,9 +88,9 @@ exports.assistantMcp = onRequest(
   { region: REGION, invoker: "public", maxInstances: 10, timeoutSeconds: 60, memory: "512MiB", secrets: [apnsAuthKey] },
   (req, res) => {
     if (!mcpHandler) {
-      const { db, messaging, apns, usage } = services();
+      const { db, messaging, apns, usage, demoUid } = services();
       mcpHandler = createMcpHandler({
-        db, messaging, apns, usage, logger, origin, legacyHosts, accountEmails, sdk: loadSdk(),
+        db, messaging, apns, usage, logger, origin, legacyHosts, accountEmails, demoUid, sdk: loadSdk(),
       });
     }
     return mcpHandler(req, res);
@@ -165,7 +174,7 @@ exports.undoAssistantChange = connectorCallable("callable.undo", async (request)
   const { uid, logId } = await requireActiveAccount(request);
   const changeId = request.data?.changeId;
   if (!isChangeId(changeId)) throw new HttpsError("invalid-argument", "changeId is required.");
-  const { db, messaging, apns, usage } = services();
+  const { db, messaging, apns, usage, demoUid } = services();
   const started = Date.now();
   const ctx = createToolContext({
     db,
@@ -178,6 +187,7 @@ exports.undoAssistantChange = connectorCallable("callable.undo", async (request)
     messaging,
     apns,
     logger,
+    demoUid,
   });
   const done = (outcome, extra = {}) => logEvent(logger, outcome === "unexpected_error" ? "error" : "info", "callable.undo", {
     logId, outcome, durationMs: Date.now() - started, ...ctx.trace, ...extra,

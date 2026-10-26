@@ -35,7 +35,7 @@ function setup() {
     origin: ORIGIN,
     now: () => T0,
     messaging: createRecordingMessaging(),
-    verifyIdToken: async (token) => ({ uid: token.slice(3), email: "a@example.com", firebase: { identities: { "google.com": ["g"] } } }),
+    verifyIdToken: async (token) => ({ uid: token.slice(3), email: "a@example.com", firebase: { sign_in_provider: "google.com", identities: { "google.com": ["g"] } } }),
     fetchMetadata: async () => ({ client_id: CLAUDE_ID, client_name: "Claude", redirect_uris: [CLAUDE_REDIRECT], token_endpoint_auth_method: "none" }),
   });
   db.documents.set("accounts/alice", { active: true, schemaVersion: 1 });
