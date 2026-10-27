@@ -48,7 +48,7 @@ const TOOLS = [
   {
     name: "get_status",
     title: "Connection status",
-    description: "Connected phones, when each last shared its alarms, whether alarms are paused, what each phone supports, and whether setup has been confirmed. Call this first in a conversation; if setup is not confirmed, call test_connection next.",
+    description: "Connected phones, when each last shared its alarms, whether alarms are paused, what each phone supports, and whether setup has been confirmed. Use it when setup or the phone's state is unknown; when setup isn't confirmed, test_connection confirms it.",
     inputSchema: {},
     annotations: READ,
     scope: "read",
@@ -107,7 +107,7 @@ const TOOLS = [
   {
     name: "confirm_change",
     title: "Confirm a change reached the phone",
-    description: "Waits up to waitSeconds for the user's phones to apply a change, then reports which did. Call it after every change before telling the user the alarm is set on their phone.",
+    description: "Checks whether the user's phones applied a change, waiting up to waitSeconds, and reports which did. Use it after each change.",
     inputSchema: {
       changeId: changeIdInput("The changeId a change returned."),
       waitSeconds: z.number().int().min(0).max(15).optional().describe("How long to wait (default 10, at most 15)."),

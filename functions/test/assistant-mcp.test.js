@@ -204,7 +204,8 @@ test("initialize carries the setup-first instructions and every tool is listed w
   await withServer(handler, async ({ rpc }) => {
     const init = await rpc(token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } });
     assert.match(init.body.result.instructions, /If get_status says setup is not confirmed, call test_connection before anything else/);
-    assert.match(init.body.result.instructions, /calendar connector/);
+    assert.match(init.body.result.instructions, /Google Calendar ids work here too/);
+    assert.doesNotMatch(init.body.result.instructions, /calendar connector/);
     const { body } = await rpc(token, "tools/list");
     const tools = body.result.tools;
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [...TOOL_NAMES].sort());
@@ -285,7 +286,7 @@ test("reads come from the snapshot, say what they are based on, and use short ke
     const found = await call(token, "find_events", { query: "STANDUP team" });
     assert.equal(found.structuredContent.events[0].eventKey, STANDUP);
     const none = await call(token, "find_events", { query: "board meeting" });
-    assert.match(none.text, /No matching event in the next 30 days on watched calendars.*calendar connector or list_calendars/);
+    assert.match(none.text, /No matching event in the next 30 days on watched calendars.*list_calendars shows which calendars are watched/);
     const calendars = await call(token, "list_calendars");
     assert.match(calendars.text, /"Birthdays" \(local\): watched \[local only: change it in the app\]/);
     assert.match(calendars.text, /"Holidays in United States" \(Google\): not watched/);

@@ -33,7 +33,7 @@ const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true,
 
 const eventInputs = {
   event: z.string().max(80).optional().describe("Event key (e_...) from find_events or list_upcoming_alarms; the short form shown in results works too."),
-  googleCalendarId: z.string().max(300).optional().describe("Google Calendar calendarId from the calendar connector (e.g. the user's email for their primary calendar)."),
+  googleCalendarId: z.string().max(300).optional().describe("Google Calendar calendarId (e.g. the user's email for their primary calendar)."),
   googleEventId: z.string().max(1100).optional().describe("Google Calendar event id. For one occurrence of a recurring event use the instance id (seriesId_20261020T150000Z)."),
   recurringEventId: z.string().max(1100).optional().describe("Google recurringEventId of an occurrence, if the connector gave one."),
   originalStartTime: z.string().max(40).optional().describe("Google originalStartTime (dateTime or date) of an occurrence, if the connector gave one."),
@@ -144,7 +144,7 @@ const TOOLS = [
   {
     name: "find_events",
     title: "Find events",
-    description: `Searches event titles on watched calendars in the next ${SNAPSHOT_WINDOW_DAYS} days and returns their keys and alarms. Use the keys with explain_alarm, set_event_alarms or set_series_alarms. It only knows titles and times; for anything else use the calendar connector.`,
+    description: `Searches event titles on watched calendars in the next ${SNAPSHOT_WINDOW_DAYS} days and returns their keys and alarms. Use the keys with explain_alarm, set_event_alarms or set_series_alarms. It only knows titles and times.`,
     inputSchema: {
       query: z.string().min(1).max(100).describe("Words from the event title (all must match, any case)."),
       from: z.string().max(40).optional().describe("Earliest start, ISO 8601. Default: now."),
@@ -162,7 +162,7 @@ const TOOLS = [
       const shown = matches.slice(0, MAX_EVENTS);
       const lines = [basis(snapshot, now)];
       if (!shown.length) {
-        lines.push(`No matching event in the next ${SNAPSHOT_WINDOW_DAYS} days on watched calendars. It may be further out or on a calendar the app doesn't watch; check the calendar connector or list_calendars.`);
+        lines.push(`No matching event in the next ${SNAPSHOT_WINDOW_DAYS} days on watched calendars. It may be further out or on a calendar the app doesn't watch; list_calendars shows which calendars are watched.`);
       } else {
         lines.push(`${plural(matches.length, "matching event")}${matches.length > shown.length ? ` (first ${MAX_EVENTS} shown)` : ""}:`);
         for (const event of shown) {

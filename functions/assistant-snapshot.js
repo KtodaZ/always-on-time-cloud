@@ -324,7 +324,7 @@ function resolveEvent(snapshot, args, { accountEmails = [], needOccurrence = tru
     throw new ToolError("No event in the next 30 days on watched calendars has that key. Use find_events to look it up.");
   }
   if (!hasGoogleIds(args)) {
-    throw new ToolError("Name the event with its key from find_events or list_upcoming_alarms (event), or with googleCalendarId and googleEventId from the calendar connector.");
+    throw new ToolError("Name the event with its key from find_events or list_upcoming_alarms (event), or with its Google Calendar ids (googleCalendarId and googleEventId).");
   }
   const { key: calendarKey } = resolveCalendar(snapshot, args.googleCalendarId, { accountEmails });
   let keys;
