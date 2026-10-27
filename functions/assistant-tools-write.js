@@ -85,7 +85,7 @@ const TOOLS = [
   writeTool({
     name: "set_event_alarms",
     title: "Set alarms for one event",
-    description: "Changes the alarms for one event occurrence only: set lead times, turn its alarms off, or reset it to follow its series, calendar and app settings. For every occurrence of a recurring event use set_series_alarms. Returns a changeId; then call confirm_change.",
+    description: "Changes the alarms for one event occurrence only: set lead times, turn its alarms off, or reset it to follow its series, calendar and app settings. For every occurrence of a recurring event use set_series_alarms. Returns a changeId for confirm_change.",
     inputSchema: { ...eventInputs, mode: modeInput("series/calendar/app"), leadTimes: leadTimesInput.optional() },
     async plan(ctx, args) {
       const mode = modeOf(args);
@@ -112,7 +112,7 @@ const TOOLS = [
   writeTool({
     name: "set_series_alarms",
     title: "Set alarms for a recurring series",
-    description: "Changes the alarms for every occurrence of a recurring event: set lead times, turn them off, or reset to follow the calendar and app settings. Occurrences with their own setting keep it. Name the series by any of its event keys, its series key, or Google ids. Returns a changeId; then call confirm_change.",
+    description: "Changes the alarms for every occurrence of a recurring event: set lead times, turn them off, or reset to follow the calendar and app settings. Occurrences with their own setting keep it. Name the series by any of its event keys, its series key, or Google ids. Returns a changeId for confirm_change.",
     inputSchema: {
       ...eventInputs,
       event: z.string().max(80).optional().describe("Any event key (e_...) of the series, or its series key (s_...)."),
@@ -123,7 +123,7 @@ const TOOLS = [
       const mode = modeOf(args);
       const snapshot = await latestSnapshot(ctx);
       const resolved = resolveEvent(snapshot, args, { accountEmails: await accountEmails(ctx), needOccurrence: false });
-      if (!resolved.seriesKey) throw new ToolError("That event isn't in what the phone shared, so its series is unknown. Use find_events, or Google Calendar ids from the calendar connector.");
+      if (!resolved.seriesKey) throw new ToolError("That event isn't in what the phone shared, so its series is unknown. Use find_events, or Google Calendar ids (googleCalendarId and googleEventId).");
       if (resolved.recurring === false || (resolved.event && !resolved.event.recurring)) {
         throw new ToolError("That event doesn't repeat; use set_event_alarms for it.");
       }
@@ -146,7 +146,7 @@ const TOOLS = [
   writeTool({
     name: "set_calendar",
     title: "Change a calendar's alarms",
-    description: "Changes one calendar on the phone: whether the app watches it (rings for its events), its default lead times, which invitations ring, and whether its alarms ring through Do Not Disturb (for important calendars when update_settings respectDoNotDisturb is on; otherwise alarms already ring whenever the system allows). All-day events are an app-wide setting (update_settings ignoreAllDayEvents). Local-only calendars can't be changed here. Returns a changeId; then call confirm_change.",
+    description: "Changes one calendar on the phone: whether the app watches it (rings for its events), its default lead times, which invitations ring, and whether its alarms ring through Do Not Disturb (for important calendars when update_settings respectDoNotDisturb is on; otherwise alarms already ring whenever the system allows). All-day events are an app-wide setting (update_settings ignoreAllDayEvents). Local-only calendars can't be changed here. Returns a changeId for confirm_change.",
     inputSchema: {
       calendar: z.string().min(1).max(300).describe("Calendar key, name, or Google calendarId."),
       watched: z.boolean().optional().describe("true to ring for this calendar's events, false to stop."),
@@ -198,7 +198,7 @@ const TOOLS = [
   writeTool({
     name: "update_settings",
     title: "Change app settings",
-    description: "Changes app-wide alarm, snooze, spoken-alarm and appearance settings. Only include the settings to change; null resets one to the app default. Pausing alarms has its own tools. Returns a changeId; then call confirm_change.",
+    description: "Changes app-wide alarm, snooze, spoken-alarm and appearance settings. Only include the settings to change; null resets one to the app default. Pausing alarms has its own tools. Returns a changeId for confirm_change.",
     inputSchema: {
       settings: z.object(Object.fromEntries(Object.entries(SETTINGS).map(([field, setting]) => [field, setting.schema.nullable().optional()])))
         .strict().describe("Settings to change."),
@@ -222,7 +222,7 @@ const TOOLS = [
   writeTool({
     name: "pause_alarms",
     title: "Pause alarms",
-    description: "Pauses every Always On Time alarm on the user's phones until a time, or until resumed. Returns a changeId; then call confirm_change.",
+    description: "Pauses every Always On Time alarm on the user's phones until a time, or until resumed. Returns a changeId for confirm_change.",
     inputSchema: {
       until: z.string().max(40).optional().describe("When alarms start ringing again, ISO 8601 (phone's time zone if no offset). Omit with indefinitely=true."),
       indefinitely: z.boolean().optional().describe("true to pause until the user resumes."),
@@ -255,7 +255,7 @@ const TOOLS = [
   writeTool({
     name: "resume_alarms",
     title: "Resume alarms",
-    description: "Ends a pause so alarms ring again. Returns a changeId; then call confirm_change.",
+    description: "Ends a pause so alarms ring again. Returns a changeId for confirm_change.",
     inputSchema: {},
     annotations: RESTORES,
     async plan() {
@@ -265,7 +265,7 @@ const TOOLS = [
   writeTool({
     name: "undo",
     title: "Undo a change",
-    description: `Reverses an earlier change (by its changeId) made through any assistant in the last ${UNDO_DAYS} days, unless those settings have changed again since. Returns a new changeId; then call confirm_change.`,
+    description: `Reverses an earlier change (by its changeId) made through any assistant in the last ${UNDO_DAYS} days, unless those settings have changed again since. Returns a new changeId for confirm_change.`,
     inputSchema: { changeId: changeIdInput("The changeId the change returned.") },
     annotations: { ...MAY_SILENCE, idempotentHint: false },
     async plan(ctx, args) {
