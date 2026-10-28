@@ -66,11 +66,13 @@ describe("push format", () => {
     });
     expect(Object.keys(call.headers)).toContain("apns-id");
 
+    // A new token starts unverified, so its registered environment is used.
+    h.apnsToken = "cd".repeat(32);
     expect((await h.update({ environment: "production" })).status).toBe(204);
     h.advance(3 * MINUTE);
     await changeNow(h);
     await h.tick();
-    expect(h.apns[1].url).toBe(`https://api.push.apple.com/3/device/${h.apnsToken}`);
+    expect(h.apns[0].url).toBe(`https://api.push.apple.com/3/device/${h.apnsToken}`);
   });
 });
 
@@ -232,7 +234,8 @@ describe("APNs failures", () => {
       h.advance(5 * MINUTE);
       await changeNow(h);
       await h.tick();
-      expect(h.apns).toHaveLength(1);
+      // BadDeviceToken from an unverified token probes the other environment once first.
+      expect(h.apns).toHaveLength(result.status === 410 ? 1 : 2);
       h.respond = () => ({ status: 200 });
       expect((await h.update()).status).toBe(204);
       expect((await h.row())?.enabled).toBe(1);
@@ -325,9 +328,13 @@ describe("shard alarm", () => {
   });
 
   /** Adds `count` installs to the harness's shard, all with a change due now and its APNs token. */
-  async function bulkInstalls(h: Harness, count: number, prefix = "bulk"): Promise<void> {
+  async function bulkInstalls(h: Harness, count: number, prefix = "bulk", verified = true): Promise<void> {
     await runInDurableObject(await h.shard(), (_instance, state) => {
       for (let index = 0; index < count; index += 1) {
+        if (verified) {
+          state.storage.sql.exec("INSERT INTO apns_routes (install_id, apns_token, environment) VALUES (?, ?, 'development')",
+            `${prefix}${String(index).padStart(18, "0")}`, h.apnsToken);
+        }
         state.storage.sql.exec(
           `INSERT INTO installs (install_id, secret_hash, apns_token, apns_environment, polling, active_start, active_end, time_zone,
              enabled, created_at, updated_at, pending_change_at, pending_change_provider, next_wake_at, priority_wake_at)
@@ -359,6 +366,17 @@ describe("shard alarm", () => {
     // Each push failed twice (request and retry); the token authority call is not a fetch.
     expect(h.apns).toHaveLength(2 * PER_RUN);
     expect(h.apns.length).toBeLessThanOrEqual(subrequestBudget(env));
+  });
+
+  it("reserves an environment probe for unverified tokens and still stays within the budget", async () => {
+    const h = await registered(FRESHNESS);
+    // Worst case: the registered host rejects the token, the other host's request is retried.
+    h.respond = (call) => call.url.startsWith("https://api.sandbox.push.apple.com/") ? { status: 400, reason: "BadDeviceToken" } : new Error("connection reset");
+    await bulkInstalls(h, 30, "probe", false);
+    expect(await h.tick()).toBe(true);
+    expect(h.apns.length).toBe(3 * Math.floor((subrequestBudget(env) - 2) / 4));
+    expect(h.apns.length).toBeLessThanOrEqual(subrequestBudget(env));
+    await h.sql(await h.shard(), "DELETE FROM installs WHERE install_id LIKE 'probe%'");
   });
 
   it("uses one APNs provider token across shards", async () => {

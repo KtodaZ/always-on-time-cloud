@@ -10,10 +10,12 @@ import { DurableObject } from "cloudflare:workers";
 
 import { ApnsConfigError, sendRelayPush, type ApnsEnvironment, type ApnsResult } from "./apns";
 import { apnsConfigFromEnv, sharedProviderToken } from "./apns-token";
+import type { SyncReceipt } from "./http";
 import type { Env } from "./env";
 import {
   DAY_MS,
   MINUTE_MS,
+  RETRY_OFFSETS_MINUTES,
   failureBackoffMs,
   freshAt,
   initialRenewDueAt,
@@ -25,6 +27,7 @@ import {
   stagesSatisfiedBySync,
   wakeTimes,
   type AlarmState,
+  type DeliveryState,
   type Freshness,
   type InstallState,
   type Provider,
@@ -53,6 +56,8 @@ export const DEFAULT_SUBREQUESTS_PER_RUN = 40;
 const MIN_SUBREQUESTS_PER_RUN = 10;
 /** Worst case per push: the APNs request and its one retry. */
 const SUBREQUESTS_PER_PUSH = 2;
+/** Worst case for a token whose APNs environment is unverified: one probe of the other host too. */
+const SUBREQUESTS_PER_UNVERIFIED_PUSH = 4;
 /** Per run: fetching the shared provider token and reporting a rejected one. */
 const TOKEN_SUBREQUESTS = 2;
 /** Prune index releases may use at most this share of a run's budget (at least one install). */
@@ -80,6 +85,8 @@ export interface RegistrationInput {
   apnsToken: string;
   environment: ApnsEnvironment;
   freshness: Freshness;
+  receiptVersion?: 1;
+  deliveryEligible?: boolean;
 }
 
 export interface StoredSubscriptionInput {
@@ -91,16 +98,32 @@ export interface StoredSubscriptionInput {
 
 export type DeviceOp =
   | { kind: "authorize" }
+  | { kind: "status" }
   | { kind: "update"; fields: RegistrationInput }
   | { kind: "delete" }
   | { kind: "alarms"; alarms: Array<{ key: string; triggerAt: number }> }
   | { kind: "synced"; syncedAt: number }
+  | { kind: "receipt"; receipt: Omit<SyncReceipt, "alarms">; alarms: Array<{key: string; triggerAt: number; armed?: boolean}> }
   | { kind: "deleteSubscription"; key: string };
 
 export type DeviceResult =
   | { status: "unauthorized" }
   | { status: "rate-limited" }
-  | { status: "ok"; releasedKeys: string[] };
+  | { status: "ok"; releasedKeys: string[]; install?: InstallStatus };
+
+/** What the phone may learn about its own install (GET /v2/installations/{id}). */
+export interface InstallStatus {
+  enabled: boolean;
+  disabledReason: string | null;
+  environment: ApnsEnvironment;
+  environmentVerified: boolean;
+  receiptVersion: 1 | null;
+  deliveryEligible: boolean;
+  lastVerifiedAtMs: number | null;
+  lastPushAtMs: number | null;
+  unacknowledgedDeliveries: number;
+  nextRefreshAtMs: number | null;
+}
 
 export type GoogleOutcome = "missing" | "expired" | "forbidden" | "ignored" | "recorded";
 
@@ -162,9 +185,15 @@ interface Claim {
   apnsToken: string;
   environment: ApnsEnvironment;
   plan: PushPlan;
+  deliveryId?: string;
+  /** True when this token already got an APNs 200 from `environment`. */
+  environmentVerified: boolean;
 }
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS delivery_state (install_id TEXT PRIMARY KEY, state TEXT NOT NULL);
+-- The APNs environment that accepted this token (IOS-BUG-21); a new token starts unverified.
+CREATE TABLE IF NOT EXISTS apns_routes (install_id TEXT PRIMARY KEY, apns_token TEXT NOT NULL, environment TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS installs (
   install_id TEXT PRIMARY KEY,
   secret_hash TEXT NOT NULL,
@@ -287,6 +316,56 @@ export class InstallShard extends DurableObject<Env> {
 
   // --- Install records ---------------------------------------------------------------------
 
+  private deliveryState(installId: string): DeliveryState | undefined {
+    const row = this.sql.exec<{state: string}>("SELECT state FROM delivery_state WHERE install_id = ?", installId).toArray()[0];
+    return row ? JSON.parse(row.state) as DeliveryState : undefined;
+  }
+
+  private saveDelivery(installId: string, state: DeliveryState): void {
+    this.sql.exec("INSERT INTO delivery_state (install_id, state) VALUES (?, ?) ON CONFLICT (install_id) DO UPDATE SET state = excluded.state", installId, JSON.stringify(state));
+  }
+
+  /** The environment to send to, and whether this token was already accepted there. */
+  private route(row: InstallRow): { environment: ApnsEnvironment; verified: boolean } {
+    const stored = this.sql.exec<{ apns_token: string; environment: ApnsEnvironment }>(
+      "SELECT apns_token, environment FROM apns_routes WHERE install_id = ?", row.install_id).toArray()[0];
+    if (stored && stored.apns_token === row.apns_token) return { environment: stored.environment, verified: true };
+    return { environment: row.apns_environment, verified: false };
+  }
+
+  private saveRoute(installId: string, token: string, environment: ApnsEnvironment): void {
+    this.sql.exec(
+      `INSERT INTO apns_routes (install_id, apns_token, environment) VALUES (?, ?, ?)
+       ON CONFLICT (install_id) DO UPDATE SET apns_token = excluded.apns_token, environment = excluded.environment`,
+      installId, token, environment,
+    );
+  }
+
+  private status(row: InstallRow): InstallStatus {
+    const route = this.route(row);
+    const delivery = this.deliveryState(row.install_id);
+    return {
+      enabled: row.enabled === 1,
+      disabledReason: row.disabled_reason,
+      environment: route.environment,
+      environmentVerified: route.verified,
+      receiptVersion: delivery ? 1 : null,
+      deliveryEligible: delivery?.eligible ?? true,
+      lastVerifiedAtMs: row.last_sync_at,
+      lastPushAtMs: row.last_push_at,
+      unacknowledgedDeliveries: delivery?.outstanding?.attempts ?? 0,
+      nextRefreshAtMs: delivery?.nextRefreshAt ?? null,
+    };
+  }
+
+  private enableReceipts(installId: string, fields: RegistrationInput): void {
+    if (fields.receiptVersion !== 1) return;
+    const state = this.deliveryState(installId) ?? {version: 1 as const, generation: 0, snapshotRevision: 0,
+      nextRefreshAt: null, lastWakeAt: null, eligible: true, outstanding: null};
+    state.eligible = fields.deliveryEligible ?? true;
+    this.saveDelivery(installId, state);
+  }
+
   private installRow(installId: string): InstallRow | null {
     return this.sql.exec<InstallRow>("SELECT * FROM installs WHERE install_id = ?", installId).toArray()[0] ?? null;
   }
@@ -307,6 +386,7 @@ export class InstallShard extends DurableObject<Env> {
 
   private installState(row: InstallRow): InstallState {
     return {
+      receipt: this.deliveryState(row.install_id),
       enabled: row.enabled === 1,
       freshness: { polling: row.polling === 1, activeHours: { start: row.active_start, end: row.active_end }, timeZone: row.time_zone },
       createdAt: row.created_at,
@@ -371,6 +451,7 @@ export class InstallShard extends DurableObject<Env> {
   async register(installId: string, secretHash: string, fields: RegistrationInput): Promise<"created" | "updated" | "conflict"> {
     const nowMs = this.now();
     const existing = this.installRow(installId);
+    if (!existing || safeEqualHex(secretHash, existing.secret_hash)) this.enableReceipts(installId, fields);
     if (existing) {
       if (!safeEqualHex(secretHash, existing.secret_hash)) return "conflict";
       this.updateInstall(installId, registrationPatch(fields, nowMs), nowMs);
@@ -403,8 +484,10 @@ export class InstallShard extends DurableObject<Env> {
     let patch: InstallPatch = {};
     switch (op.kind) {
       case "authorize":
+      case "status":
         break;
       case "update":
+        this.enableReceipts(installId, op.fields);
         patch = registrationPatch(op.fields, nowMs);
         break;
       case "delete":
@@ -414,8 +497,39 @@ export class InstallShard extends DurableObject<Env> {
         this.replaceAlarms(installId, op.alarms);
         break;
       case "synced":
-        patch = this.syncPatch(row, op.syncedAt);
+        // Legacy autonomous timestamps cannot acknowledge receipt-capable deliveries.
+        if (!this.deliveryState(installId)) patch = this.syncPatch(row, op.syncedAt);
         break;
+      case "receipt": {
+        const state = this.deliveryState(installId);
+        const r = op.receipt;
+        if (!state) break;
+        // A late receipt from another process (app vs NSE) may carry an older snapshot: it can no
+        // longer replace triggers or the horizon, but it still proves its delivery ran.
+        const newer = r.snapshotRevision > state.snapshotRevision;
+        if (newer) {
+          this.replaceAlarms(installId, op.alarms);
+          state.snapshotRevision = r.snapshotRevision;
+        }
+        const delivery = state.outstanding;
+        const matched = delivery !== null && r.deliveryId === delivery.id;
+        if (!newer && !matched) break;
+        if (r.calendarVerified) {
+          // A push receipt is fresh from the server's issue time (the read followed it), so a
+          // delayed receipt never makes an old read look new, nor a device clock a future one.
+          const verifiedAt = matched ? delivery.issuedAt : Math.min(r.syncedAt, nowMs);
+          patch.last_sync_at = Math.max(row.last_sync_at ?? 0, verifiedAt);
+          if (newer) state.nextRefreshAt = Math.min(r.nextRefreshAt, verifiedAt + DAY_MS);
+        }
+        if (matched && r.calendarVerified && r.alarmsReconciled) {
+          state.outstanding = null;
+          if (delivery.generation === state.generation) {
+            patch.pending_change_at = null; patch.pending_change_provider = null;
+          }
+        }
+        this.saveDelivery(installId, state);
+        break;
+      }
       case "deleteSubscription": {
         const deleted = this.sql.exec("DELETE FROM subscriptions WHERE sub_key = ? AND install_id = ?", op.key, installId).rowsWritten;
         if (deleted > 0) releasedKeys = [op.key];
@@ -423,7 +537,11 @@ export class InstallShard extends DurableObject<Env> {
       }
     }
     if (op.kind !== "delete") this.updateInstall(installId, { ...rate, ...patch }, nowMs);
-    if (op.kind !== "authorize") await this.reschedule();
+    if (op.kind !== "authorize" && op.kind !== "status") await this.reschedule();
+    if (op.kind === "status") {
+      const current = this.installRow(installId);
+      if (current) return { status: "ok", releasedKeys, install: this.status(current) };
+    }
     return { status: "ok", releasedKeys };
   }
 
@@ -432,6 +550,8 @@ export class InstallShard extends DurableObject<Env> {
     const keys = this.sql.exec<{ sub_key: string }>("SELECT sub_key FROM subscriptions WHERE install_id = ?", installId).toArray().map((row) => row.sub_key);
     this.sql.exec("DELETE FROM subscriptions WHERE install_id = ?", installId);
     this.sql.exec("DELETE FROM alarms WHERE install_id = ?", installId);
+    this.sql.exec("DELETE FROM delivery_state WHERE install_id = ?", installId);
+    this.sql.exec("DELETE FROM apns_routes WHERE install_id = ?", installId);
     this.sql.exec("DELETE FROM installs WHERE install_id = ?", installId);
     return keys;
   }
@@ -535,6 +655,8 @@ export class InstallShard extends DurableObject<Env> {
    * send time, so a change arriving while a push is in flight stays pending.
    */
   private changePatch(row: InstallRow, provider: Provider, nowMs: number): InstallPatch {
+    const receipt = this.deliveryState(row.install_id);
+    if (receipt) { receipt.generation += 1; this.saveDelivery(row.install_id, receipt); }
     return { pending_change_at: Math.max(row.pending_change_at ?? 0, nowMs), pending_change_provider: provider };
   }
 
@@ -690,10 +812,26 @@ export class InstallShard extends DurableObject<Env> {
       }
       return null;
     }
-    // The claim is not written: the outcome below updates the row once.
+    // Persist delivery before APNs I/O so eviction, collapse, or a receipt racing the response is safe.
+    const receipt = this.deliveryState(installId);
+    let deliveryId: string | undefined;
+    if (receipt) {
+      const prior = receipt.outstanding;
+      const continuing = prior !== null && prior.nextAt !== null;
+      const startedAt = continuing ? prior.startedAt : nowMs;
+      const attempts = continuing ? prior.attempts + 1 : 1;
+      const bursting = continuing || plan.burst === true;
+      deliveryId = crypto.randomUUID();
+      const offsets = RETRY_OFFSETS_MINUTES;
+      receipt.outstanding = {id: deliveryId, generation: receipt.generation, issuedAt: nowMs, startedAt, attempts,
+        nextAt: bursting && attempts < offsets.length ? Math.max(nowMs + 2 * MINUTE_MS, startedAt + offsets[attempts] * MINUTE_MS) : null};
+      receipt.lastWakeAt = nowMs;
+      this.saveDelivery(installId, receipt);
+    }
     const claimId = crypto.randomUUID();
     this.inFlight.set(installId, { claimId, at: nowMs });
-    return { installId, claimId, apnsToken: row.apns_token, environment: row.apns_environment, plan };
+    const route = this.route(row);
+    return { installId, claimId, apnsToken: row.apns_token, environment: route.environment, plan, deliveryId, environmentVerified: route.verified };
   }
 
   /** Releases the in-memory claim; false when it is no longer this claim's. */
@@ -711,7 +849,7 @@ export class InstallShard extends DurableObject<Env> {
     if (!this.release(claim)) return;
     const row = this.installRow(claim.installId);
     if (!row) return;
-    this.markStages(claim.installId, stagesSatisfiedByPush(this.installState(row), claim.plan.kind, sentAt), sentAt);
+    if (!claim.deliveryId) this.markStages(claim.installId, stagesSatisfiedByPush(this.installState(row), claim.plan.kind, sentAt), sentAt);
     for (const key of claim.plan.renewalKeys) {
       const subscription = this.subscriptionRow(claim.installId, key);
       if (!subscription || !isRenewalDue(toSubscriptionState(subscription), sentAt)) continue;
@@ -720,7 +858,7 @@ export class InstallShard extends DurableObject<Env> {
         sentAt, renewRetryAt(sentAt, subscription.expires_at), key,
       );
     }
-    const changeCovered = row.pending_change_at !== null && row.pending_change_at <= sentAt;
+    const changeCovered = !claim.deliveryId && row.pending_change_at !== null && row.pending_change_at <= sentAt;
     this.updateInstall(claim.installId, {
       last_push_at: sentAt,
       last_push_kind: claim.plan.kind,
@@ -752,22 +890,39 @@ export class InstallShard extends DurableObject<Env> {
     return true;
   }
 
+  private async send(claim: Claim, sentAt: number, environment: ApnsEnvironment): Promise<ApnsResult> {
+    return sendRelayPush(apnsConfigFromEnv(this.env), sharedProviderToken(this.env, () => this.now()), {
+      environment,
+      token: claim.apnsToken,
+      kind: claim.plan.kind,
+      provider: claim.plan.provider,
+      at: sentAt,
+      deliveryId: claim.deliveryId,
+    });
+  }
+
+  /**
+   * Sends a claimed push. A first `BadDeviceToken` for a token never accepted anywhere probes the
+   * other APNs host once (a development-signed build registered as production, or the reverse);
+   * the host that accepts is remembered for that token. 410, auth errors and timeouts never probe.
+   */
   private async deliver(claim: Claim, sentAt: number): Promise<"sent" | "failed" | "disabled"> {
     let result: ApnsResult;
+    let environment = claim.environment;
     try {
-      result = await sendRelayPush(apnsConfigFromEnv(this.env), sharedProviderToken(this.env, () => this.now()), {
-        environment: claim.environment,
-        token: claim.apnsToken,
-        kind: claim.plan.kind,
-        provider: claim.plan.provider,
-        at: sentAt,
-      });
+      result = await this.send(claim, sentAt, environment);
+      if (!claim.environmentVerified && result.status === 400 && result.reason === "BadDeviceToken") {
+        environment = environment === "production" ? "development" : "production";
+        result = await this.send(claim, sentAt, environment);
+        log("info", "Probed the other APNs environment after BadDeviceToken", { installId: claim.installId, status: result.status });
+      }
     } catch (error) {
       this.failPush(claim, this.now());
       log(error instanceof ApnsConfigError ? "error" : "warn", "APNs request failed", { installId: claim.installId, kind: claim.plan.kind, error: errorName(error) });
       return "failed";
     }
     if (result.status === 200) {
+      if (!claim.environmentVerified || environment !== claim.environment) this.saveRoute(claim.installId, claim.apnsToken, environment);
       this.completePush(claim, sentAt);
       return "sent";
     }
@@ -805,12 +960,23 @@ export class InstallShard extends DurableObject<Env> {
     }
     const pushLimit = pushesPerRun(budget, pruneCalls);
     // priority_wake_at is never earlier than next_wake_at, so every install with a precheck or
-    // change due is in this range; they go first.
-    const ids = this.sql.exec<{ install_id: string }>(
-      `SELECT install_id FROM installs WHERE next_wake_at IS NOT NULL AND next_wake_at <= ?
-       ORDER BY CASE WHEN priority_wake_at <= ? THEN 0 ELSE 1 END, next_wake_at LIMIT ?`,
+    // change due is in this range; they go first. Unverified tokens may need an environment probe,
+    // so they reserve twice the calls; the run stops before the budget could be exceeded.
+    const due = this.sql.exec<{ install_id: string; verified: number }>(
+      `SELECT i.install_id AS install_id, CASE WHEN r.apns_token = i.apns_token THEN 1 ELSE 0 END AS verified
+       FROM installs i LEFT JOIN apns_routes r ON r.install_id = i.install_id
+       WHERE i.next_wake_at IS NOT NULL AND i.next_wake_at <= ?
+       ORDER BY CASE WHEN i.priority_wake_at <= ? THEN 0 ELSE 1 END, i.next_wake_at LIMIT ?`,
       nowMs, nowMs, pushLimit,
-    ).toArray().map((row) => row.install_id);
+    ).toArray();
+    const ids: string[] = [];
+    let reserved = pruneCalls + TOKEN_SUBREQUESTS;
+    for (const row of due) {
+      const cost = row.verified === 1 ? SUBREQUESTS_PER_PUSH : SUBREQUESTS_PER_UNVERIFIED_PUSH;
+      if (ids.length > 0 && reserved + cost > budget) break;
+      reserved += cost;
+      ids.push(row.install_id);
+    }
     const counts: Record<string, number> = { installs: ids.length };
     await forEachLimited(ids, PUSH_CONCURRENCY, async (installId) => {
       try {

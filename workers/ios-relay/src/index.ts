@@ -19,6 +19,7 @@ import {
   validateRegistration,
   validateSubscription,
   validateSynced,
+  validateReceipt,
   validateUpdate,
   type ApiRoute,
 } from "./http";
@@ -90,6 +91,8 @@ async function register(request: Request, env: Env): Promise<Response> {
     apnsToken: body.apnsToken,
     environment: body.environment,
     freshness: body.freshness,
+    receiptVersion: body.receiptVersion,
+    deliveryEligible: body.deliveryEligible,
   });
   if (outcome === "conflict") throw new HttpError(409, "install ID is already registered");
   return json(outcome === "created" ? 201 : 200, { installId: body.installId });
@@ -152,6 +155,12 @@ async function deviceApi(request: Request, env: Env, url: URL): Promise<Response
     const shard = await installShard(env, route.installId);
     const nowMs = Date.now();
 
+    if (route.kind === "installation" && method === "GET") {
+      const result = await shard.device(route.installId, secretHash, { kind: "status" });
+      if (result.status === "unauthorized") throw new HttpError(401, "invalid install credentials");
+      if (result.status === "rate-limited") throw new HttpError(429, "rate limit exceeded");
+      return json(200, result.install ?? {});
+    }
     if (route.kind === "installation" && method === "PUT") {
       const fields = validateUpdate(await readJson(request, MAX_API_BODY_BYTES));
       await runDevice(shard, route.installId, secretHash, { kind: "update", fields });
@@ -164,13 +173,20 @@ async function deviceApi(request: Request, env: Env, url: URL): Promise<Response
     }
     if (route.kind === "alarms") {
       const alarms = validateAlarms(await readJson(request, MAX_API_BODY_BYTES), nowMs);
-      const hashed = await Promise.all(alarms.map(async (alarm) => ({ key: await alarmKey(alarm.id), triggerAt: alarm.triggerAt })));
+      const hashed = await Promise.all(alarms.map(async (alarm) => ({ key: await alarmKey(alarm.id), triggerAt: alarm.triggerAt, armed: alarm.armed })));
       await runDevice(shard, route.installId, secretHash, { kind: "alarms", alarms: hashed });
       return json(204);
     }
     if (route.kind === "synced") {
-      const syncedAt = validateSynced(await readJson(request, MAX_API_BODY_BYTES), nowMs);
-      await runDevice(shard, route.installId, secretHash, { kind: "synced", syncedAt });
+      const body = await readJson(request, MAX_API_BODY_BYTES);
+      if (body && typeof body === "object" && "receiptVersion" in body) {
+        const {alarms, ...receipt} = validateReceipt(body, nowMs);
+        const hashed = await Promise.all(alarms.map(async a => ({key: await alarmKey(a.id), triggerAt: a.triggerAt, armed: a.armed})));
+        await runDevice(shard, route.installId, secretHash, {kind: "receipt", receipt, alarms: hashed});
+      } else {
+        const syncedAt = validateSynced(body, nowMs);
+        await runDevice(shard, route.installId, secretHash, { kind: "synced", syncedAt });
+      }
       return json(204);
     }
     if (method === "PUT") return await putSubscription(env, shard, route, request, secretHash);

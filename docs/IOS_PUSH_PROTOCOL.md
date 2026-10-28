@@ -122,6 +122,14 @@ exists on the server (deleted, or disabled by APNs and pruned after 30 days). Ge
   included, `end` excluded, ranges may cross midnight (`22:00`-`06:00`), and `start` may not equal
   `end`. They limit heartbeats only. The app's default is `06:00`-`23:00`.
 
+Optional receipt fields (section 3.7): `"receiptVersion": 1` opts the install into delivery
+receipts; `"deliveryEligible": false` tells the relay that notification alerts are off, so the NSE
+cannot run and no push is sent until an update sets it back to `true` (pending work is kept).
+
+- `environment` is a hint. The relay remembers the environment where a token first got APNs `200`
+  and keeps using it for that token whatever later registrations say; a new token starts
+  unverified (section 6).
+
 Responses: `201 {"installId": "..."}` when created; `200 {"installId": "..."}` when the same
 `installId` and `installSecret` are repeated (safe to retry, updates the fields above and
 re-enables the install); `409` if the `installId` exists with a different secret.
@@ -234,6 +242,45 @@ before `syncedAtMs`, and clears a pending change recorded at or before `syncedAt
 satisfy renewals (only the device renewing its subscriptions does) and does not count toward the
 2-minute push coalescing, which limits pushes, not syncs.
 
+### 3.7 Delivery receipts (`receiptVersion: 1`)
+
+For receipt installs, APNs `200` proves only transport. Each push carries `aot.deliveryId`
+(section 5); after every sync, the app or NSE posts a receipt to the same `/synced` endpoint:
+
+```json
+{
+  "receiptVersion": 1, "syncedAtMs": 1791403200000, "snapshotRevision": 42,
+  "deliveryId": "6f1c...", "calendarVerified": true, "alarmsReconciled": true,
+  "alarms": [{ "id": "<opaque>", "triggerAtMs": 1791406800000, "armed": true }],
+  "nextRefreshAtMs": 1791489600000
+}
+```
+
+- `snapshotRevision`: increases with every receipt the device sends (shared by app and NSE). A
+  receipt with a newer revision replaces the trigger snapshot (as 3.4) and the horizon; an older
+  one can still acknowledge its own `deliveryId`.
+- `deliveryId`: the `aot.deliveryId` of the push that caused the sync; omitted for syncs the
+  device started itself (app open, background refresh, alarm intents).
+- `calendarVerified`: every selected calendar was read completely. `alarmsReconciled`: AlarmKit
+  matches the plan. A sync that returned busy, was cut off, or read only cached data sends
+  `false` (or nothing).
+- `nextRefreshAtMs`: when the device next needs a wake: the next trigger entering its alarm
+  horizon, a deferred alarm's refill, or one day after this read, whichever is first.
+
+The relay clears pending work only for a receipt that matches the outstanding delivery, verifies
+calendars and alarms, and whose delivery was issued after the newest webhook. Freshness counts from
+the delivery's issue time (or the device's `syncedAtMs`, clamped, for self-started syncs).
+Without a matching receipt a delivery that carries a change or a horizon deadline is resent at
+0, 2, 4, 8 and 16 minutes, then stops (the work stays pending; a newer webhook starts a new burst).
+
+### 3.8 Status: `GET /v2/installations/{installId}`
+
+Returns `200` with what the relay knows about the install, for the app's health screen:
+`enabled`, `disabledReason` (`apns_unregistered`, `apns_bad_device_token` or `null`),
+`environment` and `environmentVerified`, `receiptVersion`, `deliveryEligible`,
+`lastVerifiedAtMs`, `lastPushAtMs`, `unacknowledgedDeliveries` and `nextRefreshAtMs`. `401` means
+the relay no longer knows the install: register again (3.1).
+
 ## 4. Webhooks (server behavior)
 
 Routing: the relay stores, for each subscription, an index entry (`sha256` subscription key ->
@@ -311,6 +358,7 @@ Relay payload (always exactly these keys; `aot.provider` is optional):
 | `aot.kind` | `change`, `heartbeat`, `precheck`, or `renew`; `assistant` for the assistant connector's pushes, which add fields of their own ([assistant protocol](ASSISTANT_PROTOCOL.md#apns-iphone)) |
 | `aot.provider` | `google` or `microsoft`; present on `change` and on `renew` when every subscription due for renewal belongs to one provider |
 | `aot.at` | Server send time, epoch ms |
+| `aot.deliveryId` | Receipt installs only: echo it in the receipt (3.7) |
 
 The payload never contains alarm IDs or times, subscription IDs, or calendar data.
 
@@ -361,6 +409,15 @@ Rules shared by all kinds:
 - Renewal: a subscription becomes due 24 hours before `expiresAtMs`, or immediately after a Graph
   lifecycle request (also after expiry, see section 4). After an accepted `renew` push the server
   asks again every 6 hours until the device `PUT`s a new expiration or the subscription expires.
+- Receipt installs (3.7) follow these rules instead of the table's precheck rows. Freshness counts
+  only from verified receipts. Polling installs are checked every 4 minutes in [T-30 min, T).
+  Signed-in-only installs get the T-20 and T-8 stages; a stage stays due from its start until a
+  verified receipt at or after its start, or until T, so APNs backoff delays a stage but never
+  skips it. Repeated attempts for an unverified stage are spaced 4 minutes apart. A horizon wake
+  is due at `nextRefreshAtMs`, and at the latest one day after the last wake or verified sync.
+- `400 BadDeviceToken` for a token never accepted by APNs is retried once on the other APNs host
+  (a development-signed build registered as production, or the reverse). If that host accepts,
+  it is remembered for the token. `410`, authentication errors and timeouts never probe.
 - APNs `410`, or `400` with reason `BadDeviceToken`, disables the install (unless its token changed
   while the push was in flight). Disabled installs get no pushes and record no webhook work until
   the app sends 3.1 or 3.2. Disabled installs are deleted after 30 days.
@@ -370,7 +427,7 @@ Each install stores `next_wake_at` (the next time anything could be due) and `pr
 `next_wake_at` among its installs (or its next retention cleanup). An alarm run makes at most
 `MAX_SUBREQUESTS_PER_RUN` outbound calls (default 40, within the Workers Free limit of 50
 subrequests per invocation). It reserves 2 for the shared APNs provider token and 2 per push (the
-request and its one retry), and retention may use a quarter for index releases (always at least
+request and its one retry; 4 for a token whose environment is not verified yet), and retention may use a quarter for index releases (always at least
 one install), so the default sends up to 19 pushes per run, never more than 200. Prechecks and
 changes go first, with up to 8 APNs requests in flight; if more are due the next run starts
 immediately. So heartbeats and renewals cannot delay the pushes that keep alarms right.
