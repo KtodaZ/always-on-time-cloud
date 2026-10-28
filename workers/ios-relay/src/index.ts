@@ -155,6 +155,12 @@ async function deviceApi(request: Request, env: Env, url: URL): Promise<Response
     const shard = await installShard(env, route.installId);
     const nowMs = Date.now();
 
+    if (route.kind === "installation" && method === "GET") {
+      const result = await shard.device(route.installId, secretHash, { kind: "status" });
+      if (result.status === "unauthorized") throw new HttpError(401, "invalid install credentials");
+      if (result.status === "rate-limited") throw new HttpError(429, "rate limit exceeded");
+      return json(200, result.install ?? {});
+    }
     if (route.kind === "installation" && method === "PUT") {
       const fields = validateUpdate(await readJson(request, MAX_API_BODY_BYTES));
       await runDevice(shard, route.installId, secretHash, { kind: "update", fields });

@@ -223,7 +223,7 @@ export type ApiRoute =
 
 export const ROUTE_METHODS: Record<ApiRoute["kind"], string[]> = {
   collection: ["POST"],
-  installation: ["PUT", "DELETE"],
+  installation: ["GET", "PUT", "DELETE"],
   alarms: ["PUT"],
   synced: ["POST"],
   subscription: ["PUT", "DELETE"],

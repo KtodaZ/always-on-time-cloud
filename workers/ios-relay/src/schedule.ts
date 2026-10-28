@@ -88,6 +88,11 @@ export interface PushPlan {
   kind: PushKind;
   provider?: Provider;
   renewalKeys: string[];
+  /**
+   * Receipt installs: retry this delivery at RETRY_OFFSETS_MINUTES until a receipt arrives. True
+   * when it carries a change or a horizon deadline; meeting-window checks repeat on their own.
+   */
+  burst?: boolean;
 }
 
 // Keyed by canonical zone names only (validation stores the canonical name), so the cache is bounded
@@ -297,21 +302,64 @@ function nextPrecheckAt(install: InstallState, nowMs: number): number | null {
   return candidates.length > 0 ? Math.min(...candidates) : null;
 }
 
-/** Receipt installs share a durable four-minute meeting window, regardless of provider. */
+/** Receipt installs: minimum gap between wakes inside a polling meeting window or an unverified stage. */
+export const RECEIPT_WINDOW_GAP_MS = 4 * MINUTE_MS;
+/** Receipt installs: an unacknowledged delivery is retried this many minutes after its first send. */
+export const RETRY_OFFSETS_MINUTES = Object.freeze([0, 2, 4, 8, 16]);
+
+/**
+ * Receipt installs: the earliest time a meeting-window check is due, or null. Freshness counts only
+ * from verified receipts (`lastSyncAt`); `lastWakeAt` spaces repeated attempts so an unacknowledged
+ * install is not pushed every two minutes.
+ *  - polling (some calendar has no working change feed): every 4 minutes in [T-30 min, T);
+ *  - signed-in only: the T-20 and T-8 stages, each due from its start until a verified receipt at or
+ *    after that start, or until the trigger passes (backoff can delay a stage but never skip it).
+ */
 function receiptPrecheckAt(install: InstallState, nowMs: number): number | null {
-  const base = Math.max(freshAt(install) ?? 0, install.receipt?.lastWakeAt ?? 0);
-  const starts = liveAlarms(install, nowMs).map(a => Math.max(a.triggerAt - MEETING_WINDOW_MS, base + 4 * MINUTE_MS, nowMs))
-    .filter((at, index) => at < liveAlarms(install, nowMs)[index].triggerAt);
-  return starts.length ? Math.min(...starts) : null;
+  const verified = install.lastSyncAt;
+  const lastWake = install.receipt?.lastWakeAt ?? null;
+  const candidates: number[] = [];
+  for (const alarm of liveAlarms(install, nowMs)) {
+    if (install.freshness.polling) {
+      const at = Math.max(alarm.triggerAt - MEETING_WINDOW_MS, Math.max(verified ?? 0, lastWake ?? 0) + RECEIPT_WINDOW_GAP_MS, nowMs);
+      if (at < alarm.triggerAt) candidates.push(at);
+      continue;
+    }
+    for (const { leadMs } of PRECHECK_STAGES) {
+      const start = alarm.triggerAt - leadMs;
+      if (verified !== null && verified >= start) continue;
+      const spaced = lastWake !== null && lastWake >= start ? lastWake + RECEIPT_WINDOW_GAP_MS : 0;
+      const at = Math.max(start, spaced, nowMs);
+      if (at < alarm.triggerAt) candidates.push(at);
+    }
+  }
+  return candidates.length > 0 ? Math.min(...candidates) : null;
 }
 
+/**
+ * Receipt installs: the horizon wake. The published `nextRefreshAt`, bounded by one day after the
+ * last wake or verified sync, so a quiet install is still woken daily when nothing else woke it.
+ * Once a wake was sent for a deadline, the deadline is spent: retries are the delivery burst's job.
+ */
 function receiptRecoveryAt(install: InstallState, nowMs: number): number {
   const r = install.receipt!;
-  const lastWake = Math.max(install.createdAt, freshAt(install) ?? 0, r.lastWakeAt ?? 0);
-  // Once a failed burst consumed a deadline, retry it on the daily safety net, not in a loop.
-  const explicit = r.nextRefreshAt === null ? Infinity : r.lastWakeAt !== null && r.lastWakeAt >= r.nextRefreshAt
-    ? r.lastWakeAt + DAY_MS : r.nextRefreshAt;
+  const lastWake = Math.max(install.createdAt, install.lastSyncAt ?? 0, r.lastWakeAt ?? 0);
+  const explicit = r.nextRefreshAt === null || (r.lastWakeAt !== null && r.lastWakeAt >= r.nextRefreshAt) ? Infinity : r.nextRefreshAt;
   return Math.max(nowMs, Math.min(explicit, lastWake + DAY_MS));
+}
+
+/** Receipt installs: a recorded change that no live delivery covers yet. */
+function receiptChangeDue(install: InstallState): boolean {
+  const r = install.receipt!;
+  if (install.pendingChangeAt === null) return false;
+  const outstanding = r.outstanding;
+  // A live burst carries the newest generation on its next attempt; an exhausted one is reopened
+  // only by a newer change, so one dead phone costs a bounded burst per real calendar edit.
+  return !outstanding || (outstanding.nextAt === null && r.generation > outstanding.generation);
+}
+
+function receiptRetryAt(install: InstallState): number | null {
+  return install.receipt?.outstanding?.nextAt ?? null;
 }
 
 /**
@@ -321,21 +369,21 @@ function receiptRecoveryAt(install: InstallState, nowMs: number): number {
 export function wakeTimes(install: InstallState, subscriptions: SubscriptionState[], nowMs: number): { next: number | null; priority: number | null } {
   if (!install.enabled || install.receipt?.eligible === false) return { next: null, priority: null };
   if (install.receipt) {
-    const outstanding = install.receipt.outstanding;
-    const blocked = pushBlockedUntil(install);
-    if (outstanding?.nextAt !== null && outstanding?.nextAt !== undefined) {
-      const next = Math.max(nowMs, outstanding.nextAt, blocked);
-      return { next, priority: next };
-    }
-    const candidates = [receiptRecoveryAt(install, nowMs)];
+    const priority: number[] = [receiptRecoveryAt(install, nowMs)];
+    const retry = receiptRetryAt(install);
+    if (retry !== null) priority.push(Math.max(retry, nowMs));
     const precheck = receiptPrecheckAt(install, nowMs);
-    if (precheck !== null) candidates.push(precheck);
-    if (install.pendingChangeAt !== null && !outstanding) candidates.push(nowMs);
-    if (install.freshness.polling) candidates.push(nextActiveTime(Math.max(heartbeatBase(install) + HOUR_MS,
-      (install.receipt.lastWakeAt ?? 0) + HOUR_MS, nowMs), install.freshness));
-    for (const sub of subscriptions) if (isRenewalDue(sub, nowMs) || (sub.renewDueAt !== null && sub.renewDueAt > nowMs)) candidates.push(sub.renewDueAt!);
-    const next = Math.max(Math.min(...candidates), blocked);
-    return { next, priority: next };
+    if (precheck !== null) priority.push(precheck);
+    if (receiptChangeDue(install)) priority.push(nowMs);
+    const candidates = [...priority];
+    if (install.freshness.polling) {
+      candidates.push(nextActiveTime(Math.max(heartbeatBase(install), install.receipt.lastWakeAt ?? 0) + HEARTBEAT_INTERVAL_MS, install.freshness));
+    }
+    for (const subscription of subscriptions) {
+      if (subscription.renewDueAt !== null && !isRenewalDead(subscription, nowMs)) candidates.push(Math.max(subscription.renewDueAt, nowMs));
+    }
+    const blocked = pushBlockedUntil(install);
+    return { next: Math.max(Math.min(...candidates), blocked), priority: Math.max(Math.min(...priority), blocked) };
   }
   const priorityCandidates: number[] = [];
   if (install.pendingChangeAt !== null) priorityCandidates.push(nowMs);
@@ -361,19 +409,26 @@ export function wakeTimes(install: InstallState, subscriptions: SubscriptionStat
 export function planPush(install: InstallState, subscriptions: SubscriptionState[], nowMs: number): PushPlan | null {
   if (!canSendNow(install, nowMs) || install.receipt?.eligible === false) return null;
   if (install.receipt) {
-    const r = install.receipt;
-    const dueRenewals = subscriptions.filter(s => isRenewalDue(s, nowMs));
-    if (r.outstanding?.nextAt !== null && r.outstanding?.nextAt !== undefined && r.outstanding.nextAt > nowMs) return null;
-    const retry = r.outstanding?.nextAt !== null && r.outstanding?.nextAt !== undefined && r.outstanding.nextAt <= nowMs;
+    const dueRenewals = subscriptions.filter((subscription) => isRenewalDue(subscription, nowMs));
+    const retry = receiptRetryAt(install);
+    const retryDue = (retry !== null && retry <= nowMs) || receiptChangeDue(install);
+    const recoveryDue = receiptRecoveryAt(install, nowMs) <= nowMs;
     const precheck = receiptPrecheckAt(install, nowMs);
-    const kind: PushKind | null = precheck !== null && precheck <= nowMs ? "precheck"
-      : retry || (install.pendingChangeAt !== null && !r.outstanding) ? "change"
-      : dueRenewals.length ? "renew"
-      : receiptRecoveryAt(install, nowMs) <= nowMs ? "precheck"
-      : install.freshness.polling && nowMs - Math.max(heartbeatBase(install), r.lastWakeAt ?? 0) >= HOUR_MS
-        && isWithinActiveHours(nowMs, install.freshness) ? "heartbeat" : null;
-    return kind ? { kind, ...(install.pendingChangeProvider ? {provider: install.pendingChangeProvider} : {}),
-      renewalKeys: kind === "renew" ? dueRenewals.map(s => s.key) : [] } : null;
+    const kind: PushKind | null =
+      precheck !== null && precheck <= nowMs ? "precheck"
+      : retryDue ? "change"
+      : dueRenewals.length > 0 ? "renew"
+      : recoveryDue ? "precheck"
+      : install.freshness.polling && nowMs - Math.max(heartbeatBase(install), install.receipt.lastWakeAt ?? 0) >= HEARTBEAT_INTERVAL_MS
+        && isWithinActiveHours(nowMs, install.freshness) ? "heartbeat"
+      : null;
+    if (!kind) return null;
+    return {
+      kind,
+      ...(install.pendingChangeProvider ? { provider: install.pendingChangeProvider } : {}),
+      renewalKeys: kind === "renew" ? dueRenewals.map((subscription) => subscription.key) : [],
+      burst: retryDue || recoveryDue,
+    };
   }
   const dueRenewals = subscriptions.filter((subscription) => isRenewalDue(subscription, nowMs));
   const candidates: Record<PushKind, boolean> = {
