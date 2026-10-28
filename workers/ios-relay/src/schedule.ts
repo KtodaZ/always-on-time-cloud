@@ -50,7 +50,18 @@ export interface AlarmState {
   sentT8: number | null;
 }
 
+export interface DeliveryState {
+  version: 1;
+  generation: number;
+  snapshotRevision: number;
+  nextRefreshAt: number | null;
+  lastWakeAt: number | null;
+  eligible: boolean;
+  outstanding: { id: string; generation: number; issuedAt: number; startedAt: number; attempts: number; nextAt: number | null } | null;
+}
+
 export interface InstallState {
+  receipt?: DeliveryState;
   enabled: boolean;
   freshness: Freshness;
   createdAt: number;
@@ -147,7 +158,7 @@ export function nextActiveTime(fromMs: number, freshness: Freshness): number {
  * meeting-window prechecks count from here.
  */
 export function freshAt(install: InstallState): number | null {
-  const values = [install.lastPushAt, install.lastSyncAt].filter((value): value is number => Number.isSafeInteger(value));
+  const values = [install.receipt ? null : install.lastPushAt, install.lastSyncAt].filter((value): value is number => Number.isSafeInteger(value));
   return values.length > 0 ? Math.max(...values) : null;
 }
 
@@ -198,7 +209,7 @@ export function dueStages(install: InstallState, nowMs: number, { lookaheadMs = 
     for (const { stage, leadMs } of PRECHECK_STAGES) {
       if (stageSent(alarm, stage)) continue;
       const { startMs, endMs } = stageWindow(alarm.triggerAt, leadMs);
-      if (nowMs + lookaheadMs >= startMs && nowMs <= endMs) due.push({ key: alarm.key, stage });
+      if (nowMs + lookaheadMs >= startMs && nowMs < alarm.triggerAt) due.push({ key: alarm.key, stage });
     }
   }
   return due;
@@ -279,11 +290,28 @@ function nextPrecheckAt(install: InstallState, nowMs: number): number | null {
       for (const { stage, leadMs } of PRECHECK_STAGES) {
         if (stageSent(alarm, stage)) continue;
         const { startMs, endMs } = stageWindow(alarm.triggerAt, leadMs);
-        if (endMs >= nowMs) candidates.push(Math.max(startMs, nowMs));
+        if (alarm.triggerAt > nowMs) candidates.push(Math.max(startMs, nowMs));
       }
     }
   }
   return candidates.length > 0 ? Math.min(...candidates) : null;
+}
+
+/** Receipt installs share a durable four-minute meeting window, regardless of provider. */
+function receiptPrecheckAt(install: InstallState, nowMs: number): number | null {
+  const base = Math.max(freshAt(install) ?? 0, install.receipt?.lastWakeAt ?? 0);
+  const starts = liveAlarms(install, nowMs).map(a => Math.max(a.triggerAt - MEETING_WINDOW_MS, base + 4 * MINUTE_MS, nowMs))
+    .filter((at, index) => at < liveAlarms(install, nowMs)[index].triggerAt);
+  return starts.length ? Math.min(...starts) : null;
+}
+
+function receiptRecoveryAt(install: InstallState, nowMs: number): number {
+  const r = install.receipt!;
+  const lastWake = Math.max(install.createdAt, freshAt(install) ?? 0, r.lastWakeAt ?? 0);
+  // Once a failed burst consumed a deadline, retry it on the daily safety net, not in a loop.
+  const explicit = r.nextRefreshAt === null ? Infinity : r.lastWakeAt !== null && r.lastWakeAt >= r.nextRefreshAt
+    ? r.lastWakeAt + DAY_MS : r.nextRefreshAt;
+  return Math.max(nowMs, Math.min(explicit, lastWake + DAY_MS));
 }
 
 /**
@@ -291,7 +319,24 @@ function nextPrecheckAt(install: InstallState, nowMs: number): number | null {
  * calendar change (`priority`, visited first). Both null when disabled or nothing is scheduled.
  */
 export function wakeTimes(install: InstallState, subscriptions: SubscriptionState[], nowMs: number): { next: number | null; priority: number | null } {
-  if (!install.enabled) return { next: null, priority: null };
+  if (!install.enabled || install.receipt?.eligible === false) return { next: null, priority: null };
+  if (install.receipt) {
+    const outstanding = install.receipt.outstanding;
+    const blocked = pushBlockedUntil(install);
+    if (outstanding?.nextAt !== null && outstanding?.nextAt !== undefined) {
+      const next = Math.max(nowMs, outstanding.nextAt, blocked);
+      return { next, priority: next };
+    }
+    const candidates = [receiptRecoveryAt(install, nowMs)];
+    const precheck = receiptPrecheckAt(install, nowMs);
+    if (precheck !== null) candidates.push(precheck);
+    if (install.pendingChangeAt !== null && !outstanding) candidates.push(nowMs);
+    if (install.freshness.polling) candidates.push(nextActiveTime(Math.max(heartbeatBase(install) + HOUR_MS,
+      (install.receipt.lastWakeAt ?? 0) + HOUR_MS, nowMs), install.freshness));
+    for (const sub of subscriptions) if (isRenewalDue(sub, nowMs) || (sub.renewDueAt !== null && sub.renewDueAt > nowMs)) candidates.push(sub.renewDueAt!);
+    const next = Math.max(Math.min(...candidates), blocked);
+    return { next, priority: next };
+  }
   const priorityCandidates: number[] = [];
   if (install.pendingChangeAt !== null) priorityCandidates.push(nowMs);
   const precheck = nextPrecheckAt(install, nowMs);
@@ -314,7 +359,22 @@ export function wakeTimes(install: InstallState, subscriptions: SubscriptionStat
  * within the coalescing window upgrades a due heartbeat to a priority-10 precheck.
  */
 export function planPush(install: InstallState, subscriptions: SubscriptionState[], nowMs: number): PushPlan | null {
-  if (!canSendNow(install, nowMs)) return null;
+  if (!canSendNow(install, nowMs) || install.receipt?.eligible === false) return null;
+  if (install.receipt) {
+    const r = install.receipt;
+    const dueRenewals = subscriptions.filter(s => isRenewalDue(s, nowMs));
+    if (r.outstanding?.nextAt !== null && r.outstanding?.nextAt !== undefined && r.outstanding.nextAt > nowMs) return null;
+    const retry = r.outstanding?.nextAt !== null && r.outstanding?.nextAt !== undefined && r.outstanding.nextAt <= nowMs;
+    const precheck = receiptPrecheckAt(install, nowMs);
+    const kind: PushKind | null = precheck !== null && precheck <= nowMs ? "precheck"
+      : retry || (install.pendingChangeAt !== null && !r.outstanding) ? "change"
+      : dueRenewals.length ? "renew"
+      : receiptRecoveryAt(install, nowMs) <= nowMs ? "precheck"
+      : install.freshness.polling && nowMs - Math.max(heartbeatBase(install), r.lastWakeAt ?? 0) >= HOUR_MS
+        && isWithinActiveHours(nowMs, install.freshness) ? "heartbeat" : null;
+    return kind ? { kind, ...(install.pendingChangeProvider ? {provider: install.pendingChangeProvider} : {}),
+      renewalKeys: kind === "renew" ? dueRenewals.map(s => s.key) : [] } : null;
+  }
   const dueRenewals = subscriptions.filter((subscription) => isRenewalDue(subscription, nowMs));
   const candidates: Record<PushKind, boolean> = {
     precheck: install.freshness.polling ? isMeetingWindowDue(install, nowMs) : dueStages(install, nowMs).length > 0,

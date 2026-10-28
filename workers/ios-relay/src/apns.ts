@@ -46,14 +46,14 @@ export function validateApnsConfig(config: Partial<ApnsConfig>): ApnsConfig {
   return config as ApnsConfig;
 }
 
-export function buildPayload(kind: PushKind, provider: Provider | undefined, at: number): string {
+export function buildPayload(kind: PushKind, provider: Provider | undefined, at: number, deliveryId?: string): string {
   const body = JSON.stringify({
     aps: {
       alert: { title: "Keeping your alarms up to date", body: "Checking for calendar updates." },
       "mutable-content": 1,
       "interruption-level": "passive",
     },
-    aot: { v: PAYLOAD_VERSION, kind, ...(provider ? { provider } : {}), at },
+    aot: { v: PAYLOAD_VERSION, kind, ...(provider ? { provider } : {}), at, ...(deliveryId ? {deliveryId} : {}) },
   });
   if (new TextEncoder().encode(body).length > MAX_PAYLOAD_BYTES) throw new TypeError("APNs payload exceeds 4 KB");
   return body;
@@ -126,6 +126,7 @@ export interface PushRequest {
   kind: PushKind;
   provider?: Provider;
   at: number;
+  deliveryId?: string;
 }
 
 /**
@@ -136,7 +137,7 @@ export interface PushRequest {
 export async function sendRelayPush(config: ApnsConfig, tokens: ProviderTokenSource, request: PushRequest): Promise<ApnsResult> {
   if (!Object.hasOwn(APNS_HOSTS, request.environment)) throw new TypeError("invalid APNs environment");
   if (!/^[0-9a-f]{64,200}$/.test(request.token)) throw new TypeError("invalid APNs token");
-  const body = buildPayload(request.kind, request.provider, request.at);
+  const body = buildPayload(request.kind, request.provider, request.at, request.deliveryId);
   const url = `${APNS_HOSTS[request.environment]}/3/device/${request.token}`;
   const providerToken = await tokens.get();
   const headers = {

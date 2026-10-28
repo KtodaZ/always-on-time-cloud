@@ -109,6 +109,8 @@ export interface RegistrationFields {
   apnsToken: string;
   environment: ApnsEnvironment;
   freshness: Freshness;
+  receiptVersion?: 1;
+  deliveryEligible?: boolean;
 }
 
 export function validateRegistrationFields(body: JsonObject): RegistrationFields {
@@ -116,7 +118,11 @@ export function validateRegistrationFields(body: JsonObject): RegistrationFields
     throw new HttpError(400, "apnsToken must be 64-200 lowercase hexadecimal characters");
   }
   if (!ENVIRONMENTS.has(body.environment as ApnsEnvironment)) throw new HttpError(400, "environment must be development or production");
-  return { apnsToken: body.apnsToken, environment: body.environment as ApnsEnvironment, freshness: validateFreshness(body.freshness) };
+  if (body.receiptVersion !== undefined && body.receiptVersion !== 1) throw new HttpError(400, "unsupported receiptVersion");
+  if (body.deliveryEligible !== undefined && typeof body.deliveryEligible !== "boolean") throw new HttpError(400, "invalid deliveryEligible");
+  return { apnsToken: body.apnsToken, environment: body.environment as ApnsEnvironment, freshness: validateFreshness(body.freshness),
+    ...(body.receiptVersion === 1 ? {receiptVersion: 1 as const} : {}),
+    ...(typeof body.deliveryEligible === "boolean" ? {deliveryEligible: body.deliveryEligible} : {}) };
 }
 
 export interface RegistrationBody extends RegistrationFields {
@@ -125,7 +131,7 @@ export interface RegistrationBody extends RegistrationFields {
 }
 
 export function validateRegistration(body: unknown): RegistrationBody {
-  requireObject(body, ["installId", "installSecret", "apnsToken", "environment", "freshness"]);
+  requireObject(body, ["installId", "installSecret", "apnsToken", "environment", "freshness"], ["receiptVersion", "deliveryEligible"]);
   if (typeof body.installId !== "string" || !INSTALL_ID.test(body.installId) ||
       typeof body.installSecret !== "string" || !INSTALL_SECRET.test(body.installSecret)) {
     throw new HttpError(400, "installId (22 chars) and installSecret (43 chars) must be random base64url values");
@@ -134,13 +140,14 @@ export function validateRegistration(body: unknown): RegistrationBody {
 }
 
 export function validateUpdate(body: unknown): RegistrationFields {
-  requireObject(body, ["apnsToken", "environment", "freshness"]);
+  requireObject(body, ["apnsToken", "environment", "freshness"], ["receiptVersion", "deliveryEligible"]);
   return validateRegistrationFields(body);
 }
 
 export interface AlarmInput {
   id: string;
   triggerAt: number;
+  armed?: boolean;
 }
 
 /**
@@ -155,7 +162,8 @@ export function validateAlarms(body: unknown, nowMs: number): AlarmInput[] {
   const seen = new Set<string>();
   const alarms: AlarmInput[] = [];
   for (const alarm of body.alarms as unknown[]) {
-    requireObject(alarm, ["id", "triggerAtMs"]);
+    requireObject(alarm, ["id", "triggerAtMs"], ["armed"]);
+    if (alarm.armed !== undefined && typeof alarm.armed !== "boolean") throw new HttpError(400, "invalid armed");
     if (typeof alarm.id !== "string" || alarm.id.length < 1 || alarm.id.length > 200 || /[\u0000-\u001f]/.test(alarm.id)) {
       throw new HttpError(400, "alarm id must be an opaque string of 1 to 200 characters");
     }
@@ -165,7 +173,7 @@ export function validateAlarms(body: unknown, nowMs: number): AlarmInput[] {
     if (seen.has(alarm.id)) throw new HttpError(400, "alarm ids must be unique");
     seen.add(alarm.id);
     const triggerAt = alarm.triggerAtMs as number;
-    if (triggerAt > nowMs && triggerAt <= nowMs + MAX_ALARM_HORIZON_MS) alarms.push({ id: alarm.id, triggerAt });
+    if (triggerAt > nowMs && triggerAt <= nowMs + MAX_ALARM_HORIZON_MS) alarms.push({ id: alarm.id, triggerAt, ...(typeof alarm.armed === "boolean" ? {armed: alarm.armed} : {}) });
   }
   return alarms.sort((left, right) => left.triggerAt - right.triggerAt);
 }
@@ -275,4 +283,21 @@ function expandIpv6(address: string): string[] | null {
   const fill = bare.includes("::") ? 8 - headParts.length - tailParts.length : 0;
   const parts = [...headParts, ...Array(Math.max(fill, 0)).fill("0"), ...tailParts];
   return parts.length === 8 ? parts.map((part) => part.toLowerCase().padStart(4, "0")) : null;
+}
+
+export interface SyncReceipt {
+  syncedAt: number; snapshotRevision: number; deliveryId?: string;
+  calendarVerified: boolean; alarmsReconciled: boolean; nextRefreshAt: number;
+  alarms: AlarmInput[];
+}
+export function validateReceipt(body: unknown, nowMs: number): SyncReceipt {
+  requireObject(body, ["receiptVersion", "syncedAtMs", "snapshotRevision", "calendarVerified", "alarmsReconciled", "alarms", "nextRefreshAtMs"], ["deliveryId"]);
+  if (body.receiptVersion !== 1 || !Number.isSafeInteger(body.snapshotRevision) || (body.snapshotRevision as number) < 1
+    || typeof body.calendarVerified !== "boolean" || typeof body.alarmsReconciled !== "boolean"
+    || !Number.isSafeInteger(body.nextRefreshAtMs) || (body.nextRefreshAtMs as number) < 0
+    || (body.nextRefreshAtMs as number) > nowMs + MAX_ALARM_HORIZON_MS
+    || (body.deliveryId !== undefined && (typeof body.deliveryId !== "string" || !/^[0-9a-f-]{36}$/.test(body.deliveryId)))) throw new HttpError(400, "invalid receipt");
+  return { syncedAt: validateSynced({syncedAtMs: body.syncedAtMs}, nowMs), snapshotRevision: body.snapshotRevision as number,
+    calendarVerified: body.calendarVerified, alarmsReconciled: body.alarmsReconciled, nextRefreshAt: body.nextRefreshAtMs as number,
+    ...(typeof body.deliveryId === "string" ? {deliveryId: body.deliveryId} : {}), alarms: validateAlarms({alarms: body.alarms}, nowMs) };
 }

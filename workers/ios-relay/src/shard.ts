@@ -10,6 +10,7 @@ import { DurableObject } from "cloudflare:workers";
 
 import { ApnsConfigError, sendRelayPush, type ApnsEnvironment, type ApnsResult } from "./apns";
 import { apnsConfigFromEnv, sharedProviderToken } from "./apns-token";
+import type { SyncReceipt } from "./http";
 import type { Env } from "./env";
 import {
   DAY_MS,
@@ -25,6 +26,7 @@ import {
   stagesSatisfiedBySync,
   wakeTimes,
   type AlarmState,
+  type DeliveryState,
   type Freshness,
   type InstallState,
   type Provider,
@@ -80,6 +82,8 @@ export interface RegistrationInput {
   apnsToken: string;
   environment: ApnsEnvironment;
   freshness: Freshness;
+  receiptVersion?: 1;
+  deliveryEligible?: boolean;
 }
 
 export interface StoredSubscriptionInput {
@@ -95,6 +99,7 @@ export type DeviceOp =
   | { kind: "delete" }
   | { kind: "alarms"; alarms: Array<{ key: string; triggerAt: number }> }
   | { kind: "synced"; syncedAt: number }
+  | { kind: "receipt"; receipt: Omit<SyncReceipt, "alarms">; alarms: Array<{key: string; triggerAt: number; armed?: boolean}> }
   | { kind: "deleteSubscription"; key: string };
 
 export type DeviceResult =
@@ -162,9 +167,11 @@ interface Claim {
   apnsToken: string;
   environment: ApnsEnvironment;
   plan: PushPlan;
+  deliveryId?: string;
 }
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS delivery_state (install_id TEXT PRIMARY KEY, state TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS installs (
   install_id TEXT PRIMARY KEY,
   secret_hash TEXT NOT NULL,
@@ -287,6 +294,23 @@ export class InstallShard extends DurableObject<Env> {
 
   // --- Install records ---------------------------------------------------------------------
 
+  private deliveryState(installId: string): DeliveryState | undefined {
+    const row = this.sql.exec<{state: string}>("SELECT state FROM delivery_state WHERE install_id = ?", installId).toArray()[0];
+    return row ? JSON.parse(row.state) as DeliveryState : undefined;
+  }
+
+  private saveDelivery(installId: string, state: DeliveryState): void {
+    this.sql.exec("INSERT INTO delivery_state (install_id, state) VALUES (?, ?) ON CONFLICT (install_id) DO UPDATE SET state = excluded.state", installId, JSON.stringify(state));
+  }
+
+  private enableReceipts(installId: string, fields: RegistrationInput): void {
+    if (fields.receiptVersion !== 1) return;
+    const state = this.deliveryState(installId) ?? {version: 1 as const, generation: 0, snapshotRevision: 0,
+      nextRefreshAt: null, lastWakeAt: null, eligible: true, outstanding: null};
+    state.eligible = fields.deliveryEligible ?? true;
+    this.saveDelivery(installId, state);
+  }
+
   private installRow(installId: string): InstallRow | null {
     return this.sql.exec<InstallRow>("SELECT * FROM installs WHERE install_id = ?", installId).toArray()[0] ?? null;
   }
@@ -307,6 +331,7 @@ export class InstallShard extends DurableObject<Env> {
 
   private installState(row: InstallRow): InstallState {
     return {
+      receipt: this.deliveryState(row.install_id),
       enabled: row.enabled === 1,
       freshness: { polling: row.polling === 1, activeHours: { start: row.active_start, end: row.active_end }, timeZone: row.time_zone },
       createdAt: row.created_at,
@@ -371,6 +396,7 @@ export class InstallShard extends DurableObject<Env> {
   async register(installId: string, secretHash: string, fields: RegistrationInput): Promise<"created" | "updated" | "conflict"> {
     const nowMs = this.now();
     const existing = this.installRow(installId);
+    if (!existing || safeEqualHex(secretHash, existing.secret_hash)) this.enableReceipts(installId, fields);
     if (existing) {
       if (!safeEqualHex(secretHash, existing.secret_hash)) return "conflict";
       this.updateInstall(installId, registrationPatch(fields, nowMs), nowMs);
@@ -405,6 +431,7 @@ export class InstallShard extends DurableObject<Env> {
       case "authorize":
         break;
       case "update":
+        this.enableReceipts(installId, op.fields);
         patch = registrationPatch(op.fields, nowMs);
         break;
       case "delete":
@@ -414,8 +441,31 @@ export class InstallShard extends DurableObject<Env> {
         this.replaceAlarms(installId, op.alarms);
         break;
       case "synced":
-        patch = this.syncPatch(row, op.syncedAt);
+        // Legacy autonomous timestamps cannot acknowledge receipt-capable deliveries.
+        if (!this.deliveryState(installId)) patch = this.syncPatch(row, op.syncedAt);
         break;
+      case "receipt": {
+        const state = this.deliveryState(installId);
+        const r = op.receipt;
+        if (!state || r.snapshotRevision <= state.snapshotRevision) break;
+        this.replaceAlarms(installId, op.alarms);
+        state.snapshotRevision = r.snapshotRevision;
+        const delivery = state.outstanding;
+        const matched = delivery && r.deliveryId === delivery.id;
+        if (r.calendarVerified) {
+          const verifiedAt = matched ? delivery.issuedAt : Math.min(r.syncedAt, nowMs);
+          patch.last_sync_at = Math.max(row.last_sync_at ?? 0, verifiedAt);
+          state.nextRefreshAt = Math.min(r.nextRefreshAt, verifiedAt + DAY_MS);
+        }
+        if (matched && r.calendarVerified && r.alarmsReconciled) {
+          state.outstanding = null;
+          if (delivery.generation === state.generation) {
+            patch.pending_change_at = null; patch.pending_change_provider = null;
+          }
+        }
+        this.saveDelivery(installId, state);
+        break;
+      }
       case "deleteSubscription": {
         const deleted = this.sql.exec("DELETE FROM subscriptions WHERE sub_key = ? AND install_id = ?", op.key, installId).rowsWritten;
         if (deleted > 0) releasedKeys = [op.key];
@@ -432,6 +482,7 @@ export class InstallShard extends DurableObject<Env> {
     const keys = this.sql.exec<{ sub_key: string }>("SELECT sub_key FROM subscriptions WHERE install_id = ?", installId).toArray().map((row) => row.sub_key);
     this.sql.exec("DELETE FROM subscriptions WHERE install_id = ?", installId);
     this.sql.exec("DELETE FROM alarms WHERE install_id = ?", installId);
+    this.sql.exec("DELETE FROM delivery_state WHERE install_id = ?", installId);
     this.sql.exec("DELETE FROM installs WHERE install_id = ?", installId);
     return keys;
   }
@@ -535,6 +586,8 @@ export class InstallShard extends DurableObject<Env> {
    * send time, so a change arriving while a push is in flight stays pending.
    */
   private changePatch(row: InstallRow, provider: Provider, nowMs: number): InstallPatch {
+    const receipt = this.deliveryState(row.install_id);
+    if (receipt) { receipt.generation += 1; this.saveDelivery(row.install_id, receipt); }
     return { pending_change_at: Math.max(row.pending_change_at ?? 0, nowMs), pending_change_provider: provider };
   }
 
@@ -690,10 +743,24 @@ export class InstallShard extends DurableObject<Env> {
       }
       return null;
     }
-    // The claim is not written: the outcome below updates the row once.
+    // Persist delivery before APNs I/O so eviction, collapse, or a receipt racing the response is safe.
+    const receipt = this.deliveryState(installId);
+    let deliveryId: string | undefined;
+    if (receipt) {
+      const prior = receipt.outstanding;
+      const continuing = prior && prior.nextAt !== null;
+      const startedAt = continuing ? prior.startedAt : nowMs;
+      const attempts = continuing ? prior.attempts + 1 : 1;
+      deliveryId = crypto.randomUUID();
+      const offsets = [0, 2, 4, 8, 16];
+      receipt.outstanding = {id: deliveryId, generation: receipt.generation, issuedAt: nowMs, startedAt, attempts,
+        nextAt: attempts < offsets.length ? Math.max(nowMs + 2 * MINUTE_MS, startedAt + offsets[attempts] * MINUTE_MS) : null};
+      receipt.lastWakeAt = nowMs;
+      this.saveDelivery(installId, receipt);
+    }
     const claimId = crypto.randomUUID();
     this.inFlight.set(installId, { claimId, at: nowMs });
-    return { installId, claimId, apnsToken: row.apns_token, environment: row.apns_environment, plan };
+    return { installId, claimId, apnsToken: row.apns_token, environment: row.apns_environment, plan, deliveryId };
   }
 
   /** Releases the in-memory claim; false when it is no longer this claim's. */
@@ -711,7 +778,7 @@ export class InstallShard extends DurableObject<Env> {
     if (!this.release(claim)) return;
     const row = this.installRow(claim.installId);
     if (!row) return;
-    this.markStages(claim.installId, stagesSatisfiedByPush(this.installState(row), claim.plan.kind, sentAt), sentAt);
+    if (!claim.deliveryId) this.markStages(claim.installId, stagesSatisfiedByPush(this.installState(row), claim.plan.kind, sentAt), sentAt);
     for (const key of claim.plan.renewalKeys) {
       const subscription = this.subscriptionRow(claim.installId, key);
       if (!subscription || !isRenewalDue(toSubscriptionState(subscription), sentAt)) continue;
@@ -720,7 +787,7 @@ export class InstallShard extends DurableObject<Env> {
         sentAt, renewRetryAt(sentAt, subscription.expires_at), key,
       );
     }
-    const changeCovered = row.pending_change_at !== null && row.pending_change_at <= sentAt;
+    const changeCovered = !claim.deliveryId && row.pending_change_at !== null && row.pending_change_at <= sentAt;
     this.updateInstall(claim.installId, {
       last_push_at: sentAt,
       last_push_kind: claim.plan.kind,
@@ -761,6 +828,7 @@ export class InstallShard extends DurableObject<Env> {
         kind: claim.plan.kind,
         provider: claim.plan.provider,
         at: sentAt,
+        deliveryId: claim.deliveryId,
       });
     } catch (error) {
       this.failPush(claim, this.now());
