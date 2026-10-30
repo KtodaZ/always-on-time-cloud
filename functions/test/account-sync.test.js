@@ -2,17 +2,25 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { FakeFirestore } = require('../testing/fake-firestore');
 const {
-  requireRecentGoogleAccount, deleteAccountData, pruneAccountHistory, resumeAccountDeletions, DELETION_RESUME_AFTER_MS, HISTORY_WINDOW_MS
+  isSyncAccount, requireRecentAccount, deleteAccountData, pruneAccountHistory, resumeAccountDeletions, DELETION_RESUME_AFTER_MS, HISTORY_WINDOW_MS
 } = require('../account-sync');
 
-test('deletion requires a Google-linked account and recent authentication', () => {
+test('deletion requires a Google- or Apple-linked account and recent authentication', () => {
   const now = 1000000;
   const valid = { uid: 'user', token: { auth_time: now / 1000, firebase: { identities: { 'google.com': ['google-id'] } } } };
-  assert.equal(requireRecentGoogleAccount(valid, now), 'user');
-  assert.throws(() => requireRecentGoogleAccount(null, now), { code: 'unauthenticated' });
-  assert.throws(() => requireRecentGoogleAccount({ ...valid, token: { ...valid.token, firebase: { identities: {} } } }, now), { code: 'unauthenticated' });
-  assert.throws(() => requireRecentGoogleAccount({ ...valid, token: { ...valid.token, firebase: { ...valid.token.firebase, sign_in_provider: 'password' } } }, now), { code: 'unauthenticated' });
-  assert.throws(() => requireRecentGoogleAccount({ ...valid, token: { ...valid.token, auth_time: 0 } }, now), { code: 'failed-precondition' });
+  assert.equal(requireRecentAccount(valid, now), 'user');
+  // Sign in with Apple (iPhone), with a private relay email or none.
+  const apple = { uid: 'apple-user', token: { auth_time: now / 1000, firebase: { identities: { 'apple.com': ['apple-id'] }, sign_in_provider: 'apple.com' } } };
+  assert.equal(requireRecentAccount(apple, now), 'apple-user');
+  assert.throws(() => requireRecentAccount({ ...apple, token: { ...apple.token, auth_time: 0 } }, now), { code: 'failed-precondition' });
+  assert.throws(() => requireRecentAccount(null, now), { code: 'unauthenticated' });
+  assert.throws(() => requireRecentAccount({ ...valid, token: { ...valid.token, firebase: { identities: {} } } }, now), { code: 'unauthenticated' });
+  assert.throws(() => requireRecentAccount({ ...valid, token: { ...valid.token, firebase: { identities: { 'github.com': ['id'] }, sign_in_provider: 'github.com' } } }, now), { code: 'unauthenticated' });
+  assert.throws(() => requireRecentAccount({ ...valid, token: { ...valid.token, firebase: { ...valid.token.firebase, sign_in_provider: 'password' } } }, now), { code: 'unauthenticated' });
+  assert.throws(() => requireRecentAccount({ ...apple, token: { ...apple.token, firebase: { ...apple.token.firebase, sign_in_provider: 'password' } } }, now), { code: 'unauthenticated' });
+  assert.throws(() => requireRecentAccount({ ...valid, token: { ...valid.token, auth_time: 0 } }, now), { code: 'failed-precondition' });
+  assert.equal(isSyncAccount(apple), true);
+  assert.equal(isSyncAccount({ uid: 'anon', token: { firebase: { identities: {}, sign_in_provider: 'anonymous' } } }), false);
 });
 
 test('deletion blocks stale writes, then deletes data, assistant connections and identity', async () => {
