@@ -92,7 +92,7 @@ async function deviceSnapshot(ctx, deviceId) {
 function noPhone(ctx) {
   const link = appLink(ctx.origin, "assistants");
   return result(
-    `No phone has shared its alarms yet. Ask the user to open Always On Time on their phone, signed in with the same Google account; it finishes connecting automatically. Then try again. Link: ${link}`,
+    `No phone has shared its alarms yet. Ask the user to open Always On Time on their phone, signed in with the same account; it finishes connecting automatically. Then try again. Link: ${link}`,
     { needsPhone: true, links: { assistants: link } },
   );
 }

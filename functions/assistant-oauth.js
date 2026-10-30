@@ -1,7 +1,7 @@
 "use strict";
 
-// OAuth 2.1 authorization server for the assistant connector. Firebase Auth (Google sign-in on the
-// consent page; a password only for the review account, assistant-demo-phone.js) identifies the
+// OAuth 2.1 authorization server for the assistant connector. Firebase Auth (Google or Sign in with
+// Apple on the consent page; a password only for the review account, assistant-demo-phone.js) identifies the
 // user; this module issues opaque tokens for the MCP endpoint.
 //
 // - Authorization codes, access tokens and refresh tokens are 256-bit random strings, stored only
@@ -33,6 +33,9 @@ const PRODUCTION_ORIGIN = "https://alwaysontime.zombit.io";
 // them are sent to PRODUCTION_ORIGIN instead (movedUrl), so there is one issuer and one MCP URL.
 const LEGACY_HOSTS = ["always-on-time-zombit-2026.web.app", "always-on-time-zombit-2026.firebaseapp.com"];
 const SCOPES = ["alarms.read", "alarms.write"];
+// Sign-ins that can approve a connection: the Account & sync providers (account-sync.js, which
+// requires this module, so the list is repeated here).
+const CONSENT_PROVIDERS = ["google.com", "apple.com"];
 const REQUEST_TTL_MS = 10 * 60 * 1000;
 const CODE_TTL_MS = 10 * 60 * 1000;
 const ACCESS_TTL_MS = 60 * 60 * 1000;
@@ -234,11 +237,13 @@ function createOAuth(deps) {
   }
 
   /**
-   * Verifies a Firebase ID token from the consent page: a Google sign-in, or a password sign-in to
-   * the review account. Anonymous and other password accounts can't approve a connection.
+   * Verifies a Firebase ID token from the consent page: a Google or Apple sign-in (the providers
+   * Account & sync uses, account-sync.js), or a password sign-in to the review account. Anonymous
+   * and other password accounts can't approve a connection. An Apple account's email may be a
+   * private relay address or missing, so nothing here depends on it.
    */
   async function signedInUser(idToken) {
-    if (typeof idToken !== "string" || idToken.length === 0) throw new OAuthError("login_required", "Sign in with Google first.", 401);
+    if (typeof idToken !== "string" || idToken.length === 0) throw new OAuthError("login_required", "Sign in with Google or Apple first.", 401);
     let decoded;
     try {
       decoded = await verifyIdToken(idToken);
@@ -246,9 +251,9 @@ function createOAuth(deps) {
       throw new OAuthError("login_required", "Your sign-in expired. Sign in again.", 401);
     }
     const provider = decoded?.firebase?.sign_in_provider;
-    const google = provider === "google.com" && decoded.firebase.identities?.["google.com"]?.length > 0;
+    const linked = CONSENT_PROVIDERS.includes(provider) && decoded.firebase.identities?.[provider]?.length > 0;
     const reviewer = provider === "password" && isDemoAccount(decoded.uid, demoUid);
-    if (!google && !reviewer) throw new OAuthError("login_required", "Sign in with Google first.", 401);
+    if (!linked && !reviewer) throw new OAuthError("login_required", "Sign in with Google or Apple first.", 401);
     const accountDoc = await refs.account(db, decoded.uid).get();
     return { uid: decoded.uid, email: decoded.email ?? null, accountReady: accountDoc.exists && accountDoc.data().active === true };
   }
@@ -287,7 +292,7 @@ function createOAuth(deps) {
     if (!user.accountReady) {
       // No logId: one is only created for an active account.
       log("info", "oauth.consent", { outcome: "account_not_ready" });
-      throw new OAuthError("account_not_ready", "Install Always On Time and sign in with this Google account in the app first.", 409);
+      throw new OAuthError("account_not_ready", "Install Always On Time and sign in with this account in the app first.", 409);
     }
     const code = newSecret("aot_code_");
     const time = now();

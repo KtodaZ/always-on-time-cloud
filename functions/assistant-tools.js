@@ -18,7 +18,7 @@ const write = require("./assistant-tools-write");
 
 const INSTRUCTIONS = `Always On Time is the user's calendar alarm app on their phone. This connector lets you see and change when those alarms ring.
 
-Setup first. If get_status says setup is not confirmed, call test_connection before anything else and tell the user the result. If no phone is connected, ask the user to open Always On Time on their phone (signed in with the same Google account) and give them the link.
+Setup first. If get_status says setup is not confirmed, call test_connection before anything else and tell the user the result. If no phone is connected, ask the user to open Always On Time on their phone (signed in with the same account) and give them the link.
 
 Scope: alarms for events on calendars the app watches, up to ${SNAPSHOT_WINDOW_DAYS} days ahead, plus the app's alarm settings and ${HISTORY_DAYS} days of alarm history. You cannot see event descriptions, attendees, locations or meeting links, cannot create or edit events, and cannot see calendars the phone doesn't have. Google Calendar ids work here too: pass googleCalendarId and googleEventId instead of an event key.
 

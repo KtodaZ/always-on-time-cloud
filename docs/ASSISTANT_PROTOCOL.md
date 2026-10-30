@@ -39,7 +39,7 @@ Connector data:
 | `assistantUsage/{yyyy-mm-dd}` | server | server | anonymous daily counters (no client access) |
 
 `deviceId` is a random UUID the phone creates once per install and per account (not an Android
-ID). The owner is the signed-in Google account `uid` with an active account, as for `values`.
+ID). The owner is the signed-in account's `uid` (Google, or Apple on iPhone) with an active account, as for `values`.
 
 ### Devices
 

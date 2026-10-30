@@ -41,13 +41,22 @@ function setup({ metadata, demoUid } = {}) {
     usage: async (c) => counts.push(c),
     demoUid,
     verifyIdToken: async (token) => {
-      // "pw:<uid>" is a password sign-in; "pwg:<uid>" one to an account that also has Google linked.
-      const password = /^pwg?:/.exec(token);
+      // "pw:<uid>" is a password sign-in; "pwg:<uid>" / "pwa:<uid>" one to an account that also has
+      // Google / Apple linked.
+      const password = /^pw[ga]?:/.exec(token);
       if (password) {
         const uid = token.slice(password[0].length);
+        const linked = { "pwg:": { "google.com": ["g"] }, "pwa:": { "apple.com": ["a"] } }[password[0]] ?? {};
         return { uid, email: `${uid}@example.com`, firebase: { sign_in_provider: "password", identities: {
-          email: [`${uid}@example.com`], ...(password[0] === "pwg:" ? { "google.com": ["g"] } : {}),
+          email: [`${uid}@example.com`], ...linked,
         } } };
+      }
+      // "ap:<uid>" is a Sign in with Apple session that hid its email (none in the token); "apx:<uid>"
+      // claims apple.com as the provider without an Apple identity.
+      const apple = /^apx?:/.exec(token);
+      if (apple) {
+        const uid = token.slice(apple[0].length);
+        return { uid, firebase: { sign_in_provider: "apple.com", identities: apple[0] === "ap:" ? { "apple.com": ["a"] } : {} } };
       }
       if (!token.startsWith("id:")) throw new Error("bad token");
       const uid = token.slice(3);
@@ -331,14 +340,34 @@ test("authorize refuses unknown clients and unregistered redirects without redir
   assert.ok((await oauth.authorize({ ...base, redirect_uri: undefined })).redirect.includes("/connect/?request="));
 });
 
-test("only a Google sign-in can approve, except a password sign-in to the configured review account", async () => {
+test("a Sign in with Apple session approves like a Google one, with or without an email", async () => {
+  const { db, oauth } = setup();
+  db.documents.set("accounts/iphone", { active: true, schemaVersion: 1 });
+  const { redirect } = await oauth.authorize({ response_type: "code", client_id: CLAUDE_ID, redirect_uri: CLAUDE_REDIRECT, code_challenge: CHALLENGE, code_challenge_method: "S256" });
+  const request = requestIdFrom(redirect);
+  const info = await oauth.consentInfo({ request, idToken: "ap:iphone" });
+  assert.deepEqual([info.account, info.email], ["ready", null]);
+  // An Apple account that never turned on Account & sync is told to, without naming Google.
+  await assert.rejects(oauth.decide({ request, idToken: "ap:stranger", decision: "approve" }),
+    (error) => error.error === "account_not_ready" && !/Google/.test(error.message));
+  // A password session on an Apple-linked account, or a token without the Apple identity, can't.
+  db.documents.set("accounts/linked", { active: true, schemaVersion: 1 });
+  for (const idToken of ["pwa:linked", "apx:iphone"]) {
+    await assert.rejects(oauth.decide({ request, idToken, decision: "approve" }), { error: "login_required" }, idToken);
+  }
+  const approved = new URL((await oauth.decide({ request, idToken: "ap:iphone", decision: "approve" })).redirect);
+  assert.ok(approved.searchParams.get("code"));
+  assert.equal(Object.values(db.dump()).find((doc) => doc.codeChallenge === CHALLENGE).uid, "iphone");
+});
+
+test("only a Google or Apple sign-in can approve, except a password sign-in to the configured review account", async () => {
   for (const demoUid of [undefined, "", "reviewer"]) {
     const { db, oauth } = setup({ demoUid });
     for (const uid of ["reviewer", "mallory", "linked"]) db.documents.set(`accounts/${uid}`, { active: true, schemaVersion: 1 });
     const { redirect } = await oauth.authorize({ response_type: "code", client_id: CLAUDE_ID, redirect_uri: CLAUDE_REDIRECT, code_challenge: CHALLENGE, code_challenge_method: "S256" });
     const request = requestIdFrom(redirect);
-    // Other password accounts, anonymous accounts and password sign-ins that happen to have Google linked never can.
-    for (const idToken of ["pw:mallory", "pwg:linked", "id:anon"]) {
+    // Other password accounts, anonymous accounts and password sign-ins that happen to have Google or Apple linked never can.
+    for (const idToken of ["pw:mallory", "pwg:linked", "pwa:linked", "id:anon"]) {
       await assert.rejects(oauth.consentInfo({ request, idToken }), { error: "login_required" }, idToken);
       await assert.rejects(oauth.decide({ request, idToken, decision: "approve" }), { error: "login_required" }, idToken);
     }

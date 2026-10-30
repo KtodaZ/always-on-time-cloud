@@ -78,12 +78,15 @@ parameter (RFC 9207).
   used as an open redirect.
 - Redirect URIs must match exactly; `http` is allowed only for loopback hosts, where the port may
   differ.
-- The consent page asks the user to sign in with the Google account they use in the app, every
-  time: the sign-in is kept in memory only, so it never carries over from another visit or tab. It
-  asks the user to continue only if they started the connection from that assistant themselves just
-  now. Approval works only for an account that has turned on account sync, and only after a Google
-  sign-in (`sign_in_provider` `google.com`); anonymous and password sign-ins are refused, except a
-  password sign-in to the [review account](#review-account).
+- The consent page asks the user to sign in with the account they use in the app (Google, or Sign
+  in with Apple for an account made on an iPhone), every time: the sign-in is kept in memory only,
+  so it never carries over from another visit or tab. It asks the user to continue only if they
+  started the connection from that assistant themselves just now. Approval works only for an
+  account that has turned on account sync, and only after a Google or Apple sign-in
+  (`sign_in_provider` `google.com` or `apple.com`); anonymous and password sign-ins are refused,
+  except a password sign-in to the [review account](#review-account). Firebase keeps one account
+  per email, so signing in with the other provider for an email that already has an account fails
+  (`auth/account-exists-with-different-credential`) and the page says to use the other button.
 - Tokens are random and opaque; only their SHA-256 hashes are stored. Access tokens last 1 hour,
   refresh tokens 90 days and rotate on every use. Reusing a spent authorization code or refresh
   token within 30 seconds is refused (`invalid_grant`) without other effect, which covers a client
@@ -214,7 +217,7 @@ seeds the emulators instead; the end-to-end test does that for the uid `e2e-revi
 | Anonymous daily totals: connections, tool calls and errors, setup tests, undos (each day split over a few shard documents) | `assistantUsage` | Kept; no user identifiers |
 | Request logs: action, the account's `logId` (never its uid or email), random ids (grant, change, request, ping, record, device), outcome, duration | Cloud Logging `_Default` bucket | 30 days; account deletion deletes the `logId` and the records those ids pointed to, so remaining entries can't be tied to the person |
 
-The Google account email is read from Firebase Auth only to match Google Calendar IDs to calendar
+The account's email and any linked Google email are read from Firebase Auth only to match Google Calendar IDs to calendar
 keys; it is not stored or given to the assistant.
 
 The [privacy policy](PRIVACY_POLICY.md) and Play's Data safety answers need to cover this table,

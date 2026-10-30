@@ -81,7 +81,7 @@ const TOOLS = [
       const lines = [`Connected as ${ctx.grant.clientName}.`];
       if (!phones.length) {
         const link = appLink(ctx.origin, "assistants");
-        lines.push(`No phone has finished connecting. Ask the user to open Always On Time on their phone, signed in with the same Google account. Link: ${link}`);
+        lines.push(`No phone has finished connecting. Ask the user to open Always On Time on their phone, signed in with the same account. Link: ${link}`);
         return result(lines.join("\n"), { setupConfirmed, phones, links: { assistants: link } });
       }
       lines.push(setupConfirmed
@@ -162,7 +162,7 @@ const TOOLS = [
         ctx.count("setupTests.noDevices");
         trace(ctx, { status: "noDevices" });
         const link = appLink(ctx.origin, "assistants");
-        return result(`Open Always On Time on your phone to finish connecting (signed in with the same Google account), then run this test again. Link: ${link}`, {
+        return result(`Open Always On Time on your phone to finish connecting (signed in with the same account), then run this test again. Link: ${link}`, {
           outcome: "noDevices", links: { assistants: link },
         });
       }
