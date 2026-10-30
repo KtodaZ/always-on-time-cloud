@@ -87,6 +87,10 @@ parameter (RFC 9207).
   except a password sign-in to the [review account](#review-account). Firebase keeps one account
   per email, so signing in with the other provider for an email that already has an account fails
   (`auth/account-exists-with-different-credential`) and the page says to use the other button.
+  A brand-new Google or Apple sign-in whose account isn't set up in the app (say, someone whose
+  account signs in with Google trying Sign in with Apple with Hide My Email) is deleted again on the
+  spot, after revoking a new Apple sign-in, and the page says no Always On Time account uses it, so
+  no empty Firebase Auth user stays behind. An existing sign-in is never deleted there.
 - Tokens are random and opaque; only their SHA-256 hashes are stored. Access tokens last 1 hour,
   refresh tokens 90 days and rotate on every use. Reusing a spent authorization code or refresh
   token within 30 seconds is refused (`invalid_grant`) without other effect, which covers a client
@@ -166,8 +170,8 @@ or a Google account. One account, the Firebase uid in the `ASSISTANT_DEMO_UID` p
 that; the param is empty by default, which means there is none.
 
 - It signs in on the consent page with "Sign in with email" (email and password). The server
-  accepts a password sign-in from that uid only, and account sync (the rules and callables) refuses
-  every password session, so a password account made on someone's address can't reach their data
+  accepts a password sign-in from that uid only, and account sync (the rules and callables) accepts
+  only Google or Apple sessions, so a password account made on someone's address can't reach their data
   once they sign in with Google.
 - The server plays its phone ([`assistant-demo-phone.js`](../functions/assistant-demo-phone.js)).
   When a tool runs for that account, the server registers an Android device named "Pixel 9 (demo)"
@@ -218,7 +222,11 @@ seeds the emulators instead; the end-to-end test does that for the uid `e2e-revi
 | Request logs: action, the account's `logId` (never its uid or email), random ids (grant, change, request, ping, record, device), outcome, duration | Cloud Logging `_Default` bucket | 30 days; account deletion deletes the `logId` and the records those ids pointed to, so remaining entries can't be tied to the person |
 
 The account's email and any linked Google email are read from Firebase Auth only to match Google Calendar IDs to calendar
-keys; it is not stored or given to the assistant.
+keys; it is not stored or given to the assistant. An account signed in with Apple (iPhone only) has
+no linked Google email, and its own email is an Apple ID or a private relay address, so a Google
+Calendar ID that isn't itself the calendar account's address (a shared or secondary calendar such as
+`...@group.calendar.google.com`) can't be matched for it. The assistant reaches those calendars and
+their events through the calendar keys and event keys from its own reads instead.
 
 The [privacy policy](PRIVACY_POLICY.md) and Play's Data safety answers need to cover this table,
 including that what an assistant reads then falls under its provider's policy, before the

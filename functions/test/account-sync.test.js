@@ -2,12 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { FakeFirestore } = require('../testing/fake-firestore');
 const {
-  isSyncAccount, requireRecentAccount, deleteAccountData, pruneAccountHistory, resumeAccountDeletions, DELETION_RESUME_AFTER_MS, HISTORY_WINDOW_MS
+  isSyncAccount, requireRecentAccount, deleteAccountData, deleteStrayAccount, pruneAccountHistory, resumeAccountDeletions, DELETION_RESUME_AFTER_MS, HISTORY_WINDOW_MS
 } = require('../account-sync');
 
 test('deletion requires a Google- or Apple-linked account and recent authentication', () => {
   const now = 1000000;
-  const valid = { uid: 'user', token: { auth_time: now / 1000, firebase: { identities: { 'google.com': ['google-id'] } } } };
+  const valid = { uid: 'user', token: { auth_time: now / 1000, firebase: { identities: { 'google.com': ['google-id'] }, sign_in_provider: 'google.com' } } };
   assert.equal(requireRecentAccount(valid, now), 'user');
   // Sign in with Apple (iPhone), with a private relay email or none.
   const apple = { uid: 'apple-user', token: { auth_time: now / 1000, firebase: { identities: { 'apple.com': ['apple-id'] }, sign_in_provider: 'apple.com' } } };
@@ -21,6 +21,50 @@ test('deletion requires a Google- or Apple-linked account and recent authenticat
   assert.throws(() => requireRecentAccount({ ...valid, token: { ...valid.token, auth_time: 0 } }, now), { code: 'failed-precondition' });
   assert.equal(isSyncAccount(apple), true);
   assert.equal(isSyncAccount({ uid: 'anon', token: { firebase: { identities: {}, sign_in_provider: 'anonymous' } } }), false);
+});
+
+test('only a Google or Apple session linked to that provider counts, whatever else the account has', () => {
+  const session = (provider, identities) => ({ uid: 'user', token: { auth_time: 1, firebase: { identities, sign_in_provider: provider } } });
+  const google = { 'google.com': ['google-id'] };
+  // Allowlist, not blocklist: a session from any other provider is refused even with a Google identity.
+  for (const provider of ['custom', 'anonymous', 'phone', 'github.com', 'password', undefined]) {
+    assert.equal(isSyncAccount(session(provider, google)), false, String(provider));
+  }
+  // The session's own provider must be linked: an Apple session on a Google-only account is refused.
+  assert.equal(isSyncAccount(session('apple.com', google)), false);
+  assert.equal(isSyncAccount(session('google.com', { 'apple.com': ['apple-id'] })), false);
+  assert.equal(isSyncAccount(session('google.com', google)), true);
+  assert.equal(isSyncAccount(session('apple.com', { 'apple.com': ['apple-id'], 'google.com': ['google-id'] })), true);
+});
+
+test('deleting reports whether an Always On Time account used the sign-in', async () => {
+  const db = new FakeFirestore();
+  db.documents.set('accounts/user', { active: true, schemaVersion: 1 });
+  const auth = { deleteUser: async () => {} };
+  assert.deepEqual(await deleteAccountData(db, auth, 'user'), { hadAccount: true });
+  assert.deepEqual(await deleteAccountData(db, auth, 'stray'), { hadAccount: false });
+  assert.deepEqual(db.documents.get('accounts/stray'), { active: false, schemaVersion: 1 }, 'a stray sign-in still leaves the marker');
+});
+
+test('a stray sign-in is deleted with a marker; an account in use is left alone', async () => {
+  const db = new FakeFirestore();
+  const now = Date.now();
+  db.documents.set('accounts/user', { active: true, schemaVersion: 1 });
+  db.documents.set('accounts/user/values/p_alarm_volume', { payload: '50' });
+  const deleted = [];
+  const auth = { deleteUser: async uid => {
+    assert.deepEqual(db.documents.get(`accounts/${uid}`), { active: false, schemaVersion: 1, deletionPending: true, deletionStartedAt: now });
+    deleted.push(uid);
+  } };
+  assert.equal(await deleteStrayAccount(db, auth, 'user', now), false);
+  assert.deepEqual(db.documents.get('accounts/user'), { active: true, schemaVersion: 1 });
+  assert.deepEqual(db.documents.get('accounts/user/values/p_alarm_volume'), { payload: '50' });
+  assert.equal(await deleteStrayAccount(db, auth, 'stray', now), true);
+  assert.deepEqual(deleted, ['stray']);
+  assert.deepEqual(db.documents.get('accounts/stray'), { active: false, schemaVersion: 1 }, 'no longer pending');
+  // A deleted account's marker counts as in use: nothing is deleted twice.
+  assert.equal(await deleteStrayAccount(db, auth, 'stray', now), false);
+  assert.deepEqual(deleted, ['stray']);
 });
 
 test('deletion blocks stale writes, then deletes data, assistant connections and identity', async () => {

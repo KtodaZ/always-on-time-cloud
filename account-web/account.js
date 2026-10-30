@@ -1,9 +1,10 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
 import {
   getAuth, onAuthStateChanged, GoogleAuthProvider, OAuthProvider, signInWithPopup, signOut, revokeAccessToken,
+  getAdditionalUserInfo,
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
 import { getFunctions, httpsCallable } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-functions.js';
-import { appleProvider, signInError, signedInLabel } from '/sign-in.js';
+import { appleDeletionStep, appleProvider, noAccountMessage, signInError, signedInLabel } from '/sign-in.js';
 
 const config = await fetch('/firebase-config.json').then(response => response.json());
 const app = initializeApp(config);
@@ -12,28 +13,63 @@ const removeAccount = httpsCallable(getFunctions(app, 'us-central1'), 'deleteSyn
 const element = id => document.getElementById(id);
 const status = (message, tone = '') => { element('status').textContent = message; element('status').dataset.tone = tone; };
 let deleting = false;
-// The Apple access token from this page's own Sign in with Apple, kept in memory only. Deleting an
-// Apple account revokes it first (as the iPhone app does), so Apple stops listing the app.
-let appleAccessToken = null;
-onAuthStateChanged(auth, user => {
-  if (!user) appleAccessToken = null;
-  element('account').hidden = !user;
-  element('sign-in-options').hidden = Boolean(user);
+// While a new sign-in is checked, the account isn't shown, so nothing can be deleted before the check.
+let checking = false;
+// This visit's own sign-in, kept in memory only: whether there was one (a session restored from an
+// earlier visit has none), and Sign in with Apple's access token. Deleting an Apple account revokes
+// that token first (as the iPhone app does), so Apple stops listing the app.
+let session = { fresh: false, appleAccessToken: null };
+
+function render(user) {
+  const signedIn = Boolean(user) && !checking;
+  element('account').hidden = !signedIn;
+  element('sign-in-options').hidden = signedIn;
   element('email').textContent = signedInLabel(user);
   element('confirm').checked = false;
   element('delete').disabled = true;
+}
+onAuthStateChanged(auth, user => {
+  if (!user) session = { fresh: false, appleAccessToken: null };
+  render(user);
 });
+
+/**
+ * Removes a sign-in that no Always On Time account uses, so the page doesn't "delete" an empty account
+ * it just made (say, Apple's Hide My Email by someone whose account signs in with Google). The server
+ * deletes it only if no account uses it. A brand-new Apple sign-in is revoked first, while the user
+ * still exists. Returns whether the sign-in was removed; on any failure the account is shown as usual.
+ */
+async function removedUnusedSignIn(result, appleAccessToken) {
+  try {
+    if (appleAccessToken && getAdditionalUserInfo(result)?.isNewUser) {
+      try { await revokeAccessToken(auth, appleAccessToken); } catch { /* removal continues */ }
+    }
+    const { data } = await removeAccount({ onlyIfUnused: true });
+    if (!data?.deleted) return false;
+    await signOut(auth);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function signInWith(provider, method) {
   const buttons = [element('sign-in'), element('sign-in-apple')];
   for (const button of buttons) button.disabled = true;
   status('');
+  checking = true;
   try {
     const result = await signInWithPopup(auth, provider);
-    if (method === 'apple') appleAccessToken = OAuthProvider.credentialFromResult(result)?.accessToken ?? null;
+    const appleAccessToken = method === 'apple' ? OAuthProvider.credentialFromResult(result)?.accessToken ?? null : null;
+    session = { fresh: true, appleAccessToken };
+    status('Checking your account…');
+    status(await removedUnusedSignIn(result, appleAccessToken) ? noAccountMessage(method) : '');
   } catch (error) {
     const message = signInError(error, method);
     if (message) status(message, 'error');
   } finally {
+    checking = false;
+    render(auth.currentUser);
     for (const button of buttons) button.disabled = false;
   }
 }
@@ -51,18 +87,21 @@ element('delete').addEventListener('click', async () => {
   try {
     const { signInProvider } = await auth.currentUser.getIdTokenResult();
     if (signInProvider === 'apple.com') {
-      // A session restored from an earlier visit has no Apple token to revoke: sign in again.
-      if (!appleAccessToken) {
+      const step = appleDeletionStep({ freshSignIn: session.fresh, accessToken: session.appleAccessToken });
+      if (step === 'sign-in-again') {
         await signOut(auth);
         status('Sign in with Apple again, then confirm account deletion.', 'error');
         return;
       }
       // A failed revocation doesn't stop the deletion (as in the iPhone app).
-      try { await revokeAccessToken(auth, appleAccessToken); } catch { /* deletion continues */ }
+      if (step === 'revoke') {
+        try { await revokeAccessToken(auth, session.appleAccessToken); } catch { /* deletion continues */ }
+      }
     }
-    await removeAccount();
+    const { data } = await removeAccount();
     await signOut(auth);
-    status('Your Always On Time account and synced data have been deleted.', 'success');
+    if (data?.hadAccount === false) status(noAccountMessage(signInProvider === 'apple.com' ? 'apple' : 'google'));
+    else status('Your Always On Time account and synced data have been deleted.', 'success');
   } catch (error) {
     if (error.code === 'functions/failed-precondition' || error.code === 'functions/unauthenticated') {
       await signOut(auth);
