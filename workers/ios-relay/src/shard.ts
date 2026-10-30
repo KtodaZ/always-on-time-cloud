@@ -23,6 +23,8 @@ import {
   isRenewalDue,
   planPush,
   renewRetryAt,
+  ringEndsAt,
+  ringEndsCoveredByPush,
   stagesSatisfiedByPush,
   stagesSatisfiedBySync,
   wakeTimes,
@@ -43,7 +45,10 @@ export const MAX_STORED_SUBSCRIPTIONS_PER_INSTALL = 2 * MAX_SUBSCRIPTIONS_PER_IN
 export const DISABLED_INSTALL_RETENTION_MS = 30 * DAY_MS;
 /** Expired mappings are kept so late Graph lifecycle events can still be verified and routed. */
 export const EXPIRED_SUBSCRIPTION_RETENTION_MS = 7 * DAY_MS;
-/** Alarm triggers this far in the past are deleted (snapshots normally replace them first). */
+/**
+ * Alarm triggers this far in the past are deleted. A snapshot drops a passed trigger only once its
+ * ring-end wake went out (or none is due), so this is what normally removes passed triggers.
+ */
 const PAST_ALARM_RETENTION_MS = DAY_MS;
 export const INSTALL_RATE = Object.freeze({ limit: 60, windowMs: MINUTE_MS });
 /** Pushes per alarm run (one APNs subrequest each); more due work continues in the next run. */
@@ -101,7 +106,7 @@ export type DeviceOp =
   | { kind: "status" }
   | { kind: "update"; fields: RegistrationInput }
   | { kind: "delete" }
-  | { kind: "alarms"; alarms: Array<{ key: string; triggerAt: number }> }
+  | { kind: "alarms"; alarms: Array<{ key: string; triggerAt: number; armed?: boolean }> }
   | { kind: "synced"; syncedAt: number }
   | { kind: "receipt"; receipt: Omit<SyncReceipt, "alarms">; alarms: Array<{key: string; triggerAt: number; armed?: boolean}> }
   | { kind: "deleteSubscription"; key: string };
@@ -166,6 +171,7 @@ type InstallRow = {
   rate_count: number;
   next_wake_at: number | null;
   priority_wake_at: number | null;
+  ring_seconds: number | null;
 };
 
 type SubscriptionRow = {
@@ -264,6 +270,25 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 CREATE INDEX IF NOT EXISTS rate_limits_expires ON rate_limits (expires_at);
 `;
 
+/**
+ * Columns added after the first deploy (CREATE TABLE IF NOT EXISTS leaves existing tables alone).
+ * Added on construction when missing, so old and new shards end with the same layout.
+ */
+const ADDED_COLUMNS: ReadonlyArray<{ table: string; column: string; type: string }> = [
+  // IOS-BUG-55: the phone's ring time (null: no ring-end wakes), each trigger's AlarmKit state and
+  // when its ring-end wake was covered by an accepted push.
+  { table: "installs", column: "ring_seconds", type: "INTEGER" },
+  { table: "alarms", column: "armed", type: "INTEGER" },
+  { table: "alarms", column: "ring_end_sent", type: "INTEGER" },
+];
+
+export function addMissingColumns(sql: SqlStorage): void {
+  for (const { table, column, type } of ADDED_COLUMNS) {
+    const present = sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray().some((row) => row.name === column);
+    if (!present) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+}
+
 /** Registration fields; registering again re-enables an install that APNs disabled. */
 function registrationPatch(fields: RegistrationInput, nowMs: number): InstallPatch {
   return {
@@ -273,6 +298,7 @@ function registrationPatch(fields: RegistrationInput, nowMs: number): InstallPat
     active_start: fields.freshness.activeHours.start,
     active_end: fields.freshness.activeHours.end,
     time_zone: fields.freshness.timeZone,
+    ring_seconds: fields.freshness.ringSeconds ?? null,
     enabled: 1,
     disabled_at: null,
     disabled_reason: null,
@@ -307,6 +333,7 @@ export class InstallShard extends DurableObject<Env> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
+    addMissingColumns(this.sql);
   }
 
   /** Current time; a method so tests can control it. */
@@ -372,12 +399,15 @@ export class InstallShard extends DurableObject<Env> {
 
   private alarmStates(installId: string): AlarmState[] {
     return this.sql
-      .exec<{ alarm_key: string; trigger_at: number; sent_t20: number | null; sent_t8: number | null }>(
-        "SELECT alarm_key, trigger_at, sent_t20, sent_t8 FROM alarms WHERE install_id = ?",
+      .exec<{ alarm_key: string; trigger_at: number; sent_t20: number | null; sent_t8: number | null; armed: number | null; ring_end_sent: number | null }>(
+        "SELECT alarm_key, trigger_at, sent_t20, sent_t8, armed, ring_end_sent FROM alarms WHERE install_id = ?",
         installId,
       )
       .toArray()
-      .map((row) => ({ key: row.alarm_key, triggerAt: row.trigger_at, sentT20: row.sent_t20, sentT8: row.sent_t8 }));
+      .map((row) => ({
+        key: row.alarm_key, triggerAt: row.trigger_at, sentT20: row.sent_t20, sentT8: row.sent_t8,
+        armed: row.armed !== 0, ringEndSentAt: row.ring_end_sent,
+      }));
   }
 
   private subscriptionRows(installId: string): SubscriptionRow[] {
@@ -388,7 +418,10 @@ export class InstallShard extends DurableObject<Env> {
     return {
       receipt: this.deliveryState(row.install_id),
       enabled: row.enabled === 1,
-      freshness: { polling: row.polling === 1, activeHours: { start: row.active_start, end: row.active_end }, timeZone: row.time_zone },
+      freshness: {
+        polling: row.polling === 1, activeHours: { start: row.active_start, end: row.active_end }, timeZone: row.time_zone,
+        ...(row.ring_seconds !== null ? { ringSeconds: row.ring_seconds } : {}),
+      },
       createdAt: row.created_at,
       lastPushAt: row.last_push_at,
       lastSyncAt: row.last_sync_at,
@@ -458,9 +491,10 @@ export class InstallShard extends DurableObject<Env> {
     } else {
       this.sql.exec(
         `INSERT INTO installs (install_id, secret_hash, apns_token, apns_environment, polling, active_start, active_end,
-           time_zone, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+           time_zone, ring_seconds, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         installId, secretHash, fields.apnsToken, fields.environment, fields.freshness.polling ? 1 : 0,
-        fields.freshness.activeHours.start, fields.freshness.activeHours.end, fields.freshness.timeZone, nowMs, nowMs,
+        fields.freshness.activeHours.start, fields.freshness.activeHours.end, fields.freshness.timeZone,
+        fields.freshness.ringSeconds ?? null, nowMs, nowMs,
       );
       this.updateInstall(installId, {}, nowMs);
     }
@@ -494,7 +528,7 @@ export class InstallShard extends DurableObject<Env> {
         releasedKeys = this.deleteInstallRecords(installId);
         break;
       case "alarms":
-        this.replaceAlarms(installId, op.alarms);
+        this.replaceAlarms(installId, op.alarms, nowMs);
         break;
       case "synced":
         // Legacy autonomous timestamps cannot acknowledge receipt-capable deliveries.
@@ -508,7 +542,7 @@ export class InstallShard extends DurableObject<Env> {
         // longer replace triggers or the horizon, but it still proves its delivery ran.
         const newer = r.snapshotRevision > state.snapshotRevision;
         if (newer) {
-          this.replaceAlarms(installId, op.alarms);
+          this.replaceAlarms(installId, op.alarms, nowMs);
           state.snapshotRevision = r.snapshotRevision;
         }
         const delivery = state.outstanding;
@@ -559,20 +593,36 @@ export class InstallShard extends DurableObject<Env> {
   /**
    * Replaces the alarm snapshot, keeping sent-stage markers only for unchanged triggers. Writes
    * only the rows that differ, since re-sent snapshots are mostly unchanged.
+   *
+   * Snapshots carry only future triggers, so a trigger that has passed is kept until its ring-end
+   * wake was covered (or none is due): the alarm may still be ringing (IOS-BUG-55). Retention
+   * deletes it a day later. A future trigger missing from the snapshot (moved, cancelled) goes.
    */
-  private replaceAlarms(installId: string, alarms: Array<{ key: string; triggerAt: number }>): void {
-    const prior = new Map(this.alarmStates(installId).map((alarm) => [alarm.key, alarm]));
+  private replaceAlarms(installId: string, alarms: Array<{ key: string; triggerAt: number; armed?: boolean }>, nowMs: number): void {
+    const row = this.installRow(installId);
+    const install = row ? this.installState(row) : null;
+    const prior = new Map((install?.alarms ?? []).map((alarm) => [alarm.key, alarm]));
     const next = new Set(alarms.map((alarm) => alarm.key));
-    for (const key of prior.keys()) {
-      if (!next.has(key)) this.sql.exec("DELETE FROM alarms WHERE install_id = ? AND alarm_key = ?", installId, key);
+    for (const [key, alarm] of prior) {
+      if (next.has(key)) continue;
+      const ringing = install !== null && alarm.triggerAt <= nowMs && (alarm.ringEndSentAt ?? null) === null
+        && ringEndsAt(install, alarm) !== null;
+      if (!ringing) this.sql.exec("DELETE FROM alarms WHERE install_id = ? AND alarm_key = ?", installId, key);
     }
     for (const alarm of alarms) {
       const previous = prior.get(alarm.key);
-      if (previous?.triggerAt === alarm.triggerAt) continue;
+      const armed = alarm.armed === false ? 0 : 1;
+      if (previous?.triggerAt === alarm.triggerAt) {
+        if ((previous.armed === false ? 0 : 1) !== armed) {
+          this.sql.exec("UPDATE alarms SET armed = ? WHERE install_id = ? AND alarm_key = ?", armed, installId, alarm.key);
+        }
+        continue;
+      }
       this.sql.exec(
-        `INSERT INTO alarms (install_id, alarm_key, trigger_at, sent_t20, sent_t8) VALUES (?, ?, ?, NULL, NULL)
-         ON CONFLICT (install_id, alarm_key) DO UPDATE SET trigger_at = excluded.trigger_at, sent_t20 = NULL, sent_t8 = NULL`,
-        installId, alarm.key, alarm.triggerAt,
+        `INSERT INTO alarms (install_id, alarm_key, trigger_at, sent_t20, sent_t8, armed, ring_end_sent) VALUES (?, ?, ?, NULL, NULL, ?, NULL)
+         ON CONFLICT (install_id, alarm_key) DO UPDATE SET trigger_at = excluded.trigger_at, sent_t20 = NULL, sent_t8 = NULL,
+           armed = excluded.armed, ring_end_sent = NULL`,
+        installId, alarm.key, alarm.triggerAt, armed,
       );
     }
   }
@@ -849,7 +899,11 @@ export class InstallShard extends DurableObject<Env> {
     if (!this.release(claim)) return;
     const row = this.installRow(claim.installId);
     if (!row) return;
-    if (!claim.deliveryId) this.markStages(claim.installId, stagesSatisfiedByPush(this.installState(row), claim.plan.kind, sentAt), sentAt);
+    const state = this.installState(row);
+    if (!claim.deliveryId) this.markStages(claim.installId, stagesSatisfiedByPush(state, claim.plan.kind, sentAt), sentAt);
+    for (const key of ringEndsCoveredByPush(state, sentAt)) {
+      this.sql.exec("UPDATE alarms SET ring_end_sent = ? WHERE install_id = ? AND alarm_key = ?", sentAt, claim.installId, key);
+    }
     for (const key of claim.plan.renewalKeys) {
       const subscription = this.subscriptionRow(claim.installId, key);
       if (!subscription || !isRenewalDue(toSubscriptionState(subscription), sentAt)) continue;
