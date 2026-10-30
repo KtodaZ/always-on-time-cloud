@@ -67,16 +67,17 @@ service cloud.firestore {
   }
 
   match /databases/{database}/documents {
-    // A Google-linked account, signed in this session with Google rather than a password: a
-    // password account on someone's address before they first sign in with Google would
-    // otherwise gain their account once Google is linked to it.
-    function isGoogleAccount(uid) {
+    // An account linked to Google (Android and iPhone) or Apple (Sign in with Apple, iPhone only),
+    // signed in this session with that provider rather than a password: a password account on
+    // someone's address before they first sign in with Google or Apple would otherwise gain their
+    // account once that provider is linked to it.
+    function isSyncAccount(uid) {
       return request.auth != null && request.auth.uid == uid
-        && request.auth.token.firebase.identities.keys().hasAny(['google.com'])
+        && request.auth.token.firebase.identities.keys().hasAny(['google.com', 'apple.com'])
         && request.auth.token.firebase.sign_in_provider != 'password';
     }
     function activeAccount(uid) {
-      return isGoogleAccount(uid)
+      return isSyncAccount(uid)
         && get(/databases/$(database)/documents/accounts/$(uid)).data.active == true;
     }
     // Synced record ids: the app's preference allowlist (PortablePreferences.kt, mirrored in
@@ -85,8 +86,8 @@ service cloud.firestore {
       return recordId.matches('^(p_(dynamic_color|apply_accent_to_app|vibration_enabled|gradual_volume_enabled|spoken_alarm_include_event_name|spoken_alarm_include_time_until_event|spoken_alarm_include_location|spoken_alarm_include_helpful_reminder|respect_dnd|override_dnd_for_priority|ignore_all_day_events|auto_detect_meeting_urls|override_system_volume|smart_snooze_suggestions|default_lead_time_minutes|alarm_volume|snooze_duration_minutes|alarm_duration_seconds|max_snoozes|spoken_alarm_speech_rate_hundredths|theme_preference|accent_id|default_lead_times_csv|alert_type|vibration_pattern|spoken_alarm_meeting_type_preference|spoken_alarm_repetition|rsvp_filter|alarms_paused_until)|[cse]_[a-f0-9]{64})$');
     }
     match /accounts/{uid} {
-      allow read: if isGoogleAccount(uid);
-      allow create: if isGoogleAccount(uid)
+      allow read: if isSyncAccount(uid);
+      allow create: if isSyncAccount(uid)
         && request.resource.data.keys().hasOnly(['active', 'schemaVersion'])
         && request.resource.data.active == true && request.resource.data.schemaVersion == 1;
       allow update, delete: if false;

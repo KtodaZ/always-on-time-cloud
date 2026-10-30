@@ -12,6 +12,7 @@ const { defineSecret, defineString } = require("firebase-functions/params");
 const { HttpsError, onCall, onRequest } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 
+const { isSyncAccount } = require("./account-sync");
 const { apnsAuthKey, getApnsTransport } = require("./apns-config");
 const { isChangeId, readLogId, refs } = require("./assistant-data");
 const { createDeviceApi } = require("./assistant-device-api");
@@ -120,15 +121,14 @@ exports.assistantDeviceApi = onRequest(
 );
 
 /**
- * Callable from the app: same requirement as account sync, a Google-linked active account. Returns
+ * Callable from the app: same requirement as account sync, a Google- or Apple-linked active account. Returns
  * the uid and the account's logId (null before its first assistant connection), read alongside the
  * account document, for the log line.
  */
 async function requireActiveAccount(request) {
   const auth = request.auth;
-  // Not a password session (firestore.rules isGoogleAccount explains why).
-  if (!auth || !auth.token?.firebase?.identities?.["google.com"]?.length || auth.token.firebase.sign_in_provider === "password") {
-    throw new HttpsError("unauthenticated", "Sign in with Google first.");
+  if (!isSyncAccount(auth)) {
+    throw new HttpsError("unauthenticated", "Sign in to Account & sync first.");
   }
   const db = getFirestore();
   const [account, logId] = await Promise.all([refs.account(db, auth.uid).get(), readLogId(db, auth.uid)]);

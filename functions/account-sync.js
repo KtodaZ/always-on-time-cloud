@@ -3,10 +3,23 @@ const { deleteAllGrants } = require('./assistant-oauth');
 
 const HISTORY_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
-function requireRecentGoogleAccount(auth, now = Date.now()) {
-  // Not a password session (firestore.rules isGoogleAccount explains why).
-  if (!auth || !auth.token?.firebase?.identities?.['google.com']?.length || auth.token.firebase.sign_in_provider === 'password') {
-    const error = new Error('Sign in with Google before deleting your account.');
+// Account sync signs in with Google (Android and iPhone) or Sign in with Apple (iPhone only).
+const ACCOUNT_PROVIDERS = ['google.com', 'apple.com'];
+
+/**
+ * Whether a session belongs to an account-sync account: linked to Google or Apple, and not a password
+ * session (firestore.rules isSyncAccount explains why). An Apple account may have a private relay
+ * email or none, so nothing here depends on the email.
+ */
+function isSyncAccount(auth) {
+  const identities = auth?.token?.firebase?.identities;
+  return Boolean(auth) && ACCOUNT_PROVIDERS.some((provider) => identities?.[provider]?.length > 0)
+    && auth.token.firebase.sign_in_provider !== 'password';
+}
+
+function requireRecentAccount(auth, now = Date.now()) {
+  if (!isSyncAccount(auth)) {
+    const error = new Error('Sign in before deleting your account.');
     error.code = 'unauthenticated';
     throw error;
   }
@@ -78,6 +91,6 @@ async function pruneAccountHistory(db, now = Date.now()) {
 }
 
 module.exports = {
-  DELETION_RESUME_AFTER_MS, HISTORY_WINDOW_MS, requireRecentGoogleAccount, deleteAccountData, finishAccountDeletion,
+  DELETION_RESUME_AFTER_MS, HISTORY_WINDOW_MS, isSyncAccount, requireRecentAccount, deleteAccountData, finishAccountDeletion,
   pruneAccountHistory, resumeAccountDeletions,
 };

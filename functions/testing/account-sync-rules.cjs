@@ -74,6 +74,20 @@ const fs = require('node:fs');
     await assertFails(deleteDoc(doc(carol, `accounts/carol/values/${ended}`)), 'no account document');
     await assertSucceeds(deleteDoc(doc(bob, `accounts/bob/values/${ended}`)));
 
+    // Sign in with Apple (iPhone): an Apple-linked account syncs like a Google one, with or
+    // without an email (private relay or none); its password session is refused all the same.
+    const dana = environment.authenticatedContext('dana', { firebase: { identities: { 'apple.com': ['dana-apple'] }, sign_in_provider: 'apple.com' } }).firestore();
+    const danaPassword = environment.authenticatedContext('dana', { firebase: { identities: { 'apple.com': ['dana-apple'], email: ['dana@privaterelay.appleid.com'] }, sign_in_provider: 'password' } }).firestore();
+    const danaOtherProvider = environment.authenticatedContext('dana', { firebase: { identities: { 'github.com': ['dana-github'] }, sign_in_provider: 'github.com' } }).firestore();
+    await assertFails(setDoc(doc(danaOtherProvider, 'accounts/dana'), { active: true, schemaVersion: 1 }));
+    await assertSucceeds(setDoc(doc(dana, 'accounts/dana'), { active: true, schemaVersion: 1 }));
+    await assertSucceeds(setDoc(doc(dana, 'accounts/dana/values/p_alarm_volume'), { payload: '70' }));
+    await assertSucceeds(getDocs(collection(dana, 'accounts/dana/values')));
+    await assertFails(getDoc(doc(danaPassword, 'accounts/dana/values/p_alarm_volume')));
+    await assertFails(setDoc(doc(danaPassword, 'accounts/dana/values/p_alarm_volume'), { payload: '50' }));
+    await assertFails(getDoc(doc(dana, 'accounts/alice/values/p_alarm_volume')));
+    await assertFails(getDoc(doc(alice, 'accounts/dana/values/p_alarm_volume')));
+
     // Feedback: anonymous senders create documents; attachments may omit the download URL.
     const feedback = (attachment) => ({
       message: 'It rang late', contactEmail: 'a@example.com', attachments: attachment ? [attachment] : [],
@@ -87,6 +101,6 @@ const fs = require('node:fs');
     await assertFails(setDoc(doc(anonymous, 'feedback/f-a5'), feedback(attachment('a5', { downloadUrl: 5 }))));
     await assertFails(setDoc(doc(anonymous, 'feedback/f-a6'), feedback({ ...attachment('a6'), path: 'feedback/other/f-a6/a6' })));
     await assertFails(getDoc(doc(anonymous, 'feedback/f-a1')));
-    console.log('Account rules: ownership, preference allowlist, anonymous rejection, retention, ended-occurrence deletes, deletion tombstone and feedback checks passed.');
+    console.log('Account rules: ownership, Apple accounts, preference allowlist, anonymous rejection, retention, ended-occurrence deletes, deletion tombstone and feedback checks passed.');
   } finally { await environment.cleanup(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
