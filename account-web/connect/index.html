@@ -45,7 +45,7 @@
       </div>
       <div class="scope">
         <dt><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.9 4.2A10 10 0 0 1 12 4c6.4 0 10 8 10 8a17 17 0 0 1-2.2 3.2"/><path d="M6.6 6.6C3.7 8.4 2 12 2 12s3.6 8 10 8a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m2 2 20 20"/></svg>What it never sees</dt>
-        <dd>Event descriptions, attendees, locations, meeting links, your Google account, email or files.</dd>
+        <dd>Event descriptions, attendees, locations, meeting links, your Google or Apple account, email or files.</dd>
       </div>
     </dl>
     <dl class="fine">
@@ -64,14 +64,17 @@
   <div id="not-ready" class="callout" hidden>
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
     <div>
-      <p>This Google account isn’t set up in Always On Time yet. Install the app, sign in with this account under Settings › Account &amp; sync, then start connecting again from your assistant.</p>
-      <p><a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Get Always On Time on Google Play</a></p>
+      <p>This account isn’t set up in Always On Time yet. Install the app, sign in with this account under Settings › Account &amp; sync, then start connecting again from your assistant.</p>
+      <p id="get-app"><a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Get Always On Time on Google Play</a></p>
     </div>
   </div>
   <p id="status" class="status" role="status" aria-live="polite"></p>
+  <div id="sign-in-options" class="providers" hidden>
+    <button id="sign-in" class="google"><img src="/google-g.svg" alt="">Sign in with Google</button>
+    <button id="sign-in-apple" class="apple"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>Sign in with Apple</button>
+  </div>
   <div class="actions">
     <button id="cancel" hidden>Cancel</button>
-    <button id="sign-in" class="google" hidden><img src="/google-g.svg" alt="">Sign in with Google</button>
     <button id="approve" class="primary" hidden>Approve</button>
   </div>
   <div id="email-sign-in" class="email-sign-in" hidden>
@@ -84,7 +87,7 @@
       <button id="email-submit" type="submit">Sign in</button>
     </form>
   </div>
-  <p id="sign-in-note" class="secondary">Sign in with the Google account you use in the Always On Time app. Signing in here does not give the assistant your Google account or calendar. <a href="https://zombit.io/always-on-time/privacy/">Privacy policy</a></p>
+  <p id="sign-in-note" class="secondary">Sign in the way you do in the Always On Time app: with Google, or with Apple if you chose it on iPhone. Signing in here does not give the assistant your account or calendar. <a href="https://zombit.io/always-on-time/privacy/">Privacy policy</a></p>
 </main>
 <footer class="site-footer"><a href="https://play.google.com/store/apps/details?id=com.zombitstudios.alwaysontime">Always On Time</a> by Zombit Studios · <a href="https://zombit.io/always-on-time/privacy/">Privacy policy</a></footer>
 <script type="module" src="/connect/connect.js"></script>

@@ -416,13 +416,34 @@ button[aria-busy="true"]::before {
 .danger { background: var(--error); border-color: var(--error); color: var(--on-error); }
 .danger:hover:not(:disabled) { background: color-mix(in oklab, var(--error) 88%, var(--ink)); }
 
-/* Google's sign-in button (light and dark themes from its branding guidelines). */
-.google { background: #ffffff; border-color: #747775; color: #1f1f1f; font-weight: 500; }
-.google:hover:not(:disabled) { background: #f2f2f2; }
+/* The sign-in choices, Google then Apple, stacked full width with equal weight. */
+.providers {
+  display: grid;
+  gap: 10px;
+  margin: 24px 0 0;
+}
+.providers:not([hidden]) + .actions { margin-top: 10px; }
+
+/* Google's sign-in button (light and dark themes from its branding guidelines) and Sign in with
+   Apple in its outlined style (Apple's web button guidelines: the Apple logo and "Sign in with
+   Apple" in the system font, logo and title the same colour), the same size, shape, outline and
+   type, so neither is more prominent. Both use the system font, which is Roboto on Android and SF
+   on Apple devices, as each brand asks. */
+.google, .apple {
+  background: #ffffff;
+  border-color: #747775;
+  color: #1f1f1f;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-weight: 500;
+}
+.google:hover:not(:disabled), .apple:hover:not(:disabled) { background: #f2f2f2; }
 .google img { width: 20px; height: 20px; }
+.apple { color: #000000; }
+.apple svg { width: 20px; height: 20px; margin-top: -3px; fill: currentColor; }
 @media (prefers-color-scheme: dark) {
-  .google { background: #131314; border-color: #8e918f; color: #e3e3e3; }
-  .google:hover:not(:disabled) { background: #222224; }
+  .google, .apple { background: #131314; border-color: #8e918f; color: #e3e3e3; }
+  .google:hover:not(:disabled), .apple:hover:not(:disabled) { background: #222224; }
+  .apple { color: #ffffff; }
 }
 
 button.link {
@@ -435,7 +456,7 @@ button.link {
   font-weight: 600;
 }
 
-/* ---- Email sign-in (the review account; Google stays the main path) ---- */
+/* ---- Email sign-in (the review account; Google and Apple stay the main paths) ---- */
 .email-sign-in { margin: 12px 0 0; text-align: center; }
 .email-form {
   display: grid;

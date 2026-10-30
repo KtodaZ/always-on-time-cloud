@@ -1,15 +1,17 @@
-// Consent page for connecting an AI assistant (docs/ASSISTANT_CONNECTOR.md). The user signs in with
-// the Google account they use in the app; approving sends the Firebase ID token and the pending
-// request id to /oauth/approve, which returns the assistant's redirect with a one-time code.
+// Consent page for connecting an AI assistant (docs/ASSISTANT_CONNECTOR.md). The user signs in the
+// way they do in the app's Account & sync, with Google or (an account made on an iPhone) Sign in with
+// Apple; approving sends the Firebase ID token and the pending request id to /oauth/approve, which
+// returns the assistant's redirect with a one-time code.
 // "Sign in with email" exists for the review account the assistant directories test with; the
 // server accepts a password sign-in from that account only.
 // Only Claude, Claude Code and ChatGPT (by their exact client metadata URLs) are named; any other app shows
 // as "Unverified app" with the site its codes go to, and cancelling it shows a page, not a redirect.
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
 import {
-  initializeAuth, inMemoryPersistence, browserPopupRedirectResolver, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut,
-  signInWithEmailAndPassword, connectAuthEmulator,
+  initializeAuth, inMemoryPersistence, browserPopupRedirectResolver, onAuthStateChanged, GoogleAuthProvider, OAuthProvider,
+  signInWithPopup, signOut, signInWithEmailAndPassword, connectAuthEmulator,
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
+import { appleProvider, signInError, signedInLabel } from '/sign-in.js';
 
 const element = id => document.getElementById(id);
 const page = element('page');
@@ -34,7 +36,7 @@ function show(message, tone = '') {
 
 /** Ends the flow on a page that only says what happened: state is error, info, approved or cancelled. */
 function stop(title, message, state = 'error') {
-  for (const id of ['details', 'sign-in', 'email-sign-in', 'account', 'not-ready', 'approve', 'cancel']) element(id).hidden = true;
+  for (const id of ['details', 'sign-in-options', 'email-sign-in', 'account', 'not-ready', 'approve', 'cancel']) element(id).hidden = true;
   page.dataset.state = state;
   delete page.dataset.busy;
   element('heading').textContent = title;
@@ -131,7 +133,7 @@ async function start() {
 
   onAuthStateChanged(auth, async user => {
     currentUser = user;
-    element('sign-in').hidden = Boolean(user);
+    element('sign-in-options').hidden = Boolean(user);
     element('email-sign-in').hidden = Boolean(user);
     element('account').hidden = !user;
     element('approve').hidden = true;
@@ -142,7 +144,9 @@ async function start() {
       element('intro').textContent = 'Sign in to review and approve this connection.';
       return;
     }
-    element('email').textContent = user.email || '';
+    element('email').textContent = signedInLabel(user);
+    // An Apple account was made on an iPhone, so the Google Play link doesn't apply.
+    element('get-app').hidden = user.providerData.some(profile => profile.providerId === 'apple.com');
     try {
       const status = await post('/oauth/consent', { request, idToken: await user.getIdToken() });
       element('intro').textContent = status.account === 'ready'
@@ -152,18 +156,21 @@ async function start() {
       element('approve').hidden = status.account !== 'ready';
     } catch (error) {
       if (error.code === 'expired') stop(...EXPIRED);
-      else if (error.code === 'login_required') { notice = 'Sign in with a Google account.'; await signOut(auth); }
+      else if (error.code === 'login_required') { notice = 'Sign in with Google or Apple.'; await signOut(auth); }
       else if (error.status === 429) show(RATE_LIMITED, 'error');
       else show('Couldn’t check this account. Please try again.', 'error');
     }
   });
-  element('sign-in').addEventListener('click', async () => {
-    element('sign-in').disabled = true;
+  const signInWith = async (provider, method) => {
+    const buttons = [element('sign-in'), element('sign-in-apple')];
+    for (const button of buttons) button.disabled = true;
     show('');
-    try { await signInWithPopup(auth, new GoogleAuthProvider()); }
-    catch (error) { if (error.code !== 'auth/popup-closed-by-user') show('Couldn’t sign in. Please try again.', 'error'); }
-    finally { element('sign-in').disabled = false; }
-  });
+    try { await signInWithPopup(auth, provider); }
+    catch (error) { const message = signInError(error, method); if (message) show(message, 'error'); }
+    finally { for (const button of buttons) button.disabled = false; }
+  };
+  element('sign-in').addEventListener('click', () => signInWith(new GoogleAuthProvider(), 'google'));
+  element('sign-in-apple').addEventListener('click', () => signInWith(appleProvider(OAuthProvider), 'apple'));
   element('email-toggle').addEventListener('click', () => {
     const open = element('email-form').hidden;
     element('email-form').hidden = !open;

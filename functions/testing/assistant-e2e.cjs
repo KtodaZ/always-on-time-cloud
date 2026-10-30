@@ -211,6 +211,25 @@ const json = { 'Content-Type': 'application/json' };
   const refused = await connectWith(stranger.idToken);
   assert.deepEqual([refused.refused, refused.body.error], [401, 'login_required']);
 
+  // An account made with Sign in with Apple on an iPhone (no email shared) connects the same way.
+  const appleSubject = randomUUID();
+  const fakeApple = `${encode({ alg: 'none' })}.${encode({ sub: appleSubject, iss: 'https://appleid.apple.com', aud: 'test' })}.`;
+  const appleSignIn = await fetch('http://127.0.0.1:9199/identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=test', {
+    method: 'POST', headers: json, body: JSON.stringify({ requestUri: 'http://localhost', postBody: `id_token=${fakeApple}&providerId=apple.com`, returnSecureToken: true })
+  }).then(r => r.json());
+  assert.ok(appleSignIn.idToken, JSON.stringify(appleSignIn));
+  // Before Account & sync is on, consent accepts the sign-in and reports the account isn't ready.
+  const appleAuthorized = await fetch(`${site}/oauth/authorize?${new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri,
+    code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', resource: resource.resource })}`, { redirect: 'manual' });
+  const appleConsent = await fetch(`${site}/oauth/consent`, { method: 'POST', headers: json,
+    body: JSON.stringify({ request: new URL(appleAuthorized.headers.get('location')).searchParams.get('request'), idToken: appleSignIn.idToken }) }).then(r => r.json());
+  assert.equal(appleConsent.account, 'not_ready', JSON.stringify(appleConsent));
+  await db.doc(`accounts/${appleSignIn.localId}`).set({ active: true, schemaVersion: 1 });
+  const appleTokens = await connectWith(appleSignIn.idToken);
+  assert.ok(appleTokens.access_token, JSON.stringify(appleTokens));
+  assert.equal((await db.doc(`accounts/${appleSignIn.localId}/assistant/state`).get()).data().connected, true);
+  assert.equal((await fetch(`${site}/oauth/revoke`, form({ token: appleTokens.refresh_token, client_id: client.client_id }))).status, 200);
+
   const tool = async (token, name, args = {}) => {
     const out = await rpc(token, 'tools/call', { name, arguments: args });
     assert.equal(out.isError, undefined, `${name}: ${JSON.stringify(out)}`);
