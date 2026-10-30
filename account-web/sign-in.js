@@ -29,3 +29,31 @@ export function signedInLabel(user) {
   if (user?.email) return user.email;
   return user?.providerData?.some(profile => profile.providerId === 'apple.com') ? 'your Apple Account' : '';
 }
+
+const providerName = method => (method === 'apple' ? 'Apple' : 'Google');
+
+/**
+ * The delete page's message when no Always On Time account uses the sign-in, such as Apple's Hide My
+ * Email used by someone whose account signs in with Google. The page has removed that sign-in.
+ */
+export function noAccountMessage(method) {
+  const other = method === 'apple' ? 'Google' : 'Apple';
+  return `No Always On Time account uses this ${providerName(method)} sign-in, so there’s nothing to delete. `
+    + `If you use the app with a different account or with Sign in with ${other}, sign in with that instead.`;
+}
+
+/** The consent page's message after it removes a brand-new sign-in that isn't set up in the app. */
+export function notSetUpMessage(method) {
+  return `No Always On Time account uses this ${providerName(method)} sign-in yet. Sign in with the account you use in the app, `
+    + 'or install Always On Time and sign in under Settings › Account & sync first.';
+}
+
+/**
+ * Before the delete page deletes an Apple account: 'revoke' this visit's Apple token, or 'sign-in-again'
+ * for a session restored from an earlier visit, which has no token to revoke. A fresh sign-in that
+ * returned no token goes ahead ('delete'): a failed revocation must not block deletion.
+ */
+export function appleDeletionStep({ freshSignIn, accessToken }) {
+  if (!freshSignIn) return 'sign-in-again';
+  return accessToken ? 'revoke' : 'delete';
+}

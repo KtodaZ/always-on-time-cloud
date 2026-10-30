@@ -7,14 +7,15 @@ const HISTORY_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const ACCOUNT_PROVIDERS = ['google.com', 'apple.com'];
 
 /**
- * Whether a session belongs to an account-sync account: linked to Google or Apple, and not a password
- * session (firestore.rules isSyncAccount explains why). An Apple account may have a private relay
- * email or none, so nothing here depends on the email.
+ * Whether a session belongs to an account-sync account: signed in this session with Google or Apple,
+ * and linked to that provider (firestore.rules isSyncAccount explains why any other session, a
+ * password one included, is refused). An Apple account may have a private relay email or none, so
+ * nothing here depends on the email.
  */
 function isSyncAccount(auth) {
-  const identities = auth?.token?.firebase?.identities;
-  return Boolean(auth) && ACCOUNT_PROVIDERS.some((provider) => identities?.[provider]?.length > 0)
-    && auth.token.firebase.sign_in_provider !== 'password';
+  const provider = auth?.token?.firebase?.sign_in_provider;
+  return Boolean(auth) && ACCOUNT_PROVIDERS.includes(provider)
+    && auth.token.firebase.identities?.[provider]?.length > 0;
 }
 
 function requireRecentAccount(auth, now = Date.now()) {
@@ -36,12 +37,37 @@ function requireRecentAccount(auth, now = Date.now()) {
 const DELETION_RESUME_AFTER_MS = 15 * 60 * 1000;
 const RESUME_BATCH = 20;
 
+/**
+ * Deletes an account and its data. Returns {hadAccount}: false when the sign-in had no account
+ * document, so no Always On Time account used it and there was nothing to delete but the identity.
+ */
 async function deleteAccountData(db, auth, uid, now = Date.now()) {
   const root = db.collection('accounts').doc(uid);
+  const hadAccount = (await root.get()).exists;
   // Keep a minimal UID tombstone so an already-issued token cannot recreate deleted data. It stays
   // marked pending until everything below is gone, so a deletion that stops partway is resumed.
-  await root.set({ active: false, schemaVersion: 1, deletionPending: true, deletionStartedAt: now });
+  await root.set(pendingTombstone(now));
   await finishAccountDeletion(db, auth, uid);
+  return { hadAccount };
+}
+
+const pendingTombstone = now => ({ active: false, schemaVersion: 1, deletionPending: true, deletionStartedAt: now });
+
+/**
+ * Deletes a stray sign-in: a Google or Apple identity that no Always On Time account uses (no
+ * account document), such as one the delete-account page made when someone signed in with the
+ * wrong provider. Returns whether it was stray; an account in use is left untouched. Creating the
+ * tombstone only if no document exists keeps a phone that signs in at the same moment safe.
+ */
+async function deleteStrayAccount(db, auth, uid, now = Date.now()) {
+  try {
+    await db.collection('accounts').doc(uid).create(pendingTombstone(now));
+  } catch (error) {
+    if (error?.code === 6) return false; // ALREADY_EXISTS: an account uses this sign-in.
+    throw error;
+  }
+  await finishAccountDeletion(db, auth, uid);
+  return true;
 }
 
 /** Deletes everything a (tombstoned) account left behind. Safe to run again after a partial run. */
@@ -91,6 +117,7 @@ async function pruneAccountHistory(db, now = Date.now()) {
 }
 
 module.exports = {
-  DELETION_RESUME_AFTER_MS, HISTORY_WINDOW_MS, isSyncAccount, requireRecentAccount, deleteAccountData, finishAccountDeletion,
+  DELETION_RESUME_AFTER_MS, HISTORY_WINDOW_MS, isSyncAccount, requireRecentAccount, deleteAccountData, deleteStrayAccount,
+  finishAccountDeletion,
   pruneAccountHistory, resumeAccountDeletions,
 };

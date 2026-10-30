@@ -4,7 +4,7 @@ import test from "node:test";
 
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
 // account-web/ has no package.json, so load the browser module from its source.
-const { appleProvider, signInError, signedInLabel } = await import(
+const { appleDeletionStep, appleProvider, noAccountMessage, notSetUpMessage, signInError, signedInLabel } = await import(
   `data:text/javascript,${encodeURIComponent(read("account-web/sign-in.js"))}`
 );
 
@@ -31,6 +31,32 @@ test("an Apple account without an email still says who is signed in", () => {
   assert.equal(signedInLabel({ email: "x@privaterelay.appleid.com", providerData: [{ providerId: "apple.com" }] }), "x@privaterelay.appleid.com");
   assert.equal(signedInLabel({ email: null, providerData: [{ providerId: "apple.com" }] }), "your Apple Account");
   assert.equal(signedInLabel(null), "");
+});
+
+test("deleting an Apple account asks for a fresh sign-in only for a restored session", () => {
+  assert.equal(appleDeletionStep({ freshSignIn: false, accessToken: null }), "sign-in-again");
+  assert.equal(appleDeletionStep({ freshSignIn: false, accessToken: "token" }), "sign-in-again");
+  assert.equal(appleDeletionStep({ freshSignIn: true, accessToken: "token" }), "revoke");
+  // A fresh popup without a token deletes anyway: a failed revocation never blocks deletion.
+  assert.equal(appleDeletionStep({ freshSignIn: true, accessToken: null }), "delete");
+});
+
+test("a sign-in no account uses says so and points to the other way in", () => {
+  assert.match(noAccountMessage("apple"), /^No Always On Time account uses this Apple sign-in, so there’s nothing to delete\./);
+  assert.match(noAccountMessage("apple"), /Sign in with Google/);
+  assert.match(noAccountMessage("google"), /this Google sign-in/);
+  assert.match(noAccountMessage("google"), /Sign in with Apple/);
+  assert.match(notSetUpMessage("apple"), /^No Always On Time account uses this Apple sign-in yet\./);
+  assert.match(notSetUpMessage("google"), /Settings › Account & sync/);
+});
+
+test("the delete page checks a new sign-in for a stray account before showing it, and the consent page removes a new one", () => {
+  const account = read("account-web/account.js");
+  assert.match(account, /removeAccount\(\{ onlyIfUnused: true \}\)/);
+  assert.match(account, /data\?\.hadAccount === false/);
+  const connect = read("account-web/connect/connect.js");
+  assert.match(connect, /getAdditionalUserInfo\(result\)\?\.isNewUser/);
+  assert.match(connect, /await deleteUser\(user\)/);
 });
 
 test("the consent and delete pages offer Google and Apple side by side, and every id the scripts use exists", () => {

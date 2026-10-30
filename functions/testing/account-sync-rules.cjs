@@ -88,6 +88,22 @@ const fs = require('node:fs');
     await assertFails(getDoc(doc(dana, 'accounts/alice/values/p_alarm_volume')));
     await assertFails(getDoc(doc(alice, 'accounts/dana/values/p_alarm_volume')));
 
+    // Only a Google or Apple session counts (an allowlist, matching the assistant consent check): a
+    // session from any other provider is refused even when the account has a Google or Apple
+    // identity, and the session's own provider must be linked.
+    for (const provider of ['custom', 'anonymous', 'phone', 'github.com']) {
+      const other = environment.authenticatedContext('alice', { firebase: { identities: { 'google.com': ['alice-google'] }, sign_in_provider: provider } }).firestore();
+      await assertFails(getDoc(doc(other, 'accounts/alice')), provider);
+      await assertFails(getDoc(doc(other, 'accounts/bob/values/p_alarm_volume')), provider);
+      const otherBob = environment.authenticatedContext('bob', { firebase: { identities: { 'google.com': ['bob-google'], 'apple.com': ['bob-apple'] }, sign_in_provider: provider } }).firestore();
+      await assertFails(getDoc(doc(otherBob, 'accounts/bob/values/p_alarm_volume')), provider);
+      await assertFails(setDoc(doc(otherBob, 'accounts/bob/values/p_alarm_volume'), { payload: '50' }), provider);
+    }
+    const bobAppleUnlinked = environment.authenticatedContext('bob', { firebase: { identities: { 'google.com': ['bob-google'] }, sign_in_provider: 'apple.com' } }).firestore();
+    await assertFails(getDoc(doc(bobAppleUnlinked, 'accounts/bob/values/p_alarm_volume')));
+    const bobBoth = environment.authenticatedContext('bob', { firebase: { identities: { 'google.com': ['bob-google'], 'apple.com': ['bob-apple'] }, sign_in_provider: 'apple.com' } }).firestore();
+    await assertSucceeds(getDocs(collection(bobBoth, 'accounts/bob/values')));
+
     // Feedback: anonymous senders create documents; attachments may omit the download URL.
     const feedback = (attachment) => ({
       message: 'It rang late', contactEmail: 'a@example.com', attachments: attachment ? [attachment] : [],
@@ -101,6 +117,6 @@ const fs = require('node:fs');
     await assertFails(setDoc(doc(anonymous, 'feedback/f-a5'), feedback(attachment('a5', { downloadUrl: 5 }))));
     await assertFails(setDoc(doc(anonymous, 'feedback/f-a6'), feedback({ ...attachment('a6'), path: 'feedback/other/f-a6/a6' })));
     await assertFails(getDoc(doc(anonymous, 'feedback/f-a1')));
-    console.log('Account rules: ownership, Apple accounts, preference allowlist, anonymous rejection, retention, ended-occurrence deletes, deletion tombstone and feedback checks passed.');
+    console.log('Account rules: ownership, Apple accounts, provider allowlist, preference allowlist, anonymous rejection, retention, ended-occurrence deletes, deletion tombstone and feedback checks passed.');
   } finally { await environment.cleanup(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

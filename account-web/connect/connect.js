@@ -2,6 +2,8 @@
 // way they do in the app's Account & sync, with Google or (an account made on an iPhone) Sign in with
 // Apple; approving sends the Firebase ID token and the pending request id to /oauth/approve, which
 // returns the assistant's redirect with a one-time code.
+// A brand-new sign-in whose account isn't set up in the app is deleted again, so it doesn't stay
+// behind as an empty account.
 // "Sign in with email" exists for the review account the assistant directories test with; the
 // server accepts a password sign-in from that account only.
 // Only Claude, Claude Code and ChatGPT (by their exact client metadata URLs) are named; any other app shows
@@ -9,9 +11,9 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
 import {
   initializeAuth, inMemoryPersistence, browserPopupRedirectResolver, onAuthStateChanged, GoogleAuthProvider, OAuthProvider,
-  signInWithPopup, signOut, signInWithEmailAndPassword, connectAuthEmulator,
+  signInWithPopup, signOut, signInWithEmailAndPassword, connectAuthEmulator, getAdditionalUserInfo, deleteUser, revokeAccessToken,
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
-import { appleProvider, signInError, signedInLabel } from '/sign-in.js';
+import { appleProvider, notSetUpMessage, signInError, signedInLabel } from '/sign-in.js';
 
 const element = id => document.getElementById(id);
 const page = element('page');
@@ -130,6 +132,32 @@ async function start() {
   let currentUser = null;
   // Why the last account was signed out, kept across the sign-out's own state change.
   let notice = '';
+  // The popup sign-in in progress, set before it opens: the only way this page gains a user apart
+  // from the email form, which clears it.
+  let popup = null;
+
+  /**
+   * Removes a brand-new Google or Apple sign-in whose account isn't set up in the app, so it doesn't
+   * stay behind as an empty account (say, someone whose account signs in with Google trying Sign in
+   * with Apple). The app makes a fresh one if they set it up later. Returns whether it did; an
+   * existing sign-in is left alone, since a phone may be signed in with it.
+   */
+  async function removedNewSignIn(user) {
+    const pending = popup;
+    const result = await pending?.promise.catch(() => null);
+    if (!result || result.user.uid !== user.uid || !getAdditionalUserInfo(result)?.isNewUser) return false;
+    try {
+      // While the user still exists: revoke a new Apple sign-in so Apple stops listing the app.
+      const accessToken = pending.method === 'apple' ? OAuthProvider.credentialFromResult(result)?.accessToken : null;
+      if (accessToken) await revokeAccessToken(auth, accessToken).catch(() => {});
+      notice = notSetUpMessage(pending.method);
+      await deleteUser(user); // also signs out, which shows the notice
+      return true;
+    } catch {
+      notice = '';
+      return false;
+    }
+  }
 
   onAuthStateChanged(auth, async user => {
     currentUser = user;
@@ -149,6 +177,7 @@ async function start() {
     element('get-app').hidden = user.providerData.some(profile => profile.providerId === 'apple.com');
     try {
       const status = await post('/oauth/consent', { request, idToken: await user.getIdToken() });
+      if (status.account !== 'ready' && await removedNewSignIn(user)) return;
       element('intro').textContent = status.account === 'ready'
         ? `Approve to let ${info.verified ? info.clientName : 'this app'} manage alarms for this account.`
         : 'One more step before connecting.';
@@ -165,7 +194,8 @@ async function start() {
     const buttons = [element('sign-in'), element('sign-in-apple')];
     for (const button of buttons) button.disabled = true;
     show('');
-    try { await signInWithPopup(auth, provider); }
+    popup = { method, promise: signInWithPopup(auth, provider) };
+    try { await popup.promise; }
     catch (error) { const message = signInError(error, method); if (message) show(message, 'error'); }
     finally { for (const button of buttons) button.disabled = false; }
   };
@@ -181,6 +211,7 @@ async function start() {
     event.preventDefault();
     element('email-submit').disabled = true;
     show('');
+    popup = null;
     try {
       await signInWithEmailAndPassword(auth, element('email-address').value.trim(), element('email-password').value);
       element('email-password').value = '';

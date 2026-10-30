@@ -67,14 +67,16 @@ service cloud.firestore {
   }
 
   match /databases/{database}/documents {
-    // An account linked to Google (Android and iPhone) or Apple (Sign in with Apple, iPhone only),
-    // signed in this session with that provider rather than a password: a password account on
-    // someone's address before they first sign in with Google or Apple would otherwise gain their
-    // account once that provider is linked to it.
+    // An account signed in this session with Google (Android and iPhone) or Apple (Sign in with
+    // Apple, iPhone only) and linked to that provider, as the assistant consent check requires. Any
+    // other session is refused even when the account has a Google or Apple identity: a password
+    // account on someone's address before they first sign in with Google or Apple would otherwise
+    // gain their account once that provider is linked to it, and the same goes for any provider
+    // the app doesn't use.
     function isSyncAccount(uid) {
       return request.auth != null && request.auth.uid == uid
-        && request.auth.token.firebase.identities.keys().hasAny(['google.com', 'apple.com'])
-        && request.auth.token.firebase.sign_in_provider != 'password';
+        && request.auth.token.firebase.sign_in_provider in ['google.com', 'apple.com']
+        && request.auth.token.firebase.identities.keys().hasAny([request.auth.token.firebase.sign_in_provider]);
     }
     function activeAccount(uid) {
       return isSyncAccount(uid)
