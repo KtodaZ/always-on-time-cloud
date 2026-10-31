@@ -334,8 +334,10 @@ export function dueRingEnds(install: InstallState, nowMs: number): AlarmState[] 
  * stop alarms whose ring time has run out, so any push after the ring ended does the job.
  */
 export function ringEndsCoveredByPush(install: InstallState, sentAt: number): string[] {
+  // Only a push the ring-end wake itself would not precede: one sooner after the ring end may
+  // reach an iPhone whose clock runs behind before its ring time is up there.
   return openRingEnds(install, sentAt)
-    .filter(({ alarm }) => (ringEndsAt(install, alarm) ?? Infinity) <= sentAt)
+    .filter(({ alarm }) => (ringEndsAt(install, alarm) ?? Infinity) + RING_END_MARGIN_MS <= sentAt)
     .map(({ alarm }) => alarm.key);
 }
 

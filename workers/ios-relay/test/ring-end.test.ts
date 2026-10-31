@@ -4,7 +4,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { addMissingColumns } from "../src/shard";
-import { RING_END_MARGIN_MS, RING_END_WINDOW_MS, dueRingEnds, planPush, wakeTimes, type InstallState } from "../src/schedule";
+import { RING_END_MARGIN_MS, RING_END_WINDOW_MS, dueRingEnds, planPush, ringEndsCoveredByPush, wakeTimes, type InstallState } from "../src/schedule";
 import { DAY, FRESHNESS, MINUTE, POLLING, harness, type Harness } from "./helpers";
 
 afterEach(() => {
@@ -107,23 +107,22 @@ describe("ring-end wakes", () => {
     const first = h.now() + 40 * MINUTE;
     await h.putAlarms([{ id: "lead", triggerAtMs: first }, { id: "start", triggerAtMs: first + 10 * MINUTE }]);
     await runUntil(h, first + 10 * MINUTE);
-    const covering = h.apns.map((call) => call.body.aot.at).filter((at) => at >= first + 300_000);
-    expect(covering[0] - (first + 300_000)).toBeLessThanOrEqual(RING_END_MARGIN_MS + 10_000);
+    const covering = h.apns.map((call) => call.body.aot.at).filter((at) => at >= first + 300_000 + RING_END_MARGIN_MS);
+    expect(covering[0] - (first + 300_000 + RING_END_MARGIN_MS)).toBeLessThanOrEqual(10_000);
   });
 
-  it("are covered by any push sent after the ring ended", async () => {
+  it("are not covered by a push within the margin after the ring end (iPhone clock skew)", async () => {
     const h = await registered();
     const trigger = h.now() + 10 * MINUTE;
     await h.putAlarms([{ id: "a", triggerAtMs: trigger }]);
     await runUntil(h, trigger, MINUTE);
-    // A calendar change just after the ring ended, before the ring-end wake.
     h.setNow(trigger + 300_000 + 5_000);
     await h.putGoogle(`chan-${h.installId}`, h.now() + 6 * DAY);
     await h.google(`chan-${h.installId}`);
     await h.tick();
-    await runUntil(h, trigger + 30 * MINUTE);
-    expect(h.kinds().slice(-1)).toEqual(["change"]);
-    expect(ringEnds(h)).toEqual([]);
+    await runUntil(h, trigger + 30 * MINUTE, 5 * 1000);
+    expect(h.kinds().slice(-2)).toEqual(["change", "ringEnd"]);
+    expect(ringEnds(h)).toEqual([trigger + 300_000 + RING_END_MARGIN_MS]);
   });
 
   it("wait for an APNs failure backoff and are dropped an hour after they were due", async () => {
@@ -214,6 +213,12 @@ describe("ring-end planning", () => {
     expect(planPush(base({ claimedAt: wake - 10_000 }), [], wake)).toBeNull();
     expect(planPush(base({ retryAfter: wake + MINUTE }), [], wake)).toBeNull();
     expect(wakeTimes(base({ retryAfter: wake + MINUTE }), [], wake).priority).toBe(wake + MINUTE);
+  });
+
+  it("counts any push as the wake only from ring end + margin (an iPhone clock running behind)", () => {
+    expect(ringEndsCoveredByPush(base(), wake - 1)).toEqual([]);
+    expect(ringEndsCoveredByPush(base(), wake)).toEqual(["a"]);
+    expect(ringEndsCoveredByPush(base({ freshness: { ...base().freshness, ringSeconds: 0 } }), wake)).toEqual([]);
   });
 
   it("is not due once covered, after its window, or for a disabled or ineligible install", () => {

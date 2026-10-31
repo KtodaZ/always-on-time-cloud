@@ -409,7 +409,7 @@ and its last reported sync (3.6).
 | `precheck` (meeting window) | `polling: true` | for each alarm trigger T, inside [T-30 min, T), whenever at least 5 minutes have passed since the freshness point. About six pushes per isolated alarm (T-30, -25, ... -5); overlapping windows share pushes. Not limited by active hours. | 10 |
 | `precheck` (stages) | `polling: false` | at T-20 and T-8 for each alarm, a safety net for silently dead provider channels. Not limited by active hours. | 10 |
 | `heartbeat` | `polling: true` only | 60 minutes after the freshness point (or registration), inside active hours | 5 |
-| `ringEnd` | `ringSeconds` > 0 | for each armed trigger T, at T + `ringSeconds` + 20 s, unless a push accepted at or after T + `ringSeconds` already covered it. Not limited by active hours or the 2-minute coalescing. Dropped one hour after it was due. | 10 |
+| `ringEnd` | `ringSeconds` > 0 | for each armed trigger T, at T + `ringSeconds` + 20 s, unless a push accepted at or after T + `ringSeconds` + 20 s already covered it. Not limited by active hours or the 2-minute coalescing. Dropped one hour after it was due. | 10 |
 
 Rules shared by all kinds:
 
@@ -422,8 +422,9 @@ Rules shared by all kinds:
   `precheck`, `change`, `renew`, `heartbeat`. Deferred work goes out at the next allowed time.
 - Ring ends: the one exception to coalescing, since a ringing alarm should stop on time and each
   trigger has at most one. A `ringEnd` still waits for a push in flight and for an APNs failure
-  backoff. Any accepted push sent at or after T + `ringSeconds` covers that trigger's ring end
-  (every wake stops overdue alarms), so a precheck or change push in that moment replaces it. Ring
+  backoff. Any accepted push sent at or after T + `ringSeconds` + 20 s covers that trigger's ring
+  end (every wake stops overdue alarms). One sent sooner after the ring end does not, since it may
+  reach an iPhone whose clock runs behind before the ring time is up there. Ring
   ends are sent once, not resent until a receipt arrives: the device also stops overdue alarms on
   every other wake (app opened, background refresh, any push).
 - A heartbeat due when a meeting window opens within the next 2 minutes is sent as a priority-10
