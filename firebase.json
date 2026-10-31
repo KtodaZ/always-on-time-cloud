@@ -50,6 +50,15 @@
         ]
       },
       {
+        "source": "/.well-known/openai-apps-challenge",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "text/plain; charset=utf-8"
+          }
+        ]
+      },
+      {
         "regex": "^/[^/]*$",
         "headers": [
           {
