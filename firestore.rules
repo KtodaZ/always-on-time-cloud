@@ -214,7 +214,7 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time
         && request.resource.data.appVersion is string
         && request.resource.data.appVersion.size() <= 100
-        && request.resource.data.source == 'android';
+        && request.resource.data.source in ['android', 'ios'];
       allow read, update, delete: if false;
     }
 

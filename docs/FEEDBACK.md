@@ -1,19 +1,21 @@
 # Feedback
 
-The Android app's **Leave feedback** form writes one document to the `feedback` collection. It
-needs a Firebase user only to authorize the uploads and the write. The document has no user field,
+The Android and iOS apps' feedback forms write one document to the `feedback` collection, in the
+same shape; `source` says which app sent it (`android` or `ios`). A client needs a Firebase user
+only to authorize the uploads and the write. The document has no user field,
 but attachment paths contain that user's ID (`feedback/{uid}/…`, both in Cloud Storage and in the
 document's attachment entries):
 
 - App versions up to now use whichever Firebase user the app has: an anonymous one, or, when the
   user has signed in with Google for account sync, that account's ID (signing in keeps the earlier
   anonymous ID), so attachments can be linked to a synced account.
-- Newer versions always use a separate anonymous identity for feedback, unrelated to account sync.
+- Newer Android versions, and every iOS version, always use a separate anonymous identity for
+  feedback, unrelated to account sync (Google on both, or Sign in with Apple on iPhone).
 
 ## What is stored
 
 - `feedback/{id}` in Firestore: the message (up to 5,000 characters), a required contact email,
-  app version, platform, server timestamp, and metadata for up to three images and one optional
+  app version, platform (`source`: `android` or `ios`), server timestamp, and metadata for up to three images and one optional
   diagnostics file (path, type, size; older app versions also store each image's download URL).
 - `feedback/{uid}/{id}/{attachmentId}` in Cloud Storage: images (raster types, 5 MB each) and the
   optional redacted diagnostics text file (5 MB).
@@ -34,7 +36,8 @@ records.
 
 ## Diagnostics scrub
 
-The app redacts the diagnostics file before upload. `scrubFeedbackDiagnostics`
+Each app redacts its diagnostics file before upload (the iOS file numbers account sources, such as
+`google:#1`, and uses its own `<redacted-…>` tags, which pass through unchanged). `scrubFeedbackDiagnostics`
 ([code](../functions/feedback-log-scrub.js), [tests](../functions/test/feedback-log-scrub.test.js))
 runs when a `text/plain` object under `feedback/` is finalized and applies the same rules again:
 emails, links (meeting links keep only a provider tag), maps links, coordinates, street addresses,
@@ -48,7 +51,7 @@ before a client rule existed.
 ## Developer alert
 
 `publishFeedbackNotification` runs when a document is created and posts a short alert to a
-webhook in the developer's private Discord channel: the app version, platform, and how many images
+webhook in the developer's private Discord channel: the app version, platform (Android or iPhone), and how many images
 and logs are attached, with a link to the record in the Firebase console (which needs the
 developer's sign-in). The message, contact email, images and diagnostics are never sent to Discord
 ([tests](../functions/test/feedback-notification.test.js)), and the alert cannot mention anyone.

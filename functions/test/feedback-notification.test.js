@@ -48,6 +48,16 @@ test("a client-supplied version that is not version-like is not echoed", () => {
   assert.equal(notification.body, "vunknown · Android");
 });
 
+test("iPhone feedback names its platform, and unknown sources are not echoed", () => {
+  assert.equal(
+    buildFeedbackNotification({ ...feedback, source: "ios", appVersion: "1.0+7" }, "abc123").body,
+    "v1.0+7 · iPhone · 2 screenshots · diagnostics attached",
+  );
+  for (const source of ["web", "constructor", "__proto__", "iOS"]) {
+    assert.equal(buildFeedbackNotification({ source }, "x").body, "vunknown · unknown platform");
+  }
+});
+
 test("one screenshot is singular and missing fields fall back safely", () => {
   assert.equal(
     buildFeedbackNotification({ attachments: [{}] }, "x").body,
