@@ -217,7 +217,7 @@ describe("authenticated calls", () => {
     ]);
     expect(response.status).toBe(204);
     const rows = await h.sql(await h.shard(), "SELECT * FROM alarms WHERE install_id = ?", h.installId);
-    expect(rows).toEqual([{ install_id: h.installId, alarm_key: await sha256Hex("event-123|2030"), trigger_at: h.now() + 60 * MINUTE, sent_t20: null, sent_t8: null }]);
+    expect(rows).toEqual([{ install_id: h.installId, alarm_key: await sha256Hex("event-123|2030"), trigger_at: h.now() + 60 * MINUTE, sent_t20: null, sent_t8: null, armed: 1, ring_end_sent: null }]);
     expect((await h.putAlarms([{ id: "a", triggerAtMs: 1 }, { id: "a", triggerAtMs: 2 }])).status).toBe(400);
     expect((await h.putAlarms(Array.from({ length: 129 }, (_, index) => ({ id: `a${index}`, triggerAtMs: h.now() + MINUTE })))).status).toBe(400);
     expect((await h.putAlarms([{ id: "\u0001", triggerAtMs: h.now() + MINUTE }])).status).toBe(400);

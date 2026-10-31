@@ -1,6 +1,6 @@
 // HTTP helpers and request validation for the device API and webhooks.
 
-import { canonicalTimeZone, type Freshness, type Provider } from "./schedule";
+import { MAX_RING_SECONDS, canonicalTimeZone, type Freshness, type Provider } from "./schedule";
 import type { ApnsEnvironment } from "./apns";
 
 export const MAX_API_BODY_BYTES = 32 * 1024;
@@ -93,7 +93,7 @@ export function validProviderId(value: unknown): value is string {
 }
 
 export function validateFreshness(value: unknown): Freshness {
-  requireObject(value, ["polling", "activeHours", "timeZone"]);
+  requireObject(value, ["polling", "activeHours", "timeZone"], ["ringSeconds"]);
   if (typeof value.polling !== "boolean") throw new HttpError(400, "freshness.polling must be a boolean");
   requireObject(value.activeHours, ["start", "end"]);
   const { start, end } = value.activeHours;
@@ -102,7 +102,11 @@ export function validateFreshness(value: unknown): Freshness {
   }
   const timeZone = canonicalTimeZone(value.timeZone);
   if (timeZone === null) throw new HttpError(400, "freshness.timeZone must be an IANA time zone");
-  return { polling: value.polling, activeHours: { start, end }, timeZone };
+  const ringSeconds = value.ringSeconds;
+  if (ringSeconds !== undefined && (!Number.isSafeInteger(ringSeconds) || (ringSeconds as number) < 0 || (ringSeconds as number) > MAX_RING_SECONDS)) {
+    throw new HttpError(400, `freshness.ringSeconds must be an integer from 0 to ${MAX_RING_SECONDS}`);
+  }
+  return { polling: value.polling, activeHours: { start, end }, timeZone, ...(ringSeconds !== undefined ? { ringSeconds: ringSeconds as number } : {}) };
 }
 
 export interface RegistrationFields {

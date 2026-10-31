@@ -21,7 +21,8 @@ disclosure is in the website policy's `#travel-location` section (effective Octo
 
 The iOS calendar refresh relay runs on Cloudflare (Workers and Durable Objects), so Cloudflare
 processes and stores iPhone push data for us: the APNs device token, a hash of the install
-secret, freshness settings (whether the phone polls iPhone calendars, active hours, time zone),
+secret, freshness settings (whether the phone polls iPhone calendars, active hours, time zone, how long
+its alarms ring),
 hashed alarm and subscription identifiers with their times, and push bookkeeping. It holds no
 calendar content, and its logs record no IP addresses, request headers or tokens (Cloudflare still
 sees the connecting IP address of each request to deliver it). The website policy must name Cloudflare as the processor of iPhone push tokens

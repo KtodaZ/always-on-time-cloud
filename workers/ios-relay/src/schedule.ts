@@ -25,8 +25,21 @@ export const PRECHECK_WINDOW_MS = 2 * MINUTE_MS;
 export const RENEW_LEAD_MS = DAY_MS;
 export const RENEW_RETRY_MS = 6 * HOUR_MS;
 export const FAILURE_BACKOFF_MAX_MS = 30 * MINUTE_MS;
-/** Higher-urgency kinds first. Only one push is sent per install per coalescing window. */
-export const KIND_ORDER = Object.freeze(["precheck", "change", "renew", "heartbeat"] as const);
+/**
+ * Ring end (IOS-BUG-55): an AlarmKit alarm nobody answers keeps alerting until app code stops it,
+ * so the relay wakes the phone this long after each armed trigger's ring time has run out. The
+ * margin covers clock skew and APNs latency: the phone acts only once the ring time has passed.
+ */
+export const RING_END_MARGIN_MS = 20 * 1000;
+/** A ring end not sent within this long after it was due is dropped (the phone also checks on every wake). */
+export const RING_END_WINDOW_MS = HOUR_MS;
+/** Longest ring time the relay accepts, as Android's `alarm_duration_seconds` (0 = until dismissed). */
+export const MAX_RING_SECONDS = 86400;
+/**
+ * Higher-urgency kinds first. Only one push is sent per install per coalescing window, except a
+ * ring end, which only waits for an in-flight push or a failure backoff.
+ */
+export const KIND_ORDER = Object.freeze(["ringEnd", "precheck", "change", "renew", "heartbeat"] as const);
 
 export type PushKind = (typeof KIND_ORDER)[number];
 export type Provider = "google" | "microsoft";
@@ -41,6 +54,8 @@ export interface Freshness {
   polling: boolean;
   activeHours: ActiveHours;
   timeZone: string;
+  /** How long the phone's alarms ring before it stops them (0 = until dismissed); absent: no ring-end wakes. */
+  ringSeconds?: number;
 }
 
 export interface AlarmState {
@@ -48,6 +63,10 @@ export interface AlarmState {
   triggerAt: number;
   sentT20: number | null;
   sentT8: number | null;
+  /** False for a trigger the phone reported as not armed in AlarmKit; absent or true: armed. */
+  armed?: boolean;
+  /** When a push sent after this trigger's ring ended (any kind) was accepted; null until then. */
+  ringEndSentAt?: number | null;
 }
 
 export interface DeliveryState {
@@ -280,6 +299,63 @@ export function failureBackoffMs(failureCount: number): number {
   return Math.min(MINUTE_MS * 2 ** exponent, FAILURE_BACKOFF_MAX_MS);
 }
 
+// --- Ring ends (IOS-BUG-55) -------------------------------------------------------------------
+
+/** When the phone's ring for `alarm` has run out (trigger + ring time), or null when none is due. */
+export function ringEndsAt(install: InstallState, alarm: AlarmState): number | null {
+  const seconds = install.freshness.ringSeconds;
+  if (!seconds || seconds <= 0 || alarm.armed === false || !Number.isSafeInteger(alarm.triggerAt)) return null;
+  return alarm.triggerAt + seconds * 1000;
+}
+
+/** When the ring-end wake for `alarm` goes out (ring end + margin), or null. */
+export function ringEndWakeAt(install: InstallState, alarm: AlarmState): number | null {
+  const ends = ringEndsAt(install, alarm);
+  return ends === null ? null : ends + RING_END_MARGIN_MS;
+}
+
+function openRingEnds(install: InstallState, nowMs: number): Array<{ alarm: AlarmState; wakeAt: number }> {
+  const open: Array<{ alarm: AlarmState; wakeAt: number }> = [];
+  for (const alarm of install.alarms) {
+    if (alarm.ringEndSentAt !== null && alarm.ringEndSentAt !== undefined) continue;
+    const wakeAt = ringEndWakeAt(install, alarm);
+    if (wakeAt !== null && nowMs < wakeAt + RING_END_WINDOW_MS) open.push({ alarm, wakeAt });
+  }
+  return open;
+}
+
+/** Ring ends whose wake is due now and not yet covered by a push. */
+export function dueRingEnds(install: InstallState, nowMs: number): AlarmState[] {
+  return openRingEnds(install, nowMs).filter(({ wakeAt }) => wakeAt <= nowMs).map(({ alarm }) => alarm);
+}
+
+/**
+ * Ring ends an accepted push sent at `sentAt` covers, whatever its kind: every wake makes the phone
+ * stop alarms whose ring time has run out, so any push after the ring ended does the job.
+ */
+export function ringEndsCoveredByPush(install: InstallState, sentAt: number): string[] {
+  // Only a push the ring-end wake itself would not precede: one sooner after the ring end may
+  // reach an iPhone whose clock runs behind before its ring time is up there.
+  return openRingEnds(install, sentAt)
+    .filter(({ alarm }) => (ringEndsAt(install, alarm) ?? Infinity) + RING_END_MARGIN_MS <= sentAt)
+    .map(({ alarm }) => alarm.key);
+}
+
+/** A ring end waits for an in-flight push and a failure backoff, not for the 2-minute coalescing. */
+function ringEndBlockedUntil(install: InstallState): number {
+  let blockedUntil = 0;
+  if (install.claimedAt !== null) blockedUntil = install.claimedAt + CLAIM_STALE_MS;
+  if (install.retryAfter !== null) blockedUntil = Math.max(blockedUntil, install.retryAfter);
+  return blockedUntil;
+}
+
+/** When the next ring-end wake may go out, or null. */
+function nextRingEndAt(install: InstallState, nowMs: number): number | null {
+  const open = openRingEnds(install, nowMs);
+  if (open.length === 0) return null;
+  return Math.max(Math.min(...open.map(({ wakeAt }) => wakeAt)), ringEndBlockedUntil(install), nowMs);
+}
+
 /** Earliest time a precheck could become due (meeting window or stage), or null. */
 function nextPrecheckAt(install: InstallState, nowMs: number): number | null {
   const candidates: number[] = [];
@@ -368,6 +444,13 @@ function receiptRetryAt(install: InstallState): number | null {
  */
 export function wakeTimes(install: InstallState, subscriptions: SubscriptionState[], nowMs: number): { next: number | null; priority: number | null } {
   if (!install.enabled || install.receipt?.eligible === false) return { next: null, priority: null };
+  const wake = pushWakeTimes(install, subscriptions, nowMs);
+  const ringEnd = nextRingEndAt(install, nowMs);
+  if (ringEnd === null) return wake;
+  return { next: Math.min(wake.next ?? Infinity, ringEnd), priority: Math.min(wake.priority ?? Infinity, ringEnd) };
+}
+
+function pushWakeTimes(install: InstallState, subscriptions: SubscriptionState[], nowMs: number): { next: number | null; priority: number | null } {
   if (install.receipt) {
     const priority: number[] = [receiptRecoveryAt(install, nowMs)];
     const retry = receiptRetryAt(install);
@@ -407,7 +490,11 @@ export function wakeTimes(install: InstallState, subscriptions: SubscriptionStat
  * within the coalescing window upgrades a due heartbeat to a priority-10 precheck.
  */
 export function planPush(install: InstallState, subscriptions: SubscriptionState[], nowMs: number): PushPlan | null {
-  if (!canSendNow(install, nowMs) || install.receipt?.eligible === false) return null;
+  if (!install.enabled || install.receipt?.eligible === false) return null;
+  if (dueRingEnds(install, nowMs).length > 0 && nowMs >= ringEndBlockedUntil(install)) {
+    return { kind: "ringEnd", ...(install.pendingChangeProvider ? { provider: install.pendingChangeProvider } : {}), renewalKeys: [] };
+  }
+  if (!canSendNow(install, nowMs)) return null;
   if (install.receipt) {
     const dueRenewals = subscriptions.filter((subscription) => isRenewalDue(subscription, nowMs));
     const retry = receiptRetryAt(install);
@@ -432,6 +519,7 @@ export function planPush(install: InstallState, subscriptions: SubscriptionState
   }
   const dueRenewals = subscriptions.filter((subscription) => isRenewalDue(subscription, nowMs));
   const candidates: Record<PushKind, boolean> = {
+    ringEnd: false,
     precheck: install.freshness.polling ? isMeetingWindowDue(install, nowMs) : dueStages(install, nowMs).length > 0,
     change: install.pendingChangeAt !== null,
     renew: dueRenewals.length > 0,
