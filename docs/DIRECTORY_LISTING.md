@@ -11,6 +11,8 @@ The package is [`plugin/`](../plugin/): `plugin.json` (listing, review test case
 Zip the folder's contents and upload them at platform.openai.com/plugins under the verified
 Zombit Studios identity. The portal's domain challenge is served from
 `https://alwaysontime.zombit.io/.well-known/openai-apps-challenge`.
+The ChatGPT description leaves out the "free, no Plus needed" line, because OpenAI's checker
+flags pricing in descriptions.
 
 ## Claude
 
