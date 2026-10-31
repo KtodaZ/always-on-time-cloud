@@ -10,11 +10,13 @@ const ALERTS_PER_HOUR = 10;
 const HOUR_MS = 60 * 60 * 1000;
 // Delivery is retried after server errors, but never for an event older than this.
 const MAX_EVENT_AGE_MS = HOUR_MS;
+// The `source` values firestore.rules accepts.
+const PLATFORMS = new Map([["android", "Android"], ["ios", "iPhone"]]);
 
 function buildFeedbackNotification(feedback, feedbackId, { missedLastHour = 0 } = {}) {
   const details = [
     `v${safeVersion(feedback.appVersion)}`,
-    feedback.source === "android" ? "Android" : "unknown platform",
+    PLATFORMS.get(feedback.source) ?? "unknown platform",
   ];
   const attachmentCount = Array.isArray(feedback.attachments) ? Math.min(feedback.attachments.length, 3) : 0;
   if (attachmentCount > 0) {

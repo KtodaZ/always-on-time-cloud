@@ -117,6 +117,15 @@ const fs = require('node:fs');
     await assertFails(setDoc(doc(anonymous, 'feedback/f-a5'), feedback(attachment('a5', { downloadUrl: 5 }))));
     await assertFails(setDoc(doc(anonymous, 'feedback/f-a6'), feedback({ ...attachment('a6'), path: 'feedback/other/f-a6/a6' })));
     await assertFails(getDoc(doc(anonymous, 'feedback/f-a1')));
+    // The iOS app writes the same shape with source 'ios'; no other platform value is accepted.
+    await assertSucceeds(setDoc(doc(anonymous, 'feedback/f-i1'), { ...feedback(attachment('i1')), source: 'ios', appVersion: '1.0+7' }));
+    await assertSucceeds(setDoc(doc(anonymous, 'feedback/f-i2'), {
+      ...feedback(), source: 'ios',
+      diagnosticLog: { id: 'd2', path: 'feedback/anon/f-i2/d2', contentType: 'text/plain', sizeBytes: 120 }
+    }));
+    await assertFails(setDoc(doc(anonymous, 'feedback/f-i3'), { ...feedback(), source: 'web' }));
+    await assertFails(setDoc(doc(anonymous, 'feedback/f-i4'), { ...feedback(), source: 'iOS' }));
+    await assertFails(setDoc(doc(signedOut, 'feedback/f-i5'), { ...feedback(), source: 'ios' }));
     console.log('Account rules: ownership, Apple accounts, provider allowlist, preference allowlist, anonymous rejection, retention, ended-occurrence deletes, deletion tombstone and feedback checks passed.');
   } finally { await environment.cleanup(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

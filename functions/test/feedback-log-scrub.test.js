@@ -23,6 +23,13 @@ const DEBUG_LINES = [
   "Entries: 4123",
   "Assistant: push received type=ping pingId=p_0012 tokenDeleted=true",
   "Calendar <email:h=3fa2c1> sync failed title=<title:len=19,h=9b0e11> calendarName=<calendarName:len=4,h=a1b2c3>",
+  // The iOS app's diagnostics file: numbered account sources and its own redaction tags.
+  "Always On Time 1.0 (7), iOS 26.0, source=ios",
+  "source google:#1: error none success 1729700000000 unavailable 0",
+  "1729700400000 fetchFailed extension push eventkit:6F1C2A3B-1234-1234-1234-123456789012 network URLError(NSURLErrorDomain#-1009)",
+  "relay: enabled false reason apns_bad_device_token environment production verified false eligible true receipt v1 last push never",
+  "wake 1700000100000 change delivery true complete receipt uploaded(count: 2)",
+  "open <redacted-url> failed from <redacted-email> dial <redacted-phone> at <redacted-coords>",
 ];
 
 test("debug fields and the app's own tags pass through unchanged", () => {

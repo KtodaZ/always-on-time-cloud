@@ -1,8 +1,9 @@
 "use strict";
 
-// Server-side scrub of the optional diagnostics file attached to Android feedback.
+// Server-side scrub of the optional diagnostics file attached to feedback from the Android and iOS apps.
 //
-// The app redacts the file before upload (DeviceLogSanitizer in the app repository). This pass
+// The apps redact the file before upload (DeviceLogSanitizer on Android, DiagnosticsScrubber on iOS, in the
+// app repository). This pass
 // repeats the same rules on the stored object so files from app versions with weaker rules, or a
 // value no client rule anticipated, do not stay in Storage. It keeps alarm IDs, epoch millis,
 // lead times, time zones and stack traces readable, and leaves the app's own tags
