@@ -21,6 +21,7 @@ import {
   initialRenewDueAt,
   isRenewalDead,
   isRenewalDue,
+  noticeEndCoveredByPush,
   planPush,
   renewRetryAt,
   ringEndsAt,
@@ -106,7 +107,7 @@ export type DeviceOp =
   | { kind: "status" }
   | { kind: "update"; fields: RegistrationInput }
   | { kind: "delete" }
-  | { kind: "alarms"; alarms: Array<{ key: string; triggerAt: number; armed?: boolean }> }
+  | { kind: "alarms"; alarms: Array<{ key: string; triggerAt: number; armed?: boolean }>; noticeEndsAt?: number | null }
   | { kind: "synced"; syncedAt: number }
   | { kind: "receipt"; receipt: Omit<SyncReceipt, "alarms">; alarms: Array<{key: string; triggerAt: number; armed?: boolean}> }
   | { kind: "deleteSubscription"; key: string };
@@ -172,6 +173,8 @@ type InstallRow = {
   next_wake_at: number | null;
   priority_wake_at: number | null;
   ring_seconds: number | null;
+  notice_ends_at: number | null;
+  notice_end_sent: number | null;
 };
 
 type SubscriptionRow = {
@@ -280,6 +283,9 @@ const ADDED_COLUMNS: ReadonlyArray<{ table: string; column: string; type: string
   { table: "installs", column: "ring_seconds", type: "INTEGER" },
   { table: "alarms", column: "armed", type: "INTEGER" },
   { table: "alarms", column: "ring_end_sent", type: "INTEGER" },
+  // When the phone's upcoming notice goes stale, and when its wake was covered by an accepted push.
+  { table: "installs", column: "notice_ends_at", type: "INTEGER" },
+  { table: "installs", column: "notice_end_sent", type: "INTEGER" },
 ];
 
 export function addMissingColumns(sql: SqlStorage): void {
@@ -287,6 +293,18 @@ export function addMissingColumns(sql: SqlStorage): void {
     const present = sql.exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`).toArray().some((row) => row.name === column);
     if (!present) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
+  // After the columns exist. Retention looks at every shard reschedule, which must not scan installs.
+  sql.exec("CREATE INDEX IF NOT EXISTS installs_notice_ends ON installs (notice_ends_at) WHERE notice_ends_at IS NOT NULL");
+}
+
+/**
+ * A snapshot's notice end, read the same way for `PUT /alarms` and receipts: absent leaves what is
+ * stored (older clients never send it, so they never get this wake), null clears it, and only a
+ * changed value reopens the wake, so re-sending a value already covered sends nothing.
+ */
+function noticeEndPatch(row: InstallRow, noticeEndsAt: number | null | undefined): InstallPatch {
+  if (noticeEndsAt === undefined || noticeEndsAt === row.notice_ends_at) return {};
+  return { notice_ends_at: noticeEndsAt, notice_end_sent: null };
 }
 
 /** Registration fields; registering again re-enables an install that APNs disabled. */
@@ -430,6 +448,8 @@ export class InstallShard extends DurableObject<Env> {
       claimedAt: this.inFlight.get(row.install_id)?.at ?? null,
       retryAfter: row.retry_after,
       alarms: this.alarmStates(row.install_id),
+      noticeEndsAt: row.notice_ends_at,
+      noticeEndSentAt: row.notice_end_sent,
     };
   }
 
@@ -529,6 +549,7 @@ export class InstallShard extends DurableObject<Env> {
         break;
       case "alarms":
         this.replaceAlarms(installId, op.alarms, nowMs);
+        patch = noticeEndPatch(row, op.noticeEndsAt);
         break;
       case "synced":
         // Legacy autonomous timestamps cannot acknowledge receipt-capable deliveries.
@@ -544,6 +565,7 @@ export class InstallShard extends DurableObject<Env> {
         if (newer) {
           this.replaceAlarms(installId, op.alarms, nowMs);
           state.snapshotRevision = r.snapshotRevision;
+          Object.assign(patch, noticeEndPatch(row, r.noticeEndsAt));
         }
         const delivery = state.outstanding;
         const matched = delivery !== null && r.deliveryId === delivery.id;
@@ -893,7 +915,8 @@ export class InstallShard extends DurableObject<Env> {
 
   /**
    * Records an APNs-accepted push: satisfies the pending change it covers, the freshness clock,
-   * precheck stages due at `sentAt` (looking ahead for priority-10 kinds) and its renewals.
+   * precheck stages due at `sentAt` (looking ahead for priority-10 kinds), ring ends and the notice
+   * end it covers, and its renewals.
    */
   private completePush(claim: Claim, sentAt: number): void {
     if (!this.release(claim)) return;
@@ -919,6 +942,7 @@ export class InstallShard extends DurableObject<Env> {
       failure_count: 0,
       retry_after: null,
       ...(changeCovered ? { pending_change_at: null, pending_change_provider: null } : {}),
+      ...(noticeEndCoveredByPush(state, sentAt) ? { notice_end_sent: sentAt } : {}),
     }, sentAt);
   }
 
@@ -1060,22 +1084,24 @@ export class InstallShard extends DurableObject<Env> {
       query("SELECT MIN(expires_at) AS at FROM subscriptions"),
       query("SELECT MIN(trigger_at) AS at FROM alarms"),
       query("SELECT MIN(disabled_at) AS at FROM installs WHERE disabled_at IS NOT NULL"),
+      query("SELECT MIN(notice_ends_at) AS at FROM installs WHERE notice_ends_at IS NOT NULL"),
     ];
-    const offsets = [0, EXPIRED_SUBSCRIPTION_RETENTION_MS, EXPIRED_SUBSCRIPTION_RETENTION_MS, PAST_ALARM_RETENTION_MS, DISABLED_INSTALL_RETENTION_MS];
+    const offsets = [0, EXPIRED_SUBSCRIPTION_RETENTION_MS, EXPIRED_SUBSCRIPTION_RETENTION_MS, PAST_ALARM_RETENTION_MS, DISABLED_INSTALL_RETENTION_MS, PAST_ALARM_RETENTION_MS];
     const times = candidates.flatMap((at, index) => (at === null ? [] : [at + offsets[index]]));
     return times.length > 0 ? Math.min(...times) : null;
   }
 
   /**
    * Deletes expired rate-limit windows, index entries and subscription mappings a week past
-   * expiry, old alarm triggers, and installs disabled for 30 days (releasing their index entries
-   * in other shards).
+   * expiry, old alarm triggers and notice ends, and installs disabled for 30 days (releasing their
+   * index entries in other shards).
    */
   private async prune(nowMs: number, indexCallBudget: number): Promise<number> {
     this.sql.exec("DELETE FROM rate_limits WHERE expires_at <= ?", nowMs);
     this.sql.exec("DELETE FROM sub_index WHERE expires_at <= ?", nowMs - EXPIRED_SUBSCRIPTION_RETENTION_MS);
     this.sql.exec("DELETE FROM subscriptions WHERE expires_at <= ?", nowMs - EXPIRED_SUBSCRIPTION_RETENTION_MS);
     this.sql.exec("DELETE FROM alarms WHERE trigger_at <= ?", nowMs - PAST_ALARM_RETENTION_MS);
+    this.sql.exec("UPDATE installs SET notice_ends_at = NULL, notice_end_sent = NULL WHERE notice_ends_at <= ?", nowMs - PAST_ALARM_RETENTION_MS);
     const disabled = this.sql.exec<{ install_id: string }>(
       "SELECT install_id FROM installs WHERE disabled_at IS NOT NULL AND enabled = 0 AND disabled_at <= ? LIMIT ?",
       nowMs - DISABLED_INSTALL_RETENTION_MS, PRUNE_INSTALLS_PER_RUN,

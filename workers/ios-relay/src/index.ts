@@ -19,6 +19,7 @@ import {
   validateRegistration,
   validateSubscription,
   validateSynced,
+  validateNoticeEnd,
   validateReceipt,
   validateUpdate,
   type ApiRoute,
@@ -172,9 +173,11 @@ async function deviceApi(request: Request, env: Env, url: URL): Promise<Response
       return json(204);
     }
     if (route.kind === "alarms") {
-      const alarms = validateAlarms(await readJson(request, MAX_API_BODY_BYTES), nowMs);
+      const body = await readJson(request, MAX_API_BODY_BYTES);
+      const alarms = validateAlarms(body, nowMs);
+      const noticeEndsAt = validateNoticeEnd((body as { noticeEndsAtMs?: unknown }).noticeEndsAtMs, nowMs);
       const hashed = await Promise.all(alarms.map(async (alarm) => ({ key: await alarmKey(alarm.id), triggerAt: alarm.triggerAt, armed: alarm.armed })));
-      await runDevice(shard, route.installId, secretHash, { kind: "alarms", alarms: hashed });
+      await runDevice(shard, route.installId, secretHash, { kind: "alarms", alarms: hashed, noticeEndsAt });
       return json(204);
     }
     if (route.kind === "synced") {

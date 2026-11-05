@@ -11,6 +11,8 @@ fetches calendar changes itself, and reconciles alarms. The server stores:
   (whether the device polls EventKit calendars, its active hours and time zone, and how long its
   alarms ring);
 - SHA-256 hashes of opaque alarm IDs with their trigger times (no titles or calendar IDs);
+- when the device's upcoming-alarm notice goes stale (one time per install, the start of the meeting
+  it announces, with no title, calendar ID or link to any alarm);
 - provider subscription mappings: SHA-256 hashes of the subscription ID, of the Google
   `resourceId`, and of the channel token or `clientState`, plus the expiration;
 - push bookkeeping: when the last push was accepted and of which kind, when the device last
@@ -185,7 +187,15 @@ provider subscriptions.
   to send is kept when a snapshot leaves it out, until a push covers its ring end (section 6) or
   retention removes it a day later. A future trigger left out (moved, cancelled) is deleted at
   once, so its ring-end wake never goes out.
-- Send after every reconcile that changes armed alarms (app or NSE). Returns `204`.
+- `noticeEndsAtMs` (optional number or `null`, also in receipts): when the device's upcoming-alarm
+  notice goes stale, the start of the meeting it announces. One value per install, not per alarm,
+  since a meeting's triggers can leave the snapshot before it starts (a 10-minute alarm that was
+  dismissed). `null` clears it. Absent leaves what the server stores, so an older client, which
+  never sends it, gets no `noticeEnd` wake. A time in the past is kept (the device's clock may run
+  behind; section 6 decides if a wake is still due), one more than 90 days ahead reads as `null`,
+  and anything but a non-negative integer or `null` is `400`. A device must not send it before the
+  relay accepts it: the snapshot's fields are checked strictly, so an older relay answers `400`.
+- Send after every reconcile that changes armed alarms or `noticeEndsAtMs` (app or NSE). Returns `204`.
 
 ### 3.5 Provider subscriptions
 
@@ -266,13 +276,14 @@ For receipt installs, APNs `200` proves only transport. Each push carries `aot.d
   "receiptVersion": 1, "syncedAtMs": 1791403200000, "snapshotRevision": 42,
   "deliveryId": "6f1c...", "calendarVerified": true, "alarmsReconciled": true,
   "alarms": [{ "id": "<opaque>", "triggerAtMs": 1791406800000, "armed": true }],
-  "nextRefreshAtMs": 1791489600000
+  "nextRefreshAtMs": 1791489600000, "noticeEndsAtMs": 1791406800000
 }
 ```
 
 - `snapshotRevision`: increases with every receipt the device sends (shared by app and NSE). A
-  receipt with a newer revision replaces the trigger snapshot (as 3.4) and the horizon; an older
-  one can still acknowledge its own `deliveryId`.
+  receipt with a newer revision replaces the trigger snapshot (as 3.4), `noticeEndsAtMs` (when it
+  carries the field, read as in 3.4) and the horizon; an older one can still acknowledge its own
+  `deliveryId`.
 - `deliveryId`: the `aot.deliveryId` of the push that caused the sync; omitted for syncs the
   device started itself (app open, background refresh, alarm intents).
 - `calendarVerified`: every selected calendar was read completely. `alarmsReconciled`: AlarmKit
@@ -349,7 +360,7 @@ APNs request headers:
 | --- | --- |
 | `apns-push-type` | `alert` |
 | `apns-topic` | the app bundle ID (`APNS_TOPIC`) |
-| `apns-priority` | `5` for `heartbeat`; `10` for `change`, `precheck`, `renew`, `ringEnd` |
+| `apns-priority` | `5` for `heartbeat`; `10` for `change`, `precheck`, `renew`, `ringEnd`, `noticeEnd` |
 | `apns-collapse-id` | `aot-sync` for every relay push |
 | `apns-expiration` | send time + 24 hours |
 
@@ -369,7 +380,7 @@ Relay payload (always exactly these keys; `aot.provider` is optional):
 | Field | Values |
 | --- | --- |
 | `aot.v` | Payload version, still `1` (the payload did not change with the v2 device API) |
-| `aot.kind` | `change`, `heartbeat`, `precheck`, `renew`, or `ringEnd`; `assistant` for the assistant connector's pushes, which add fields of their own ([assistant protocol](ASSISTANT_PROTOCOL.md#apns-iphone)) |
+| `aot.kind` | `change`, `heartbeat`, `precheck`, `renew`, `ringEnd` or `noticeEnd`; `assistant` for the assistant connector's pushes, which add fields of their own ([assistant protocol](ASSISTANT_PROTOCOL.md#apns-iphone)) |
 | `aot.provider` | `google` or `microsoft`; present on `change` and on `renew` when every subscription due for renewal belongs to one provider |
 | `aot.at` | Server send time, epoch ms |
 | `aot.deliveryId` | Receipt installs only: echo it in the receipt (3.7) |
@@ -388,7 +399,9 @@ NSE handling rules:
    Every wake, whatever its kind, first stops any alarm still alerting after its ring time ran
    out (it records History and posts the Missed notice), then syncs. `ringEnd` exists only to
    cause such a wake; the device decides from its own alarm list, so a late, duplicate or stale
-   `ringEnd` (an alarm already stopped, snoozed or moved) changes nothing.
+   `ringEnd` (an alarm already stopped, snoozed or moved) changes nothing. `noticeEnd` likewise
+   only causes a wake: every run moves on an upcoming notice whose meeting has started. A build
+   that does not know the kind treats it as a plain sync (rule 4), which does the same.
 4. Unknown `aot.v` or `kind`, or a missing `aot`: treat as a plain sync.
 5. Every push replaces the previous notification via the shared collapse ID and is passive, so
    the user sees one quiet entry. The NSE may rewrite the title/body but must deliver a
@@ -410,6 +423,7 @@ and its last reported sync (3.6).
 | `precheck` (stages) | `polling: false` | at T-20 and T-8 for each alarm, a safety net for silently dead provider channels. Not limited by active hours. | 10 |
 | `heartbeat` | `polling: true` only | 60 minutes after the freshness point (or registration), inside active hours | 5 |
 | `ringEnd` | `ringSeconds` > 0 | for each armed trigger T, at T + `ringSeconds` + 20 s, unless a push accepted at or after T + `ringSeconds` + 20 s already covered it. Not limited by active hours or the 2-minute coalescing. Dropped one hour after it was due. | 10 |
+| `noticeEnd` | sent `noticeEndsAtMs` | at `noticeEndsAtMs` + 20 s, once for a given value, unless a push accepted at or after that time already covered it. Not limited by active hours; the 2-minute coalescing applies. Dropped one hour after it was due. | 10 |
 
 Rules shared by all kinds:
 
@@ -419,7 +433,8 @@ Rules shared by all kinds:
   twice; both carry the `aot-sync` collapse ID). After an APNs failure other than an invalid token, the install backs off for 1,
   2, 4, 8, 16, then 30 minutes; pending work is kept.
 - When several things are due at once, one push is sent, chosen in this order: `ringEnd`,
-  `precheck`, `change`, `renew`, `heartbeat`. Deferred work goes out at the next allowed time.
+  `precheck`, `change`, `renew`, `noticeEnd`, `heartbeat`. Deferred work goes out at the next
+  allowed time.
 - Ring ends: the one exception to coalescing, since a ringing alarm should stop on time and each
   trigger has at most one. A `ringEnd` still waits for a push in flight and for an APNs failure
   backoff. Any accepted push sent at or after T + `ringSeconds` + 20 s covers that trigger's ring
@@ -427,6 +442,14 @@ Rules shared by all kinds:
   reach an iPhone whose clock runs behind before the ring time is up there. Ring
   ends are sent once, not resent until a receipt arrives: the device also stops overdue alarms on
   every other wake (app opened, background refresh, any push).
+- Notice ends: nothing runs on the phone at a meeting's start, and iOS has no way to expire a
+  delivered notification, so this wake is what takes a stale upcoming notice down. Any accepted push
+  sent at or after `noticeEndsAtMs` + 20 s covers it, which is why it ranks below the kinds that
+  keep alarms right. It ranks above `heartbeat` because that one's priority 5 lets iOS hold it back,
+  and it counts as the heartbeat when both are due. One sent sooner does not cover it, as for ring
+  ends. It is not resent until a receipt arrives: any later wake moves the notice on too, and only
+  a changed value opens a new wake. For receipt installs it carries a `deliveryId` but starts no
+  retry burst.
 - A heartbeat due when a meeting window opens within the next 2 minutes is sent as a priority-10
   `precheck` instead.
 - Stages (non-polling): a stage is due from its start for 2 minutes. A priority-10 push sent within
@@ -499,7 +522,7 @@ dev` has no HTTP/2, so APNs works only deployed; the tests mock it.
 Storage: 64 `InstallShard` Durable Objects with SQLite storage, named `shard-0` to `shard-63`.
 A key's shard is the first 32 bits of `sha256(key)` modulo 64; the count cannot change without
 migrating data. Keys are `install:<installId>` for an install and everything it owns (alarm
-triggers, subscription mappings, push bookkeeping and per-install rate limit),
+triggers, notice end, subscription mappings, push bookkeeping and per-install rate limit),
 `subscription:<subscription key>` for the subscription index entry, and `rate:<sha256 of the
 rate-limit key>` for registration counters. A subscription key is
 `<provider>_<sha256("<provider>:<subscriptionId>")>`. A push writes one install row (plus its
@@ -509,7 +532,7 @@ precheck or renewal rows.
 Retention, run from each shard's alarm: registration counters are deleted when their hour ends
 (they are keyed by an unsalted `sha256` of the client network, which is guessable for IPv4 but
 holds only a count); subscription mappings and index entries 7 days after they expire; alarm
-triggers a day after they pass (with their ring-end markers); installs 30 days after APNs disabled them, with their mappings and
+triggers a day after they pass (with their ring-end markers), and a notice end a day after it passes; installs 30 days after APNs disabled them, with their mappings and
 index entries. Deleting an install (3.3) removes everything at once.
 
 Logs: Workers Logs keep only the Worker's own JSON lines, which carry install IDs, push kinds,
