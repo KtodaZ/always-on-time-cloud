@@ -7,10 +7,10 @@ const { randomBytes } = require("node:crypto");
 const z = require("zod");
 
 const {
-  UNDO_DAYS, readAppliedThrough, readDevices, readSnapshotTimes, readValues, refs, toMillis,
+  UNDO_DAYS, readAppliedState, readDevices, readSnapshotTimes, readValues, refs, toMillis,
 } = require("./assistant-data");
 const { deviceName } = require("./assistant-push");
-const { PAUSED_UNTIL } = require("./assistant-records");
+const { SKIP_KEYWORDS, PAUSED_UNTIL } = require("./assistant-records");
 const { describePause, parseStored } = require("./assistant-settings");
 const {
   DESTINATIONS, ToolError, appLink, basedOn, basis, cleanText, formatTime, isoLocal, relativeAge, resolveCalendar, resolveEvent,
@@ -35,10 +35,10 @@ function appliedTracker(ctx) {
     for (const { deviceId, publishedAt } of await readSnapshotTimes(ctx.db, ctx.uid)) {
       let entry = known.get(deviceId);
       if (!entry || entry.publishedAt !== publishedAt) {
-        entry = { publishedAt, appliedThrough: await readAppliedThrough(ctx.db, ctx.uid, deviceId) };
+        entry = { publishedAt, state: await readAppliedState(ctx.db, ctx.uid, deviceId) };
         known.set(deviceId, entry);
       }
-      if (entry.appliedThrough !== null) out.push({ deviceId, valuesAppliedThrough: entry.appliedThrough });
+      if (entry.state) out.push({ deviceId, valuesAppliedThrough: entry.state.appliedThrough, knowsSkipKeywords: entry.state.knowsSkipKeywords });
     }
     return out;
   };
@@ -130,21 +130,29 @@ const TOOLS = [
         snapshots = await poll();
         return snapshots.length > 0 && snapshots.every((snapshot) => snapshot.valuesAppliedThrough >= writtenAt);
       });
-      const applied = snapshots.filter((snapshot) => snapshot.valuesAppliedThrough >= writtenAt);
+      const reached = snapshots.filter((snapshot) => snapshot.valuesAppliedThrough >= writtenAt);
       const waiting = snapshots.filter((snapshot) => snapshot.valuesAppliedThrough < writtenAt);
-      const outcome = !snapshots.length || !applied.length ? "pending" : waiting.length ? "partial" : "confirmed";
+      // An older app ignores a preference it doesn't know yet reports it as applied.
+      const usesList = !(`p_${SKIP_KEYWORDS}` in (activity.data().records ?? {}));
+      const applied = reached.filter((snapshot) => usesList || snapshot.knowsSkipKeywords);
+      const tooOld = reached.filter((snapshot) => !applied.includes(snapshot));
+      const outcome = !snapshots.length || !reached.length ? "pending"
+        : !applied.length ? "needs_update" : waiting.length || tooOld.length ? "partial" : "confirmed";
       ctx.count(`confirms.${outcome}`);
       trace(ctx, { status: outcome });
       const label = (snapshot) => deviceName(phones.find((device) => device.id === snapshot.deviceId) ?? {});
       const devices = (list) => list.map(label).join(", ");
+      const updateNote = tooOld.length ? `${devices(tooOld)} runs an older version of Always On Time that doesn't use this list, so nothing changed there; updating the app applies it.` : "";
       let text;
       if (outcome === "confirmed") text = `Confirmed on ${devices(applied)}.`;
-      else if (outcome === "partial") text = `Confirmed on ${devices(applied)}; ${devices(waiting)} will apply it when it's online.`;
+      else if (outcome === "needs_update") text = `Saved to the account, but ${updateNote}${waiting.length ? ` ${devices(waiting)} will apply it when it's online.` : ""}`;
+      else if (outcome === "partial") text = `Confirmed on ${devices(applied)}${waiting.length ? `; ${devices(waiting)} will apply it when it's online` : ""}.${updateNote ? ` ${updateNote}` : ""}`;
       else text = "Saved; the phone will apply it when it's online (opening Always On Time syncs it right away).";
       return result(text, {
         outcome,
         appliedOn: applied.map(label),
         waitingOn: waiting.map(label),
+        ...(tooOld.length ? { needsUpdate: tooOld.map(label) } : {}),
       });
     },
   },

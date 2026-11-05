@@ -9,8 +9,9 @@ const z = require("zod");
 const {
   CHANGE_ID_PATTERN, DAY_MS, UNDO_DAYS, readDevices, readValues, refs,
 } = require("./assistant-data");
+const { deviceName } = require("./assistant-push");
 const {
-  PAUSED_UNTIL, RecordError, isRecordId, samePayload, validatePayload,
+  PAUSED_UNTIL, RecordError, SKIP_KEYWORDS, firstSkipMatch, isRecordId, samePayload, validatePayload,
 } = require("./assistant-records");
 const {
   RSVP_FILTER_VALUES, SETTINGS, leadTimesInput, leadTimesText, parseStored, tidyLeadTimes,
@@ -19,7 +20,7 @@ const {
   ToolError, formatTime, parseTime, quoted, resolveCalendar, resolveEvent,
 } = require("./assistant-snapshot");
 const {
-  accountEmails, applyChange, hasCapability, latestSnapshot, noPhone, trace,
+  accountEmails, applyChange, hasCapability, latestSnapshot, noPhone, phonesWithoutSkipKeywords, trace,
 } = require("./assistant-tool-context");
 const { eventInputs } = require("./assistant-tools-read");
 
@@ -69,6 +70,23 @@ function nextOverride(stored, mode, leadTimes, currentLeadTimes) {
   return next;
 }
 
+/**
+ * Turning alarms on for an event a skip keyword holds off marks it as an exception, which is what
+ * makes the on stick. Without the mark the keyword would keep it quiet.
+ */
+const pastKeyword = (override, mode, sample) => (mode === "set" && sample?.skippedByKeyword ? { ...override, keywordExempt: true } : override);
+
+/** What to say about a skip keyword after a change to an event or series. */
+function keywordNote(mode, sample, snapshot) {
+  if (!sample) return "";
+  if (mode === "set" && sample.skippedByKeyword) return ` Its title contains ${quoted(sample.skippedByKeyword)}, which is on the skip list, so this also marks it to ring anyway.`;
+  if (mode === "reset") {
+    const keyword = firstSkipMatch(sample.title, snapshot?.skipKeywords ?? []);
+    if (keyword) return ` Its title contains ${quoted(keyword)}, which is on the skip list, so its alarms stay off.`;
+  }
+  return "";
+}
+
 function modeOf(args) {
   const mode = args.mode ?? "set";
   if (mode === "set" && !args.leadTimes) throw new ToolError("Give leadTimes to set, or use mode \"off\" or \"reset\".");
@@ -100,9 +118,10 @@ const TOOLS = [
         summary: mode === "set" ? `Set ${label} to ring ${leadTimesText(leadTimes)}`
           : mode === "off" ? `Turned off alarms for ${label}` : `Reset ${label} to follow its usual settings`,
         build: (current) => ({
-          [resolved.eventKey]: nextOverride(parseStored(current[resolved.eventKey]), mode, leadTimes, currentLeadMinutes(event)),
+          [resolved.eventKey]: pastKeyword(nextOverride(parseStored(current[resolved.eventKey]), mode, leadTimes, currentLeadMinutes(event)), mode, event),
         }),
         finish: (out) => {
+          out.text += keywordNote(mode, event, snapshot);
           if (!event) out.text += " That event isn't in what the phone shared yet, so it applies once the phone sees it.";
           out.data.eventKey = resolved.eventKey;
         },
@@ -135,9 +154,10 @@ const TOOLS = [
         summary: mode === "set" ? `Set ${label} to ring ${leadTimesText(leadTimes)}`
           : mode === "off" ? `Turned off alarms for ${label}` : `Reset ${label} to follow its calendar's settings`,
         build: (current) => ({
-          [resolved.seriesKey]: nextOverride(parseStored(current[resolved.seriesKey]), mode, leadTimes, currentLeadMinutes(sample)),
+          [resolved.seriesKey]: pastKeyword(nextOverride(parseStored(current[resolved.seriesKey]), mode, leadTimes, currentLeadMinutes(sample)), mode, sample),
         }),
         finish: (out) => {
+          out.text += keywordNote(mode, sample, snapshot);
           out.data.seriesKey = resolved.seriesKey;
         },
       };
@@ -211,12 +231,23 @@ const TOOLS = [
       for (const [field, value] of entries) {
         const setting = SETTINGS[field];
         next[`p_${setting.record}`] = value === null ? null : setting.encode ? setting.encode(value) : value;
-        parts.push(`${setting.label.replace(/ \(.*\)$/, "").toLowerCase()} ${value === null ? "reset to default" : Array.isArray(value) ? leadTimesText(tidyLeadTimes(value)) : value}`);
+        const text = value === null ? "reset to default"
+          : setting.describe ? setting.describe(setting.decode(next[`p_${setting.record}`])) : Array.isArray(value) ? leadTimesText(tidyLeadTimes(value)) : value;
+        parts.push(`${setting.label.replace(/ \(.*\)$/, "").toLowerCase()} ${text}`);
       }
       // Turning vibration off silences vibrate-only alarms, so the alert type is read alongside.
       const recordIds = Object.keys(next);
       if (next.p_vibration_enabled === false && !recordIds.includes("p_alert_type")) recordIds.push("p_alert_type");
-      return { recordIds, summary: `Changed settings: ${parts.join(", ")}`, build: () => next };
+      // A phone too old to use the list ignores it, so say so now; confirm_change says so too.
+      const tooOld = recordIds.includes(`p_${SKIP_KEYWORDS}`) ? await phonesWithoutSkipKeywords(ctx) : [];
+      return {
+        recordIds,
+        summary: `Changed settings: ${parts.join(", ")}`,
+        build: () => next,
+        finish: (out) => {
+          if (tooOld.length) out.text += ` ${tooOld.map(deviceName).join(", ")} runs an older version of Always On Time that doesn't use this list, so nothing changes there until the app is updated.`;
+        },
+      };
     },
   }),
   writeTool({

@@ -48,7 +48,14 @@ const PREFERENCE_STRINGS = new Map([
   ["spoken_alarm_meeting_type_preference", ["enabled", "disabled"]],
   ["spoken_alarm_repetition", ["never", "after_15_seconds", "after_30_seconds", "after_1_minute", "after_2_minutes", "once", "automatic"]],
   ["rsvp_filter", ["accepted_only", "accepted_or_tentative", "not_declined", "all_events"]],
+  ["skip_event_keywords", null],
 ]);
+// "Skip events containing": a string holding a JSON list (SkipKeywords.kt, SkipKeywords.swift).
+const SKIP_KEYWORDS = "skip_event_keywords";
+const MAX_SKIP_KEYWORDS = 30;
+const MAX_SKIP_KEYWORD_LENGTH = 60;
+// Strings allowed past PREFERENCE_STRING_MAX: the JSON at the limits above, however it is escaped.
+const PREFERENCE_STRING_LIMITS = new Map([[SKIP_KEYWORDS, 4000]]);
 const PAUSED_UNTIL = "alarms_paused_until";
 // 0 = not paused, -1 = until resumed, otherwise epoch ms up to 2100-01-01 (PortablePreferences.LATEST_EPOCH_MILLIS).
 const PAUSED_UNTIL_MAX = 4102444800000;
@@ -62,6 +69,91 @@ const PREFERENCE_NAMES = new Set([
 const RETIRED_PREFERENCES = new Set(["override_dnd_for_priority"]);
 
 class RecordError extends Error {}
+
+// ---- Skip keywords -----------------------------------------------------------------------------
+//
+// The same matcher as the apps (SkipKeywords.kt, SkipKeywords.swift; shared cases in the app repo's
+// ios/Tests/ParityFixtures/alarm-parity-v2.json): one code point at a time on the NFC form, upper
+// then lower case, final sigma as sigma, white space runs as one space, and format characters and
+// the combining dot dropped.
+const SKIP_SPACE = /^[\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]$/u;
+const SKIP_IGNORED = /^[\p{Cc}\p{Cf}\u0307]$/u;
+
+/** What is stored for a keyword: no format characters, single spaces, no space at either end. */
+function cleanSkipKeyword(text) {
+  let out = "";
+  let pendingSpace = false;
+  for (const char of text) {
+    if (SKIP_SPACE.test(char)) pendingSpace = out.length > 0;
+    else if (!SKIP_IGNORED.test(char)) {
+      if (pendingSpace) out += " ";
+      pendingSpace = false;
+      out += char;
+    }
+  }
+  return out;
+}
+
+function foldSkipKeyword(text) {
+  let out = "";
+  for (const char of text.normalize("NFC")) {
+    if (SKIP_SPACE.test(char)) {
+      if (out.length && !out.endsWith(" ")) out += " ";
+    } else if (!SKIP_IGNORED.test(char)) {
+      out += char.toUpperCase().toLowerCase().replaceAll("\u03C2", "\u03C3").replaceAll("\u0307", "");
+    }
+  }
+  return out.endsWith(" ") ? out.slice(0, -1) : out;
+}
+
+/** Blank and over-long entries dropped, the first spelling of each word kept, stopping at the limit. */
+function tidySkipKeywords(list) {
+  const seen = new Set();
+  const out = [];
+  for (const item of list) {
+    const clean = cleanSkipKeyword(item);
+    const folded = foldSkipKeyword(clean);
+    if (!clean.length || clean.length > MAX_SKIP_KEYWORD_LENGTH || !folded.length || seen.has(folded)) continue;
+    seen.add(folded);
+    out.push(clean);
+    if (out.length === MAX_SKIP_KEYWORDS) break;
+  }
+  return out;
+}
+
+/** The first keyword in the list `title` contains, or null. */
+function firstSkipMatch(title, keywords) {
+  const folded = foldSkipKeyword(title);
+  return keywords.find((keyword) => {
+    const needle = foldSkipKeyword(keyword);
+    return needle.length > 0 && folded.includes(needle);
+  }) ?? null;
+}
+
+/** The list a stored preference holds; anything else is no keywords, as on the phones. */
+function decodeSkipKeywords(stored) {
+  if (typeof stored !== "string") return [];
+  try {
+    const list = JSON.parse(stored);
+    return Array.isArray(list) ? tidySkipKeywords(list.filter((item) => typeof item === "string")) : [];
+  } catch {
+    return [];
+  }
+}
+
+function validateSkipKeywords(value) {
+  let list;
+  try {
+    list = JSON.parse(value);
+  } catch {
+    throw new RecordError(`${SKIP_KEYWORDS} must hold a JSON list`);
+  }
+  if (!Array.isArray(list) || !list.every((item) => typeof item === "string")) throw new RecordError(`${SKIP_KEYWORDS} must hold a list of text`);
+  if (list.length > MAX_SKIP_KEYWORDS) throw new RecordError(`${SKIP_KEYWORDS} holds at most ${MAX_SKIP_KEYWORDS} keywords`);
+  if (JSON.stringify(tidySkipKeywords(list)) !== JSON.stringify(list)) {
+    throw new RecordError(`${SKIP_KEYWORDS} keywords must be 1-${MAX_SKIP_KEYWORD_LENGTH} characters, tidy and different from each other`);
+  }
+}
 
 const sha256Hex = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -205,7 +297,7 @@ function googleEventKeys(calendar, { eventId, recurringEventId, originalStartTim
 
 const OVERRIDE_FIELDS = [
   "leadTimes", "enabled", "volume", "vibrationPattern", "ignoreAllDay", "rsvpFilter", "addedLeadTimes", "travelLeadTimes",
-  "ringThroughDnd",
+  "ringThroughDnd", "keywordExempt",
 ];
 const CALENDAR_FIELDS = ["selected", "overrides"];
 const LEAD_TIME_LISTS = new Set(["leadTimes", "addedLeadTimes", "travelLeadTimes"]);
@@ -236,6 +328,7 @@ function validateOverride(value) {
       case "enabled":
       case "ignoreAllDay":
       case "ringThroughDnd":
+      case "keywordExempt":
         if (typeof item !== "boolean") throw new RecordError(`${field} must be true or false`);
         break;
       case "volume":
@@ -260,8 +353,10 @@ function validatePreference(name, value) {
     if (!Number.isInteger(value) || value < min || value > max) throw new RecordError(`${name} must be a whole number from ${min} to ${max}`);
   } else if (PREFERENCE_STRINGS.has(name)) {
     const allowed = PREFERENCE_STRINGS.get(name);
-    if (typeof value !== "string" || value.length > PREFERENCE_STRING_MAX) throw new RecordError(`${name} must be text up to ${PREFERENCE_STRING_MAX} characters`);
+    const max = PREFERENCE_STRING_LIMITS.get(name) ?? PREFERENCE_STRING_MAX;
+    if (typeof value !== "string" || value.length > max) throw new RecordError(`${name} must be text up to ${max} characters`);
     if (allowed && !allowed.includes(value)) throw new RecordError(`${name} must be one of ${allowed.join(", ")}`);
+    if (name === SKIP_KEYWORDS) validateSkipKeywords(value);
   } else {
     const [min, max] = PREFERENCE_LONGS.get(name);
     if (!Number.isSafeInteger(value) || value < min || value > max) throw new RecordError(`${name} must be 0, -1 or epoch milliseconds before 2100`);
@@ -354,6 +449,14 @@ function canonicalPayload(recordId, payload) {
 const samePayload = (recordId, a, b) => canonicalPayload(recordId, a) === canonicalPayload(recordId, b);
 
 module.exports = {
+  MAX_SKIP_KEYWORDS,
+  MAX_SKIP_KEYWORD_LENGTH,
+  PREFERENCE_STRING_LIMITS,
+  SKIP_KEYWORDS,
+  decodeSkipKeywords,
+  firstSkipMatch,
+  foldSkipKeyword,
+  tidySkipKeywords,
   CALENDAR_FIELDS,
   GOOGLE_SHARED_CALENDAR_ID,
   GOOGLE_ACCOUNT_TYPE,

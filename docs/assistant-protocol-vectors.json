@@ -11,6 +11,7 @@
     {"record": "e", "description": "Several lead times given unsorted with a duplicate: ascending, de-duplicated, fields in data class order", "value": {"enabled": true, "leadTimes": [30, 5, 30, 0]}, "canonical": "{\"leadTimes\":[0,5,30],\"enabled\":true}"},
     {"record": "s", "description": "Override with enabled false; null fields are left out", "value": {"addedLeadTimes": [15, 5], "enabled": false, "leadTimes": [15, 10, 5], "volume": null}, "canonical": "{\"leadTimes\":[5,10,15],\"enabled\":false,\"addedLeadTimes\":[5,15]}"},
     {"record": "e", "description": "Alarms off for an occurrence with no lead times", "value": {"leadTimes": [], "enabled": false}, "canonical": "{\"leadTimes\":[],\"enabled\":false}"},
+    {"record": "e", "description": "turned on past a skip keyword; the mark goes last", "value": {"keywordExempt": true, "enabled": true, "leadTimes": [10]}, "canonical": "{\"leadTimes\":[10],\"enabled\":true,\"keywordExempt\":true}"},
     {"record": "e", "description": "null clears an occurrence override", "value": null, "canonical": "null"},
     {"record": "c", "description": "Calendar with selected only (no \"overrides\":null)", "value": {"selected": true, "overrides": null}, "canonical": "{\"selected\":true}"},
     {"record": "c", "description": "Calendar with overrides, fields reordered", "value": {"overrides": {"rsvpFilter": "accepted_only", "leadTimes": [1440, 60]}, "selected": false}, "canonical": "{\"selected\":false,\"overrides\":{\"leadTimes\":[60,1440],\"rsvpFilter\":\"accepted_only\"}}"},
@@ -21,6 +22,7 @@
     {"record": "p", "name": "respect_dnd", "description": "Boolean preference", "value": false, "canonical": "false"},
     {"record": "p", "name": "theme_preference", "description": "String preference", "value": "dark", "canonical": "\"dark\""},
     {"record": "p", "name": "default_lead_times_csv", "description": "Default lead times: a string holding the app's JSON list", "value": "[0,10]", "canonical": "\"[0,10]\""},
+    {"record": "p", "name": "skip_event_keywords", "description": "Skip keywords: a string holding the app's JSON list", "value": "[\"Lunch\",\"Focus time\"]", "canonical": "\"[\\\"Lunch\\\",\\\"Focus time\\\"]\""},
     {"record": "p", "name": "vibration_enabled", "description": "null clears a preference", "value": null, "canonical": "null"},
     {"record": "p", "name": "alarms_paused_until", "description": "Paused until resumed", "value": -1, "canonical": "-1"},
     {"record": "p", "name": "alarms_paused_until", "description": "Paused until an epoch time", "value": 1793124000000, "canonical": "1793124000000"},
@@ -50,7 +52,8 @@
       "vibration_pattern": {"maxLength": 500, "values": null},
       "spoken_alarm_meeting_type_preference": {"maxLength": 500, "values": ["enabled", "disabled"]},
       "spoken_alarm_repetition": {"maxLength": 500, "values": ["never", "after_15_seconds", "after_30_seconds", "after_1_minute", "after_2_minutes", "once", "automatic"]},
-      "rsvp_filter": {"maxLength": 500, "values": ["accepted_only", "accepted_or_tentative", "not_declined", "all_events"]}
+      "rsvp_filter": {"maxLength": 500, "values": ["accepted_only", "accepted_or_tentative", "not_declined", "all_events"]},
+      "skip_event_keywords": {"maxLength": 4000, "values": null}
     },
     "longs": {
       "alarms_paused_until": [-1, 4102444800000]

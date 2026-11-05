@@ -6,7 +6,9 @@
 // verified access token or callable caller.
 
 const { LIMITS, consume } = require("./assistant-limits");
-const { COLLECTIONS, readDevices, readLatestSnapshot, readSnapshot, recordChange } = require("./assistant-data");
+const {
+  COLLECTIONS, readAppliedState, readDevices, readLatestSnapshot, readSnapshot, readSnapshotTimes, recordChange,
+} = require("./assistant-data");
 const { ensureDemoPhone, isDemoAccount, isDemoDelivery } = require("./assistant-demo-phone");
 const { deliveryFields, errorFields, logEvent } = require("./assistant-log");
 const { canReceive, deviceName, sendToDevices } = require("./assistant-push");
@@ -148,6 +150,17 @@ async function sleepUntil(ctx, deadline, check) {
  * Once the commit succeeds the change stands: failing to reach the phones afterwards only changes
  * the note, never the result.
  */
+/**
+ * The devices whose latest snapshot shows an app too old to know the skip list. Older apps ignore a
+ * preference they don't know and still report it as applied, so only the snapshot tells them apart.
+ */
+async function phonesWithoutSkipKeywords(ctx) {
+  const [devices, times] = await Promise.all([readDevices(ctx.db, ctx.uid), readSnapshotTimes(ctx.db, ctx.uid)]);
+  const states = await Promise.all(times.map(async ({ deviceId }) => ({ deviceId, state: await readAppliedState(ctx.db, ctx.uid, deviceId) })));
+  return states.filter(({ state }) => state && !state.knowsSkipKeywords)
+    .map(({ deviceId }) => devices.find((device) => device.id === deviceId) ?? {});
+}
+
 async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite }) {
   let saved;
   try {
@@ -194,6 +207,7 @@ module.exports = {
   hasPlus,
   deviceSnapshot,
   latestSnapshot,
+  phonesWithoutSkipKeywords,
   names,
   noPhone,
   prepareContext,

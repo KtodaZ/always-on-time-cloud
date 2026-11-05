@@ -182,6 +182,7 @@ function normalizeEvent(event) {
     recurring: Boolean(event.recurring),
     rsvp: oneOf(RSVP_VALUES, event.rsvp),
     alarms: (Array.isArray(event.alarms) ? event.alarms : []).filter((alarm) => alarm && Number.isFinite(alarm.at)).map(normalizeAlarm),
+    skippedByKeyword: cleanText(event.skippedByKeyword) || null,
   };
 }
 
@@ -226,6 +227,8 @@ function normalizeSnapshot(snapshot) {
     paused: { until: pausedUntil },
     calendars,
     events,
+    // Null on a snapshot from an app that doesn't know the list; phones that do always send it.
+    skipKeywords: Array.isArray(payload.skipKeywords) ? payload.skipKeywords.map((item) => cleanText(item)).filter(Boolean) : null,
   };
 }
 

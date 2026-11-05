@@ -8,9 +8,10 @@
 const z = require("zod");
 
 const {
-  PAUSED_UNTIL, PREFERENCE_BOOLEANS, PREFERENCE_INTEGERS, PREFERENCE_STRINGS,
+  MAX_SKIP_KEYWORDS, MAX_SKIP_KEYWORD_LENGTH, PAUSED_UNTIL, PREFERENCE_BOOLEANS, PREFERENCE_INTEGERS, PREFERENCE_STRINGS,
+  SKIP_KEYWORDS, decodeSkipKeywords, foldSkipKeyword, tidySkipKeywords,
 } = require("./assistant-records");
-const { formatTime, minutesLabel } = require("./assistant-snapshot");
+const { formatTime, minutesLabel, quoted } = require("./assistant-snapshot");
 
 // The app's pickers: up to four alarms per event (LeadTimeCodec.MAX_ALARMS_PER_EVENT), up to a week before.
 const MAX_ALARMS_PER_EVENT = 4;
@@ -73,6 +74,16 @@ const SETTINGS = {
   overrideSystemVolume: setting("override_system_volume", "Override system volume"),
   ignoreAllDayEvents: setting("ignore_all_day_events", "Skip all-day events"),
   rsvpFilter: setting("rsvp_filter", "Which invitations ring"),
+  skipEventKeywords: {
+    record: SKIP_KEYWORDS,
+    label: "Skip events containing",
+    schema: z.array(z.string().min(1).max(MAX_SKIP_KEYWORD_LENGTH)).max(MAX_SKIP_KEYWORDS)
+      .describe(`The whole list of words or phrases: events with one in the title keep their alarms off, on this list's words in any case. Up to ${MAX_SKIP_KEYWORDS}, each up to ${MAX_SKIP_KEYWORD_LENGTH} characters. Send the current list plus or minus a word; get_settings shows it.`),
+    // The app stores its JSON list (SkipKeywords.encode) as a string.
+    encode: (value) => JSON.stringify(tidySkipKeywords(value)),
+    decode: decodeSkipKeywords,
+    describe: (value) => (value.length ? value.map(quoted).join(", ") : "none"),
+  },
   autoDetectMeetingLinks: setting("auto_detect_meeting_urls", "Detect meeting links"),
   spokenAlarmEventName: setting("spoken_alarm_include_event_name", "Spoken alarm says the event name"),
   spokenAlarmTimeUntil: setting("spoken_alarm_include_time_until_event", "Spoken alarm says the time until the event"),
@@ -179,6 +190,12 @@ function changeAlert(records, current = {}) {
   // Whole groups of events stop ringing: everything not accepted, or all-day events.
   if (became("p_rsvp_filter", "accepted_only") || overrideBecame("rsvpFilter", "accepted_only")) return "alarms_filtered";
   if (became("p_ignore_all_day_events", true) || overrideBecame("ignoreAllDay", true)) return "alarms_filtered";
+  // A word not on the list before: every event with it in the title stops ringing.
+  const skipRecord = `p_${SKIP_KEYWORDS}`;
+  if (records[skipRecord]) {
+    const had = new Set(decodeSkipKeywords(before(skipRecord)).map(foldSkipKeyword));
+    if (decodeSkipKeywords(after(skipRecord)).some((keyword) => !had.has(foldSkipKeyword(keyword)))) return "alarms_filtered";
+  }
   if (records.p_alarm_duration_seconds) {
     const seconds = after("p_alarm_duration_seconds");
     const was = before("p_alarm_duration_seconds") ?? DEFAULTS.p_alarm_duration_seconds;

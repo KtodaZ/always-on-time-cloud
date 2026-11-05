@@ -6,7 +6,7 @@ const test = require("node:test");
 const path = require("node:path");
 
 const {
-  PREFERENCE_BOOLEANS, PREFERENCE_INTEGERS, PREFERENCE_LONGS, PREFERENCE_STRINGS, PREFERENCE_STRING_MAX, RecordError,
+  PREFERENCE_BOOLEANS, PREFERENCE_INTEGERS, PREFERENCE_LONGS, PREFERENCE_STRINGS, PREFERENCE_STRING_LIMITS, PREFERENCE_STRING_MAX, RecordError,
   calendarKey, canonicalPayload, encodePayload, googleCalendarCandidates, googleEventKeys, occurrenceKey, originalStartMillis,
   parseGoogleEventId, samePayload, seriesKey, sha256Hex, validatePayload,
 } = require("../assistant-records");
@@ -43,7 +43,7 @@ test("the preference allowlist matches the shared vectors", () => {
   const { booleans, integers, strings, longs } = VECTORS.preferences;
   assert.deepEqual([...PREFERENCE_BOOLEANS].sort(), [...booleans].sort());
   assert.deepEqual(Object.fromEntries(PREFERENCE_INTEGERS), integers);
-  assert.deepEqual(Object.fromEntries([...PREFERENCE_STRINGS].map(([name, values]) => [name, { maxLength: PREFERENCE_STRING_MAX, values }])), strings);
+  assert.deepEqual(Object.fromEntries([...PREFERENCE_STRINGS].map(([name, values]) => [name, { maxLength: PREFERENCE_STRING_LIMITS.get(name) ?? PREFERENCE_STRING_MAX, values }])), strings);
   assert.deepEqual(Object.fromEntries(PREFERENCE_LONGS), longs);
 });
 
@@ -169,4 +169,44 @@ test("the Firestore rules accept exactly the synced preferences and the server's
   assert.deepEqual(ids[1].split("|").sort(), [...PREFERENCE_NAMES].sort());
   const { MAX_SNAPSHOT_CHARS } = require("../assistant-data");
   assert.match(rules, new RegExp(`data\\.payload is string && data\\.payload\\.size\\(\\) <= ${MAX_SNAPSHOT_CHARS};`));
+});
+
+// ---- Skip keywords ------------------------------------------------------------------------------
+
+test("skip keywords pass the app's shared parity cases", () => {
+  const { tidySkipKeywords, firstSkipMatch } = require("../assistant-records");
+  // Copied from the app repo's ios/Tests/ParityFixtures/alarm-parity-v2.json (kind skipKeyword).
+  const cases = [
+    [["LUNCH"], "team lunch", "LUNCH"],
+    [["art"], "Quarterly party", "art"],
+    [["gym", "lunch"], "Lunch at the gym", "gym"],
+    [["gym"], "Standup", null],
+    [["focus time"], "Focus \u00a0  time", "focus time"],
+    [["strasse"], "Stra\u00dfe sperren", "strasse"],
+    [["izin"], "\u0130z\u0131n g\u00fcn\u00fc", "izin"],
+    [["\u03a3\u03a5\u039d\u0391\u039d\u03a4\u0397\u03a3"], "\u03c3\u03c5\u03bd\u03b1\u03bd\u03c4\u03b7\u03c2 \u03bf\u03bc\u03b1\u03b4\u03b1\u03c2", "\u03a3\u03a5\u039d\u0391\u039d\u03a4\u0397\u03a3"],
+    [["caf\u00e9"], "Cafe\u0301 chat", "caf\u00e9"],
+    [["lunch"], "Lu\u200bnch\u200f", "lunch"],
+    [["\u6607\u9032"], "\u5b9a\u4f8b\u4f1a\u8b70 \u6607\u9032\u9762\u8ac7", "\u6607\u9032"],
+    [[], "Lunch", null],
+  ];
+  for (const [keywords, title, match] of cases) assert.equal(firstSkipMatch(title, keywords), match, title);
+  assert.deepEqual(tidySkipKeywords(["  ", "  Lunch  now ", "LUNCH NOW", "x".repeat(61), "\u200b"]), ["Lunch now"]);
+  assert.equal(tidySkipKeywords(Array.from({ length: 32 }, (_, i) => `k${i}`)).length, 30);
+});
+
+test("the skip list is validated like the app's limits", () => {
+  const ok = (list) => encodePayload("p_skip_event_keywords", JSON.stringify(list));
+  assert.equal(ok(["Lunch"]), JSON.stringify('["Lunch"]'));
+  assert.equal(ok([]), JSON.stringify("[]"));
+  for (const bad of [["  "], ["x".repeat(61)], ["Lunch", "LUNCH"], [" Lunch"], Array.from({ length: 31 }, (_, i) => `k${i}`), [1], { a: 1 }]) {
+    assert.throws(() => ok(bad), RecordError, JSON.stringify(bad));
+  }
+  assert.throws(() => encodePayload("p_skip_event_keywords", "not json"), RecordError);
+  assert.equal(encodePayload("p_skip_event_keywords", null), "null");
+});
+
+test("keywordExempt is a boolean on an override, and goes last", () => {
+  assert.equal(encodePayload(`e_${"a".repeat(64)}`, { keywordExempt: true, enabled: true, leadTimes: [10] }), '{"leadTimes":[10],"enabled":true,"keywordExempt":true}');
+  assert.throws(() => encodePayload(`e_${"a".repeat(64)}`, { keywordExempt: "yes" }), RecordError);
 });

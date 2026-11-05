@@ -114,6 +114,12 @@ its furthest events until it fits, and the server never parses a longer one):
   Events filtered out by RSVP or all-day settings are omitted. `eventKey`/`seriesKey` are null when
   the event has no portable identity.
 - `rsvp`: `ACCEPTED`, `TENTATIVE`, `DECLINED`, `INVITED`, `NONE`, `ORGANIZER`, or absent.
+- `skippedByKeyword` (event, optional): the keyword keeping its alarms off, as the person wrote it;
+  its alarms read `off`. Derived on each phone from the title and the list, never written to `values`.
+- `skipKeywords` (top level): the list this phone is using, sent even when empty. A snapshot without
+  it comes from an app too old to know the list. Older apps report `valuesAppliedThrough` past a
+  change to `p_skip_event_keywords` while ignoring it, so `confirm_change` counts those phones as
+  `needsUpdate`, never as applied, with outcome `needs_update` when no phone uses the list yet.
 - `alarms[].kind`: `lead` (minutes before start) or `travel` (minutes before leaving).
   `source`: `app`, `calendar`, `series`, `event` or `travel`. `status`: `on`, `off` (alarm disabled
   for the event), `paused` (inside a pause window), or `past`.
@@ -141,7 +147,7 @@ its furthest events until it fits, and the server never parses a longer one):
 | `calendar_unwatched` | a `c_` record's `selected` becomes false |
 | `alarms_off` | a `c_` record's `overrides.enabled`, or an `s_`/`e_` record's `enabled`, becomes false |
 | `alerts_reduced` | `alarm_volume` set to 20 or less and lower than before (unset counts as 80), `alert_type` lowered (`sound_and_vibration` > `vibration_only` > `visual_only`), `vibration_enabled` set to false while the alert type is `vibration_only`, `respect_dnd` turned on, `override_system_volume` turned off (from true), or a calendar's `ringThroughDnd` turned off |
-| `alarms_filtered` | `rsvp_filter`, or a calendar's `rsvpFilter`, becomes `accepted_only`; `ignore_all_day_events` (from false) or a calendar's `ignoreAllDay` becomes true |
+| `alarms_filtered` | `rsvp_filter`, or a calendar's `rsvpFilter`, becomes `accepted_only`; `ignore_all_day_events` (from false) or a calendar's `ignoreAllDay` becomes true; `skip_event_keywords` gains a word it didn't have (compared by the matcher's folding) |
 | `alarms_shortened` | `alarm_duration_seconds` set to 1–15 and shorter than before (unset counts as 60, 0 rings until dismissed) |
 | `alarms_early` | a lead time over 1,440 minutes (a day) added to an event, series or calendar (`leadTimes` or `addedLeadTimes`) or to the app default (`default_lead_times_csv`, `default_lead_time_minutes`) |
 
@@ -182,7 +188,8 @@ Payloads (`values/{key}.payload`, ≤ 16 KB):
   calendars), `addedLeadTimes` (≤ 20 ints), `travelLeadTimes` (1..4 ints in 0..179, calendars; the app's per-event alarm limit and
   longest travel lead), `ringThroughDnd` (bool, calendars, Android only: the calendar's alarms
   ring with sound during Do Not Disturb while `respect_dnd` is on; only `true` is written, absent
-  means off). Absent fields mean "inherit". Phones ignore unknown fields; the server
+  means off), `keywordExempt` (bool, events and series: the person turned this on while a skip
+  keyword matched it, so keywords leave it alone; only `true` is written). Absent fields mean "inherit". Phones ignore unknown fields; the server
   validates only the fields it knows and keeps unknown ones when it rewrites a record, so a newer
   app's fields survive an assistant change.
 - `p_`: JSON scalars (`null` clears). Booleans: `dynamic_color`, `apply_accent_to_app`,
@@ -200,7 +207,12 @@ Payloads (`values/{key}.payload`, ≤ 16 KB):
   `spoken_alarm_meeting_type_preference` (`enabled`, `disabled`), `spoken_alarm_repetition`
   (`never`, `after_15_seconds`, `after_30_seconds`, `after_1_minute`, `after_2_minutes`, and the
   older `once`, `automatic`), `rsvp_filter` (`accepted_only`, `accepted_or_tentative`,
-  `not_declined`, `all_events`); the others take any string. Long: `alarms_paused_until`
+  `not_declined`, `all_events`); the others take any string. String (≤ 4000): `skip_event_keywords`,
+  a JSON list of up to 30 keywords of 1..60 UTF-16 units each, tidied (no format characters, single
+  spaces, no space at either end) and different from each other once folded. Folding, the same on
+  every platform: one code point at a time on the NFC form, upper then lower case without a locale,
+  final sigma as sigma, white space runs as one space, format characters and U+0307 dropped. A value
+  a phone can't read means no keywords; phones without the feature ignore the record. Long: `alarms_paused_until`
   (0 = not paused, −1 = until resumed, otherwise epoch ms ≤ 4102444800000).
 
 Canonical encoding: payloads are written the way kotlinx serialization writes the app's data
