@@ -33,13 +33,20 @@ export const FAILURE_BACKOFF_MAX_MS = 30 * MINUTE_MS;
 export const RING_END_MARGIN_MS = 20 * 1000;
 /** A ring end not sent within this long after it was due is dropped (the phone also checks on every wake). */
 export const RING_END_WINDOW_MS = HOUR_MS;
+/** A notice-end wake waits for a ring end due within this long after it (a 5-minute ring included). */
+export const NOTICE_END_RING_END_WAIT_MS = 5 * MINUTE_MS;
 /** Longest ring time the relay accepts, as Android's `alarm_duration_seconds` (0 = until dismissed). */
 export const MAX_RING_SECONDS = 86400;
+/** A notice end not sent within this long after it was due is dropped (any later wake takes the notice down too). */
+export const NOTICE_END_WINDOW_MS = HOUR_MS;
 /**
  * Higher-urgency kinds first. Only one push is sent per install per coalescing window, except a
  * ring end, which only waits for an in-flight push or a failure backoff.
+ *
+ * Every push wakes the phone, so any of the priority-10 kinds ahead of `noticeEnd` does its job and
+ * covers it. It only ranks above `heartbeat`, whose priority 5 lets iOS hold the push back.
  */
-export const KIND_ORDER = Object.freeze(["ringEnd", "precheck", "change", "renew", "heartbeat"] as const);
+export const KIND_ORDER = Object.freeze(["ringEnd", "precheck", "change", "renew", "noticeEnd", "heartbeat"] as const);
 
 export type PushKind = (typeof KIND_ORDER)[number];
 export type Provider = "google" | "microsoft";
@@ -93,6 +100,10 @@ export interface InstallState {
   claimedAt: number | null;
   retryAfter: number | null;
   alarms: AlarmState[];
+  /** When the phone's upcoming notice goes stale (its meeting's start); null or absent: none. */
+  noticeEndsAt?: number | null;
+  /** When a push sent at or after that time's wake was accepted; null until then. */
+  noticeEndSentAt?: number | null;
 }
 
 export interface SubscriptionState {
@@ -356,6 +367,52 @@ function nextRingEndAt(install: InstallState, nowMs: number): number | null {
   return Math.max(Math.min(...open.map(({ wakeAt }) => wakeAt)), ringEndBlockedUntil(install), nowMs);
 }
 
+// --- Notice ends -------------------------------------------------------------------------------
+
+/** When the notice has gone stale (`noticeEndsAt` + margin), or null when no wake is open. */
+function noticeStaleAt(install: InstallState, nowMs: number): number | null {
+  const endsAt = install.noticeEndsAt ?? null;
+  if (endsAt === null || (install.noticeEndSentAt ?? null) !== null) return null;
+  const staleAt = endsAt + RING_END_MARGIN_MS;
+  return nowMs < staleAt + NOTICE_END_WINDOW_MS ? staleAt : null;
+}
+
+/**
+ * When the wake for the phone's upcoming notice goes out, or null when none is open. A ring end
+ * due soon after waits it out instead: that push wakes the phone too and covers the notice, and
+ * an alarm at the meeting's start would otherwise cost two full syncs a minute apart.
+ */
+function openNoticeEndWakeAt(install: InstallState, nowMs: number): number | null {
+  const staleAt = noticeStaleAt(install, nowMs);
+  if (staleAt === null) return null;
+  const ringEnds = openRingEnds(install, nowMs)
+    .map(({ wakeAt }) => wakeAt)
+    .filter((wakeAt) => wakeAt >= staleAt && wakeAt <= staleAt + NOTICE_END_RING_END_WAIT_MS);
+  return ringEnds.length > 0 ? Math.min(...ringEnds) : staleAt;
+}
+
+/** True when the notice-end wake is due now and no push has covered it. */
+export function isNoticeEndDue(install: InstallState, nowMs: number): boolean {
+  const wakeAt = openNoticeEndWakeAt(install, nowMs);
+  return wakeAt !== null && wakeAt <= nowMs;
+}
+
+/**
+ * True when an accepted push sent at `sentAt` covers the notice end, whatever its kind: every wake
+ * makes the phone move its notice on. A push within the margin does not, since it may reach an
+ * iPhone whose clock runs behind before the meeting has started there.
+ */
+export function noticeEndCoveredByPush(install: InstallState, sentAt: number): boolean {
+  const staleAt = noticeStaleAt(install, sentAt);
+  return staleAt !== null && staleAt <= sentAt;
+}
+
+/** When the next notice-end wake may go out (normal coalescing applies), or null. */
+function nextNoticeEndAt(install: InstallState, nowMs: number): number | null {
+  const wakeAt = openNoticeEndWakeAt(install, nowMs);
+  return wakeAt === null ? null : Math.max(wakeAt, pushBlockedUntil(install), nowMs);
+}
+
 /** Earliest time a precheck could become due (meeting window or stage), or null. */
 function nextPrecheckAt(install: InstallState, nowMs: number): number | null {
   const candidates: number[] = [];
@@ -439,15 +496,18 @@ function receiptRetryAt(install: InstallState): number | null {
 }
 
 /**
- * When the shard next needs to look at this install (`next`), and when for an alarm precheck or a
- * calendar change (`priority`, visited first). Both null when disabled or nothing is scheduled.
+ * When the shard next needs to look at this install (`next`), and when for an alarm precheck, a
+ * ring end or a calendar change (`priority`, visited first). Both null when disabled or nothing is scheduled.
  */
 export function wakeTimes(install: InstallState, subscriptions: SubscriptionState[], nowMs: number): { next: number | null; priority: number | null } {
   if (!install.enabled || install.receipt?.eligible === false) return { next: null, priority: null };
   const wake = pushWakeTimes(install, subscriptions, nowMs);
+  // A notice end only tidies Notification Center, so it is not visited ahead of other installs' alarm work.
+  const noticeEnd = nextNoticeEndAt(install, nowMs);
+  const next = noticeEnd === null ? wake.next : Math.min(wake.next ?? Infinity, noticeEnd);
   const ringEnd = nextRingEndAt(install, nowMs);
-  if (ringEnd === null) return wake;
-  return { next: Math.min(wake.next ?? Infinity, ringEnd), priority: Math.min(wake.priority ?? Infinity, ringEnd) };
+  if (ringEnd === null) return { next, priority: wake.priority };
+  return { next: Math.min(next ?? Infinity, ringEnd), priority: Math.min(wake.priority ?? Infinity, ringEnd) };
 }
 
 function pushWakeTimes(install: InstallState, subscriptions: SubscriptionState[], nowMs: number): { next: number | null; priority: number | null } {
@@ -506,6 +566,7 @@ export function planPush(install: InstallState, subscriptions: SubscriptionState
       : retryDue ? "change"
       : dueRenewals.length > 0 ? "renew"
       : recoveryDue ? "precheck"
+      : isNoticeEndDue(install, nowMs) ? "noticeEnd"
       : install.freshness.polling && nowMs - Math.max(heartbeatBase(install), install.receipt.lastWakeAt ?? 0) >= HEARTBEAT_INTERVAL_MS
         && isWithinActiveHours(nowMs, install.freshness) ? "heartbeat"
       : null;
@@ -523,6 +584,7 @@ export function planPush(install: InstallState, subscriptions: SubscriptionState
     precheck: install.freshness.polling ? isMeetingWindowDue(install, nowMs) : dueStages(install, nowMs).length > 0,
     change: install.pendingChangeAt !== null,
     renew: dueRenewals.length > 0,
+    noticeEnd: isNoticeEndDue(install, nowMs),
     heartbeat: isHeartbeatDue(install, nowMs),
   };
   let kind = KIND_ORDER.find((candidate) => candidates[candidate]);

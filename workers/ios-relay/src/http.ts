@@ -159,7 +159,7 @@ export interface AlarmInput {
  * so a snapshot racing an alarm's trigger still succeeds. Returns raw IDs (hashed by the caller).
  */
 export function validateAlarms(body: unknown, nowMs: number): AlarmInput[] {
-  requireObject(body, ["alarms"]);
+  requireObject(body, ["alarms"], ["noticeEndsAtMs"]);
   if (!Array.isArray(body.alarms) || body.alarms.length > MAX_ALARMS_PER_INSTALL) {
     throw new HttpError(400, `alarms must be an array of at most ${MAX_ALARMS_PER_INSTALL} entries`);
   }
@@ -180,6 +180,18 @@ export function validateAlarms(body: unknown, nowMs: number): AlarmInput[] {
     if (triggerAt > nowMs && triggerAt <= nowMs + MAX_ALARM_HORIZON_MS) alarms.push({ id: alarm.id, triggerAt, ...(typeof alarm.armed === "boolean" ? {armed: alarm.armed} : {}) });
   }
   return alarms.sort((left, right) => left.triggerAt - right.triggerAt);
+}
+
+/**
+ * A snapshot's optional `noticeEndsAtMs`: undefined when absent (the stored value stays), null to
+ * clear it, otherwise when the phone's upcoming notice goes stale. A past time is kept (the phone's
+ * clock may run behind, and the window decides whether a wake is still due); beyond 90 days it is
+ * ignored like a trigger that far out, reading as no wake.
+ */
+export function validateNoticeEnd(value: unknown, nowMs: number): number | null | undefined {
+  if (value === undefined || value === null) return value;
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new HttpError(400, "noticeEndsAtMs must be epoch milliseconds or null");
+  return (value as number) <= nowMs + MAX_ALARM_HORIZON_MS ? (value as number) : null;
 }
 
 export interface SubscriptionInput {
@@ -293,15 +305,18 @@ export interface SyncReceipt {
   syncedAt: number; snapshotRevision: number; deliveryId?: string;
   calendarVerified: boolean; alarmsReconciled: boolean; nextRefreshAt: number;
   alarms: AlarmInput[];
+  noticeEndsAt?: number | null;
 }
 export function validateReceipt(body: unknown, nowMs: number): SyncReceipt {
-  requireObject(body, ["receiptVersion", "syncedAtMs", "snapshotRevision", "calendarVerified", "alarmsReconciled", "alarms", "nextRefreshAtMs"], ["deliveryId"]);
+  requireObject(body, ["receiptVersion", "syncedAtMs", "snapshotRevision", "calendarVerified", "alarmsReconciled", "alarms", "nextRefreshAtMs"], ["deliveryId", "noticeEndsAtMs"]);
   if (body.receiptVersion !== 1 || !Number.isSafeInteger(body.snapshotRevision) || (body.snapshotRevision as number) < 1
     || typeof body.calendarVerified !== "boolean" || typeof body.alarmsReconciled !== "boolean"
     || !Number.isSafeInteger(body.nextRefreshAtMs) || (body.nextRefreshAtMs as number) < 0
     || (body.nextRefreshAtMs as number) > nowMs + MAX_ALARM_HORIZON_MS
     || (body.deliveryId !== undefined && (typeof body.deliveryId !== "string" || !/^[0-9a-f-]{36}$/.test(body.deliveryId)))) throw new HttpError(400, "invalid receipt");
+  const noticeEndsAt = validateNoticeEnd(body.noticeEndsAtMs, nowMs);
   return { syncedAt: validateSynced({syncedAtMs: body.syncedAtMs}, nowMs), snapshotRevision: body.snapshotRevision as number,
+    ...(noticeEndsAt !== undefined ? {noticeEndsAt} : {}),
     calendarVerified: body.calendarVerified, alarmsReconciled: body.alarmsReconciled, nextRefreshAt: body.nextRefreshAtMs as number,
     ...(typeof body.deliveryId === "string" ? {deliveryId: body.deliveryId} : {}), alarms: validateAlarms({alarms: body.alarms}, nowMs) };
 }
