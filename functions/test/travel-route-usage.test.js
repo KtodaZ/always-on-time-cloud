@@ -5,7 +5,7 @@ const test = require("node:test");
 
 const { FakeFirestore } = require("../testing/fake-firestore");
 const { routeTrip } = require("../travel-route");
-const { countsFor, createRouteMetrics, outcomeFor, routeSku } = require("../travel-route-usage");
+const { PHONE_HISTORY_DAYS, countsFor, createRouteMetrics, outcomeFor, phoneKey, routeKind, routeSku } = require("../travel-route-usage");
 
 const NOW = Date.parse("2026-10-13T15:00:00Z");
 const KEY = "server-key-123";
@@ -83,6 +83,73 @@ test("each provider fetch counts once, by provider, mode and billing SKU", async
   assert.deepEqual(totals.requests, { tomtom: { drive: 1, walk: 1 }, google: { transit: 1, drive: 2, bicycle: 1 } });
   assert.deepEqual(totals.sku, { tomtom_routing: 2, google_routes_essentials: 3, google_routes_pro: 1 });
   assert.deepEqual(totals.outcomes, { tomtom: { ok: 2 }, google: { ok: 4 } });
+});
+
+test("routes are live only for traffic-aware drives, whichever provider answers", async () => {
+  assert.equal(routeKind("DRIVE", "TRAFFIC_AWARE"), "live");
+  assert.equal(routeKind("DRIVE", "TRAFFIC_UNAWARE"), "basic");
+  assert.equal(routeKind("WALK", "TRAFFIC_AWARE"), "basic");
+  assert.equal(routeKind("TRANSIT", "TRAFFIC_AWARE"), "transit");
+  const { route, daily } = setup();
+  await route({ routingPreference: "TRAFFIC_AWARE" });
+  await route({ provider: "google", routingPreference: "TRAFFIC_AWARE" });
+  await route();
+  await route({ provider: "google", mode: "TRANSIT" });
+  assert.deepEqual(daily().routes, { live: 2, basic: 1, transit: 1 });
+});
+
+test("a phone's calls are kept per day under a hash, split by route kind and provider", async () => {
+  const { db, route } = setup();
+  await route({ routingPreference: "TRAFFIC_AWARE" });
+  await route();
+  await route({ provider: "google", mode: "TRANSIT" });
+  const later = NOW + 24 * 3_600_000;
+  await route({ arriveByMillis: later + 3_600_000 }, later);
+  await route({ installId: "install-two" });
+  const phone = phoneKey("install-abc123");
+  const today = db.documents.get(`travelRouteInstallDaily/2026-10-13_${phone}`);
+  assert.equal(today.calls, 3);
+  assert.deepEqual(today.routes, { live: 1, basic: 1, transit: 1 });
+  assert.deepEqual(today.providers, { tomtom: 2, google: 1 });
+  assert.equal(today.day, "2026-10-13");
+  assert.equal(today.phone, phone);
+  assert.equal(today.expiresAt.getTime(), NOW + PHONE_HISTORY_DAYS * 24 * 3_600_000);
+  assert.equal(db.documents.get(`travelRouteInstallDaily/2026-10-14_${phone}`).calls, 1);
+  assert.equal(db.documents.get(`travelRouteInstallDaily/2026-10-13_${phoneKey("install-two")}`).calls, 1);
+});
+
+test("a phone's history holds no install id or trip details", async () => {
+  const { db, route } = setup();
+  await route({ provider: "google", destination: "SFO, San Francisco, CA" });
+  const [[path, data]] = [...db.documents].filter(([key]) => key.startsWith("travelRouteInstallDaily/"));
+  const stored = path + JSON.stringify(data);
+  for (const secret of ["install-abc123", "SFO", "37.79", "122.39", "203.0.113.9"]) {
+    assert.equal(stored.includes(secret), false, secret);
+  }
+  assert.deepEqual(Object.keys(data).sort(), ["calls", "day", "expiresAt", "phone", "providers", "routes", "schemaVersion"]);
+});
+
+test("a refused call adds nothing to a phone's history", async () => {
+  const db = new FakeFirestore();
+  const { route } = setup({ db });
+  await assert.rejects(route({ mode: "FLY" }), { code: "invalid-argument" });
+  db.documents.set("travelRouteUsage/~provider.tomtom.2026-10-13", { count: 1_000_000 });
+  await assert.rejects(route(), { code: "resource-exhausted" });
+  assert.equal([...db.documents.keys()].some((key) => key.startsWith("travelRouteInstallDaily/")), false);
+});
+
+test("a failed history write changes neither the route nor the daily totals", async () => {
+  const db = new FakeFirestore();
+  const collection = db.collection.bind(db);
+  db.collection = (name) => {
+    if (name === "travelRouteInstallDaily") throw new Error("history down");
+    return collection(name);
+  };
+  const { route, daily, warnings } = setup({ db });
+  const reply = await route();
+  assert.equal(reply.status, 200);
+  assert.equal(daily().requests.tomtom.drive, 1);
+  assert.equal(warnings.length > 0, true);
 });
 
 test("Google is Pro only for traffic-aware drives", () => {

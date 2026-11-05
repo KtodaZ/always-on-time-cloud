@@ -207,7 +207,8 @@ async function spendInstallAllowance(db, installId, now = Date.now(), limit = DA
  * Runs one routed call. [fetchImpl] and [keys] are injected so tests need no network or secrets.
  * Resolves to the provider's { status, body }; throws RouteRequestError for refused requests.
  * [metrics], when given, is travel-route-usage.js's record(): it counts the call in anonymous
- * daily totals once the outcome is known, bounded in time and unable to change the reply.
+ * daily totals and the phone's hashed history once the outcome is known, bounded in time and
+ * unable to change the reply.
  */
 async function routeTrip({ metrics = null, now = Date.now(), ...options }) {
   const event = {};
@@ -246,6 +247,7 @@ async function routeCountedTrip({ data, db, keys, fetchImpl = fetch, logger, net
   }
   // Counted as one outbound request from here, whether or not the provider answers.
   event.fetch = { provider: request.provider, mode: request.mode, routingPreference: request.routingPreference, status: null };
+  event.installId = request.installId;
   let response;
   let body;
   try {

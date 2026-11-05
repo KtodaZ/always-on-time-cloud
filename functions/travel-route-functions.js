@@ -11,10 +11,11 @@ const { createRouteMetrics } = require("./travel-route-usage");
 
 const tomtomApiKey = defineSecret("TOMTOM_API_KEY");
 const travelRouteApiKey = defineSecret("TRAVEL_ROUTE_API_KEY");
-// Anonymous daily totals in travelRouteDaily for the studio dashboard (docs/TRAVEL_ROUTES.md).
+// Anonymous daily totals in travelRouteDaily for the studio dashboard, and hashed per-phone history
+// in travelRouteInstallDaily (docs/TRAVEL_ROUTES.md).
 const routeMetricsEnabled = defineBoolean("TRAVEL_ROUTE_METRICS", {
   default: false,
-  description: "Count route proxy calls in anonymous daily totals (travelRouteDaily)",
+  description: "Count route proxy calls in daily totals (travelRouteDaily) and hashed per-phone history (travelRouteInstallDaily)",
 });
 
 // One per instance, so refusals held in memory ride along with its next counter write.

@@ -26,6 +26,12 @@
       "indexes": []
     },
     {
+      "collectionGroup": "travelRouteInstallDaily",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
       "collectionGroup": "feedbackAlerts",
       "fieldPath": "expiresAt",
       "ttl": true,

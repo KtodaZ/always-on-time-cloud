@@ -16,7 +16,9 @@ it concerns data the app collects or shares. Say in the pull request where the p
 
 The routing dashboard retains anonymous daily totals of provider requests, errors and active
 installations. These totals have no installation identifiers, coordinates, addresses or trip
-details; the per-installation abuse counters still expire after about two days. The matching
+details; the per-installation abuse counters still expire after about two days. It also keeps each
+installation's daily route request counts, by kind of route and provider, under a one-way hash of
+the installation ID for 90 days, with no coordinates, addresses or trip details. The matching
 disclosure is in the website policy's `#travel-location` section (effective October 23, 2026).
 
 The iOS calendar refresh relay runs on Cloudflare (Workers and Durable Objects), so Cloudflare
