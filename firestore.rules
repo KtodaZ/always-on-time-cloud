@@ -93,6 +93,15 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly(['active', 'schemaVersion'])
         && request.resource.data.active == true && request.resource.data.schemaVersion == 1;
       allow update, delete: if false;
+      // Plus early adopter lock: the account claims it once; only account deletion removes it.
+      match /offers/earlyAdopter {
+        allow read: if activeAccount(uid);
+        allow create: if activeAccount(uid)
+          && request.resource.data.keys().hasOnly(['schemaVersion', 'lockedAt'])
+          && request.resource.data.schemaVersion == 1
+          && request.resource.data.lockedAt == request.time;
+        allow update, delete: if false;
+      }
       match /values/{recordId} {
         allow read: if activeAccount(uid);
         allow create, update: if activeAccount(uid)
