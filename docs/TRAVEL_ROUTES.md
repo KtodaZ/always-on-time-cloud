@@ -22,7 +22,7 @@ identity.
    ([`firestore.indexes.json`](../firestore.indexes.json)), so idle counters are deleted.
 3. Forwards the coordinates and times to the provider, and returns the duration and distance.
 4. When `TRAVEL_ROUTE_METRICS` is on (off by default), adds the call to anonymous daily totals
-   (below).
+   and the phone's hashed history (below).
 
 Coordinates are not stored or logged. Provider error bodies are logged only with the API key
 removed ([`travel-route.js`](../functions/travel-route.js)). The provider processes the request
@@ -45,9 +45,28 @@ per UTC day, `travelRouteDaily/{yyyy-mm-dd}`, for the studio's private analytics
 | `installsActive` | installations whose first accepted call of the day this was |
 | `requests.{tomtom,google}.{drive,transit,bicycle,walk}` | provider requests made, including failed ones |
 | `sku.{tomtom_routing,google_routes_essentials,google_routes_pro}` | the same requests by billing SKU; Google is Pro for traffic-aware drives, Essentials otherwise |
+| `routes.{live,basic,transit}` | the same requests by kind: `live` is a traffic-aware drive (the Plus benefit), `transit` is public transit, `basic` is everything else |
 | `outcomes.{tomtom,google}.{ok,http4xx,http429,http5xx,unreachable}` | how each request ended |
 | `refused.{invalid,allowance,not_configured}` | calls turned away before reaching a provider |
 | `schemaVersion` | the layout above (1) |
+
+## Per-phone history
+
+Under the same param, the function keeps one document per phone per UTC day,
+`travelRouteInstallDaily/{yyyy-mm-dd}_{phone}`, to show how much routing one phone uses over time,
+for pricing Plus and setting limits. `phone` is a one-way hash of the Firebase installation ID. A
+Firestore TTL policy on `expiresAt` deletes each document after 90 days.
+
+| Field | Holds |
+| --- | --- |
+| `calls` | provider requests this phone made that day, including failed ones |
+| `routes.{live,basic,transit}` | the same requests by kind, as in the daily totals |
+| `providers.{tomtom,google}` | the same requests by provider |
+| `day`, `phone`, `expiresAt`, `schemaVersion` | the UTC day, the hash, when it is deleted, the layout (1) |
+
+It holds no network, coordinates, addresses or trip details. Refused calls aren't recorded, so a
+caller can't create writes past the daily allowance. Like the daily totals, a write is best-effort:
+a day can undercount, and a failed write never changes the route reply.
 
 The documents hold numbers only: no installation ID, network, coordinates, address or key. The
 active-install count comes from the existing per-installation counter's transaction, so nothing

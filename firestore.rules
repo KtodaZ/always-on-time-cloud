@@ -228,6 +228,11 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // One phone's route calls per day under a hash of its install id; contains no trip details.
+    match /travelRouteInstallDaily/{document=**} {
+      allow read, write: if false;
+    }
+
     // Assistant connector OAuth state, anonymous usage totals and rate limit counters: written and
     // read only by Cloud Functions through the Admin SDK.
     match /oauthClients/{document=**} {
