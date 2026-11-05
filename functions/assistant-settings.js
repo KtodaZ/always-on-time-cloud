@@ -78,7 +78,7 @@ const SETTINGS = {
     record: SKIP_KEYWORDS,
     label: "Skip events containing",
     schema: z.array(z.string().min(1).max(MAX_SKIP_KEYWORD_LENGTH)).max(MAX_SKIP_KEYWORDS)
-      .describe(`The whole list of words or phrases: events with one in the title keep their alarms off, on this list's words in any case. Up to ${MAX_SKIP_KEYWORDS}, each up to ${MAX_SKIP_KEYWORD_LENGTH} characters. Send the current list plus or minus a word; get_settings shows it.`),
+      .describe(`The whole list of words or phrases: events whose title has one as whole words (any case; "lunch" matches "Team lunch" but not "Lunches"; in Japanese, Chinese, Thai or Korean text it matches within words too) keep their alarms off. Up to ${MAX_SKIP_KEYWORDS}, each up to ${MAX_SKIP_KEYWORD_LENGTH} characters. Send the current list plus or minus a word; get_settings shows it.`),
     // The app stores its JSON list (SkipKeywords.encode) as a string.
     encode: (value) => JSON.stringify(tidySkipKeywords(value)),
     decode: decodeSkipKeywords,

@@ -73,9 +73,9 @@ class RecordError extends Error {}
 // ---- Skip keywords -----------------------------------------------------------------------------
 //
 // The same matcher as the apps (SkipKeywords.kt, SkipKeywords.swift; shared cases in the app repo's
-// ios/Tests/ParityFixtures/alarm-parity-v2.json): one code point at a time on the NFC form, upper
-// then lower case, final sigma as sigma, white space runs as one space, and format characters and
-// the combining dot dropped.
+// ios/Tests/ParityFixtures/alarm-parity-v2.json): whole words, folded one code point at a time on the
+// NFC form, upper then lower case, final sigma as sigma, white space runs as one space, and format
+// characters and the combining dot dropped.
 const SKIP_SPACE = /^[\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]$/u;
 const SKIP_IGNORED = /^[\p{Cc}\p{Cf}\u0307]$/u;
 
@@ -121,12 +121,54 @@ function tidySkipKeywords(list) {
   return out;
 }
 
-/** The first keyword in the list `title` contains, or null. */
+// Letters, marks and digits (general categories L, M, N) make up words; anything else is a boundary.
+const SKIP_WORD_CHAR = /^[\p{L}\p{M}\p{N}]$/u;
+
+/** Scripts written without spaces between words, written out so all three platforms agree. */
+const SKIP_UNSPACED = [
+  [0x0E00, 0x0EFF], [0x1000, 0x109F], [0x1100, 0x11FF], [0x1780, 0x17FF], [0x19E0, 0x19FF],
+  [0x2E80, 0x2FDF], [0x3005, 0x3007], [0x3021, 0x3029], [0x3031, 0x3035], [0x3038, 0x303C],
+  [0x3040, 0x30FF], [0x3130, 0x318F], [0x31F0, 0x31FF], [0x3400, 0x4DBF], [0x4E00, 0x9FFF],
+  [0xAC00, 0xD7AF], [0xF900, 0xFAFF], [0xFF66, 0xFF9F], [0x20000, 0x3FFFF],
+];
+const isUnspaced = (codePoint) => SKIP_UNSPACED.some(([from, to]) => codePoint >= from && codePoint <= to);
+const isWordChar = (codePoint) => SKIP_WORD_CHAR.test(String.fromCodePoint(codePoint));
+
+function codePointBefore(text, index) {
+  const low = text.charCodeAt(index - 1);
+  if (low >= 0xDC00 && low <= 0xDFFF && index >= 2) {
+    const high = text.charCodeAt(index - 2);
+    if (high >= 0xD800 && high <= 0xDBFF) return text.codePointAt(index - 2);
+  }
+  return low;
+}
+
+const edgeOk = (keywordEdge, neighbour) =>
+  !isWordChar(keywordEdge) || isUnspaced(keywordEdge) || !isWordChar(neighbour) || isUnspaced(neighbour);
+
+/**
+ * Whether a folded keyword sits in a folded title on the word rule: each end on a word boundary
+ * (the title's start or end, or a character that isn't a letter, mark or digit), except an end whose
+ * keyword character isn't a letter, mark or digit, or where the keyword's or title's character is in
+ * a script written without spaces (Han, kana, Thai, Lao, Khmer, Myanmar, Hangul), which matches as
+ * plain text.
+ */
+function containsWords(haystack, needle) {
+  for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) {
+    const end = at + needle.length;
+    const leftOk = at === 0 || edgeOk(needle.codePointAt(0), codePointBefore(haystack, at));
+    const rightOk = end === haystack.length || edgeOk(codePointBefore(needle, needle.length), haystack.codePointAt(end));
+    if (leftOk && rightOk) return true;
+  }
+  return false;
+}
+
+/** The first keyword in the list that matches `title` as whole words, or null. */
 function firstSkipMatch(title, keywords) {
   const folded = foldSkipKeyword(title);
   return keywords.find((keyword) => {
     const needle = foldSkipKeyword(keyword);
-    return needle.length > 0 && folded.includes(needle);
+    return needle.length > 0 && containsWords(folded, needle);
   }) ?? null;
 }
 

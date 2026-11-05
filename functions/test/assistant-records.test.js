@@ -178,7 +178,7 @@ test("skip keywords pass the app's shared parity cases", () => {
   // Copied from the app repo's ios/Tests/ParityFixtures/alarm-parity-v2.json (kind skipKeyword).
   const cases = [
     [["LUNCH"], "team lunch", "LUNCH"],
-    [["art"], "Quarterly party", "art"],
+    [["art"], "Quarterly party", null],
     [["gym", "lunch"], "Lunch at the gym", "gym"],
     [["gym"], "Standup", null],
     [["focus time"], "Focus \u00a0  time", "focus time"],
@@ -189,6 +189,21 @@ test("skip keywords pass the app's shared parity cases", () => {
     [["lunch"], "Lu\u200bnch\u200f", "lunch"],
     [["\u6607\u9032"], "\u5b9a\u4f8b\u4f1a\u8b70 \u6607\u9032\u9762\u8ac7", "\u6607\u9032"],
     [[], "Lunch", null],
+    [["Lunch"], "Lunches with the team", null],
+    [["lunch"], "Lunch, with Alex", "lunch"],
+    [["a"], "Planning", null],
+    [["a"], "Plan a trip", "a"],
+    [["focus  time"], "Focus time today", "focus  time"],
+    [["focus time"], "Focus timeline", null],
+    [["stand"], "Daily stand-up", "stand"],
+    [["alex"], "Alex's 1:1", "alex"],
+    [["standup"], "standup2 sync", null],
+    [["C++"], "C++20 review", "C++"],
+    [["\u4f1a\u8b70"], "\u5b9a\u4f8b\u4f1a\u8b70", "\u4f1a\u8b70"],
+    [["mtg"], "\u5b9a\u4f8bMTG", "mtg"],
+    [["mtg"], "MTGs", null],
+    [["\u0e1b\u0e23\u0e30\u0e0a\u0e38\u0e21"], "\u0e1b\u0e23\u0e30\u0e0a\u0e38\u0e21\u0e17\u0e35\u0e21", "\u0e1b\u0e23\u0e30\u0e0a\u0e38\u0e21"],
+    [["\ud68c\uc758"], "\ud68c\uc758\ub294 3\uc2dc", "\ud68c\uc758"],
   ];
   for (const [keywords, title, match] of cases) assert.equal(firstSkipMatch(title, keywords), match, title);
   assert.deepEqual(tidySkipKeywords(["  ", "  Lunch  now ", "LUNCH NOW", "x".repeat(61), "\u200b"]), ["Lunch now"]);
