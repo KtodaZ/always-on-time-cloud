@@ -33,6 +33,8 @@ export const FAILURE_BACKOFF_MAX_MS = 30 * MINUTE_MS;
 export const RING_END_MARGIN_MS = 20 * 1000;
 /** A ring end not sent within this long after it was due is dropped (the phone also checks on every wake). */
 export const RING_END_WINDOW_MS = HOUR_MS;
+/** A notice-end wake waits for a ring end due within this long after it (a 5-minute ring included). */
+export const NOTICE_END_RING_END_WAIT_MS = 5 * MINUTE_MS;
 /** Longest ring time the relay accepts, as Android's `alarm_duration_seconds` (0 = until dismissed). */
 export const MAX_RING_SECONDS = 86400;
 /** A notice end not sent within this long after it was due is dropped (any later wake takes the notice down too). */
@@ -367,15 +369,26 @@ function nextRingEndAt(install: InstallState, nowMs: number): number | null {
 
 // --- Notice ends -------------------------------------------------------------------------------
 
-/**
- * When the wake for the phone's upcoming notice goes out (`noticeEndsAt` + margin), or null when
- * none is open: nothing stored, already covered, or past its window.
- */
-function openNoticeEndWakeAt(install: InstallState, nowMs: number): number | null {
+/** When the notice has gone stale (`noticeEndsAt` + margin), or null when no wake is open. */
+function noticeStaleAt(install: InstallState, nowMs: number): number | null {
   const endsAt = install.noticeEndsAt ?? null;
   if (endsAt === null || (install.noticeEndSentAt ?? null) !== null) return null;
-  const wakeAt = endsAt + RING_END_MARGIN_MS;
-  return nowMs < wakeAt + NOTICE_END_WINDOW_MS ? wakeAt : null;
+  const staleAt = endsAt + RING_END_MARGIN_MS;
+  return nowMs < staleAt + NOTICE_END_WINDOW_MS ? staleAt : null;
+}
+
+/**
+ * When the wake for the phone's upcoming notice goes out, or null when none is open. A ring end
+ * due soon after waits it out instead: that push wakes the phone too and covers the notice, and
+ * an alarm at the meeting's start would otherwise cost two full syncs a minute apart.
+ */
+function openNoticeEndWakeAt(install: InstallState, nowMs: number): number | null {
+  const staleAt = noticeStaleAt(install, nowMs);
+  if (staleAt === null) return null;
+  const ringEnds = openRingEnds(install, nowMs)
+    .map(({ wakeAt }) => wakeAt)
+    .filter((wakeAt) => wakeAt >= staleAt && wakeAt <= staleAt + NOTICE_END_RING_END_WAIT_MS);
+  return ringEnds.length > 0 ? Math.min(...ringEnds) : staleAt;
 }
 
 /** True when the notice-end wake is due now and no push has covered it. */
@@ -390,7 +403,8 @@ export function isNoticeEndDue(install: InstallState, nowMs: number): boolean {
  * iPhone whose clock runs behind before the meeting has started there.
  */
 export function noticeEndCoveredByPush(install: InstallState, sentAt: number): boolean {
-  return isNoticeEndDue(install, sentAt);
+  const staleAt = noticeStaleAt(install, sentAt);
+  return staleAt !== null && staleAt <= sentAt;
 }
 
 /** When the next notice-end wake may go out (normal coalescing applies), or null. */

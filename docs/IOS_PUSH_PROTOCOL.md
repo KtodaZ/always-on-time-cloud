@@ -404,7 +404,8 @@ NSE handling rules:
    that does not know the kind treats it as a plain sync (rule 4), which does the same.
 4. Unknown `aot.v` or `kind`, or a missing `aot`: treat as a plain sync.
 5. Every push replaces the previous notification via the shared collapse ID and is passive, so
-   the user sees one quiet entry. The NSE may rewrite the title/body but must deliver a
+   the user sees one quiet entry at most; the app removes it on opening and does not list one
+   arriving while it is open. The NSE may rewrite the title/body but must deliver a
    notification. Assistant pushes without an alert of their own
    ([assistant protocol](ASSISTANT_PROTOCOL.md#push-messages)) use the same `aot-sync` collapse ID,
    so relay and assistant syncs share that one entry.
@@ -423,7 +424,7 @@ and its last reported sync (3.6).
 | `precheck` (stages) | `polling: false` | at T-20 and T-8 for each alarm, a safety net for silently dead provider channels. Not limited by active hours. | 10 |
 | `heartbeat` | `polling: true` only | 60 minutes after the freshness point (or registration), inside active hours | 5 |
 | `ringEnd` | `ringSeconds` > 0 | for each armed trigger T, at T + `ringSeconds` + 20 s, unless a push accepted at or after T + `ringSeconds` + 20 s already covered it. Not limited by active hours or the 2-minute coalescing. Dropped one hour after it was due. | 10 |
-| `noticeEnd` | sent `noticeEndsAtMs` | at `noticeEndsAtMs` + 20 s, once for a given value, unless a push accepted at or after that time already covered it. Not limited by active hours; the 2-minute coalescing applies. Dropped one hour after it was due. | 10 |
+| `noticeEnd` | sent `noticeEndsAtMs` | at `noticeEndsAtMs` + 20 s, once for a given value, unless a push accepted at or after that time already covered it. A `ringEnd` due within the next 5 minutes goes instead and covers it. Not limited by active hours; the 2-minute coalescing applies. Dropped one hour after it was due. | 10 |
 
 Rules shared by all kinds:
 

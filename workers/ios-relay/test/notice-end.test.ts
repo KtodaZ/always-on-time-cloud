@@ -296,4 +296,23 @@ describe("notice-end planning", () => {
     expect(planPush(base({ ...receipt, lastPushAt: null }), [], wake)?.kind).toBe("noticeEnd");
     expect(planPush(base({ ...receipt, lastPushAt: null }), [], wake)?.burst).toBe(false);
   });
+
+  it("wait for a ring end due soon after, so an alarm at the start costs one push", async () => {
+    const h = await registered({ freshness: { ...FRESHNESS, ringSeconds: 60 } });
+    const start = h.now() + 30 * MINUTE;
+    expect((await putSnapshot(h, { alarms: [{ id: "a", triggerAtMs: start }], noticeEndsAtMs: start })).status).toBe(204);
+    await runUntil(h, start + 10 * MINUTE);
+    expect(noticeEnds(h)).toEqual([]);
+    const ringEnds = h.apns.filter((call) => call.body.aot.kind === "ringEnd");
+    expect(ringEnds.map((call) => call.body.aot.at)).toEqual([start + 60 * 1000 + RING_END_MARGIN_MS]);
+    expect(h.apns.filter((call) => call.body.aot.at > start)).toHaveLength(1);
+  });
+
+  it("do not wait for a ring end long after, or one before the start", async () => {
+    const h = await registered({ freshness: { ...FRESHNESS, ringSeconds: 600 } });
+    const start = h.now() + 30 * MINUTE;
+    expect((await putSnapshot(h, { alarms: [{ id: "a", triggerAtMs: start }], noticeEndsAtMs: start })).status).toBe(204);
+    await runUntil(h, start + 2 * MINUTE);
+    expect(noticeEnds(h)).toEqual([start + RING_END_MARGIN_MS]);
+  });
 });
