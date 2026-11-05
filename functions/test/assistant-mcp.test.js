@@ -403,10 +403,14 @@ test("explain_alarm gives the keyword as the reason, and the title is only quote
   });
 });
 
+const accountSkipList = (db, keywords) =>
+  db.documents.set("accounts/alice/values/p_skip_event_keywords", { payload: JSON.stringify(JSON.stringify(keywords)) });
+
 test("setting alarms past a keyword marks the exception, and reset says the keyword applies again", async () => {
   const { db, handler, token, phoneState } = setup({ payload: keywordPhone });
   phoneState.skipKeywords = ["Lunch"];
   phoneState.extraEvents = [lunchEvent];
+  accountSkipList(db, ["Lunch"]);
   await withServer(handler, async ({ call }) => {
     const one = await call(token, "set_event_alarms", { event: LUNCH, leadTimes: [10] });
     assert.match(one.text, /also marks it to ring anyway/);
@@ -417,6 +421,35 @@ test("setting alarms past a keyword marks the exception, and reset says the keyw
     const reset = await call(token, "set_event_alarms", { event: LUNCH, mode: "reset" });
     assert.match(reset.text, /on the skip list, so its alarms stay off/);
     assert.equal(db.documents.get(`accounts/alice/values/${LUNCH}`).payload, "null");
+  });
+});
+
+test("the exception follows the account's skip list, not a stale or older phone's snapshot", async () => {
+  // The snapshot predates "Lunch" joining the list (or the phone is too old to report it).
+  const stale = { ...lunchEvent, skippedByKeyword: undefined };
+  const { db, handler, token, phoneState } = setup({ payload: () => snapshotPayload({ extraEvents: [stale] }) });
+  phoneState.extraEvents = [stale];
+  accountSkipList(db, ["lunch"]);
+  await withServer(handler, async ({ call }) => {
+    const one = await call(token, "set_event_alarms", { event: LUNCH, leadTimes: [10] });
+    assert.equal(db.documents.get(`accounts/alice/values/${LUNCH}`).payload, '{"leadTimes":[10],"enabled":true,"keywordExempt":true}');
+    assert.match(one.text, /contains "lunch", which is on the skip list/);
+    const reset = await call(token, "set_series_alarms", { event: LUNCH, mode: "reset" });
+    assert.match(reset.text, /so its alarms stay off/);
+    // The list doesn't count as part of the change.
+    assert.equal(db.documents.get("accounts/alice/values/p_skip_event_keywords").payload, JSON.stringify('["lunch"]'));
+  });
+});
+
+test("a keyword the account no longer lists adds no exception, whatever the snapshot says", async () => {
+  const { db, handler, token, phoneState } = setup({ payload: keywordPhone });
+  phoneState.skipKeywords = ["Lunch"];
+  phoneState.extraEvents = [lunchEvent];
+  accountSkipList(db, []);
+  await withServer(handler, async ({ call }) => {
+    const one = await call(token, "set_event_alarms", { event: LUNCH, leadTimes: [10] });
+    assert.equal(db.documents.get(`accounts/alice/values/${LUNCH}`).payload, '{"leadTimes":[10],"enabled":true}');
+    assert.doesNotMatch(one.text, /skip list/);
   });
 });
 

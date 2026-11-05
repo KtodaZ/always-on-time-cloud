@@ -11,7 +11,7 @@ const {
 } = require("./assistant-data");
 const { deviceName } = require("./assistant-push");
 const {
-  PAUSED_UNTIL, RecordError, SKIP_KEYWORDS, firstSkipMatch, isRecordId, samePayload, validatePayload,
+  PAUSED_UNTIL, RecordError, SKIP_KEYWORDS, decodeSkipKeywords, firstSkipMatch, isRecordId, samePayload, validatePayload,
 } = require("./assistant-records");
 const {
   RSVP_FILTER_VALUES, SETTINGS, leadTimesInput, leadTimesText, parseStored, tidyLeadTimes,
@@ -70,20 +70,27 @@ function nextOverride(stored, mode, leadTimes, currentLeadTimes) {
   return next;
 }
 
+/** The account's skip list record, read with every event or series change. */
+const SKIP_RECORD = `p_${SKIP_KEYWORDS}`;
+
+/**
+ * The skip keyword in `title` on the account's list as the change reads it, or null. The account's
+ * list is the truth: the latest snapshot can predate a list change, or come from a phone too old
+ * to report keywords at all.
+ */
+const accountSkipMatch = (current, title) => (title ? firstSkipMatch(title, decodeSkipKeywords(parseStored(current[SKIP_RECORD]))) : null);
+
 /**
  * Turning alarms on for an event a skip keyword holds off marks it as an exception, which is what
  * makes the on stick. Without the mark the keyword would keep it quiet.
  */
-const pastKeyword = (override, mode, sample) => (mode === "set" && sample?.skippedByKeyword ? { ...override, keywordExempt: true } : override);
+const pastKeyword = (override, mode, keyword) => (mode === "set" && keyword ? { ...override, keywordExempt: true } : override);
 
 /** What to say about a skip keyword after a change to an event or series. */
-function keywordNote(mode, sample, snapshot) {
-  if (!sample) return "";
-  if (mode === "set" && sample.skippedByKeyword) return ` Its title contains ${quoted(sample.skippedByKeyword)}, which is on the skip list, so this also marks it to ring anyway.`;
-  if (mode === "reset") {
-    const keyword = firstSkipMatch(sample.title, snapshot?.skipKeywords ?? []);
-    if (keyword) return ` Its title contains ${quoted(keyword)}, which is on the skip list, so its alarms stay off.`;
-  }
+function keywordNote(mode, keyword) {
+  if (!keyword) return "";
+  if (mode === "set") return ` Its title contains ${quoted(keyword)}, which is on the skip list, so this also marks it to ring anyway.`;
+  if (mode === "reset") return ` Its title contains ${quoted(keyword)}, which is on the skip list, so its alarms stay off.`;
   return "";
 }
 
@@ -113,15 +120,19 @@ const TOOLS = [
       if (event && event.start <= ctx.now()) throw new ToolError("That event has already started, so its alarms can't change.");
       const leadTimes = args.leadTimes ? tidyLeadTimes(args.leadTimes) : null;
       const label = event ? `${quoted(event.title)} (${formatTime(event.start, snapshot.timeZone)})` : "that event";
+      let keyword = null;
       return {
-        recordIds: [resolved.eventKey],
+        recordIds: [resolved.eventKey, SKIP_RECORD],
         summary: mode === "set" ? `Set ${label} to ring ${leadTimesText(leadTimes)}`
           : mode === "off" ? `Turned off alarms for ${label}` : `Reset ${label} to follow its usual settings`,
-        build: (current) => ({
-          [resolved.eventKey]: pastKeyword(nextOverride(parseStored(current[resolved.eventKey]), mode, leadTimes, currentLeadMinutes(event)), mode, event),
-        }),
+        build: (current) => {
+          keyword = accountSkipMatch(current, event?.title);
+          return {
+            [resolved.eventKey]: pastKeyword(nextOverride(parseStored(current[resolved.eventKey]), mode, leadTimes, currentLeadMinutes(event)), mode, keyword),
+          };
+        },
         finish: (out) => {
-          out.text += keywordNote(mode, event, snapshot);
+          out.text += keywordNote(mode, keyword);
           if (!event) out.text += " That event isn't in what the phone shared yet, so it applies once the phone sees it.";
           out.data.eventKey = resolved.eventKey;
         },
@@ -149,15 +160,19 @@ const TOOLS = [
       const sample = resolved.event ?? snapshot?.events.find((item) => item.seriesKey === resolved.seriesKey) ?? null;
       const leadTimes = args.leadTimes ? tidyLeadTimes(args.leadTimes) : null;
       const label = sample ? `every ${quoted(sample.title)}` : "that recurring event";
+      let keyword = null;
       return {
-        recordIds: [resolved.seriesKey],
+        recordIds: [resolved.seriesKey, SKIP_RECORD],
         summary: mode === "set" ? `Set ${label} to ring ${leadTimesText(leadTimes)}`
           : mode === "off" ? `Turned off alarms for ${label}` : `Reset ${label} to follow its calendar's settings`,
-        build: (current) => ({
-          [resolved.seriesKey]: pastKeyword(nextOverride(parseStored(current[resolved.seriesKey]), mode, leadTimes, currentLeadMinutes(sample)), mode, sample),
-        }),
+        build: (current) => {
+          keyword = accountSkipMatch(current, sample?.title);
+          return {
+            [resolved.seriesKey]: pastKeyword(nextOverride(parseStored(current[resolved.seriesKey]), mode, leadTimes, currentLeadMinutes(sample)), mode, keyword),
+          };
+        },
         finish: (out) => {
-          out.text += keywordNote(mode, sample, snapshot);
+          out.text += keywordNote(mode, keyword);
           out.data.seriesKey = resolved.seriesKey;
         },
       };
