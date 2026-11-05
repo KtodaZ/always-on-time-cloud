@@ -52,6 +52,18 @@ const fs = require('node:fs');
       await assertFails(deleteDoc(doc(alice, `accounts/alice/values/${id}`)));
     }
     await assertFails(deleteDoc(doc(alice, 'accounts/alice')));
+    // Early adopter lock: claimed once by the account's owner, with the server's time.
+    const lock = 'accounts/alice/offers/earlyAdopter';
+    await assertFails(setDoc(doc(bob, lock), { schemaVersion: 1, lockedAt: serverTimestamp() }));
+    await assertFails(setDoc(doc(aliceWithoutGoogle, lock), { schemaVersion: 1, lockedAt: serverTimestamp() }));
+    await assertFails(setDoc(doc(alice, lock), { schemaVersion: 1, lockedAt: new Date(0) }));
+    await assertFails(setDoc(doc(alice, lock), { schemaVersion: 1, lockedAt: serverTimestamp(), rate: 1 }));
+    await assertFails(setDoc(doc(alice, 'accounts/alice/offers/other'), { schemaVersion: 1, lockedAt: serverTimestamp() }));
+    await assertSucceeds(setDoc(doc(alice, lock), { schemaVersion: 1, lockedAt: serverTimestamp() }));
+    await assertSucceeds(getDoc(doc(alice, lock)));
+    await assertFails(getDoc(doc(bob, lock)));
+    await assertFails(setDoc(doc(alice, lock), { schemaVersion: 1, lockedAt: serverTimestamp() }));
+    await assertFails(deleteDoc(doc(alice, lock)));
     const keptForTombstone = `e_${'2'.repeat(64)}`;
     await assertSucceeds(setDoc(doc(alice, `accounts/alice/values/${keptForTombstone}`), { payload: 'null' }));
     const record = 'a'.repeat(64);
@@ -62,6 +74,7 @@ const fs = require('node:fs');
       await setDoc(doc(context.firestore(), 'accounts/alice'), { active: false, schemaVersion: 1 });
     });
     await assertFails(setDoc(doc(alice, 'accounts/alice/values/p_alarm_volume'), { payload: '60' }));
+    await assertFails(getDoc(doc(alice, lock)));
     await assertFails(setDoc(doc(alice, 'accounts/alice'), { active: true, schemaVersion: 1 }));
     // Once deletion has started (or the account is gone), phones can't delete records either.
     await assertFails(deleteDoc(doc(alice, `accounts/alice/values/${keptForTombstone}`)));

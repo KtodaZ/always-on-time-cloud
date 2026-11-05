@@ -114,6 +114,7 @@ test('history pruning uses fourteen-day cutoff and batches until empty', async (
 test('deletion revokes assistant access before deleting synced data', async () => {
   const db = new FakeFirestore();
   db.documents.set('accounts/user', { active: true, schemaVersion: 1 });
+  db.documents.set('accounts/user/offers/earlyAdopter', { schemaVersion: 1, lockedAt: 1 });
   db.documents.set('accounts/user/values/p_alarm_volume', { payload: '50' });
   db.documents.set('oauthGrants/g1', { uid: 'user', clientId: 'c' });
   db.documents.set('oauthTokens/t1', { grantId: 'g1', uid: 'user' });
@@ -127,6 +128,7 @@ test('deletion revokes assistant access before deleting synced data', async () =
   };
   await deleteAccountData(db, { deleteUser: async () => {} }, 'user');
   assert.equal(db.documents.has('accounts/user/values/p_alarm_volume'), false);
+  assert.equal(db.documents.has('accounts/user/offers/earlyAdopter'), false);
 });
 
 test('a deletion that stopped partway is finished later, and an already deleted identity is fine', async () => {

@@ -79,6 +79,7 @@ async function finishAccountDeletion(db, auth, uid) {
   await deleteConnectorData(db, uid);
   await db.recursiveDelete(root.collection('values'));
   await db.recursiveDelete(root.collection('history'));
+  await db.recursiveDelete(root.collection('offers'));
   // assistant/state and assistant/log: removing the logId leaves the connector's request logs
   // (which name the account only by it) with nothing that ties them to this account.
   await db.recursiveDelete(root.collection('assistant'));
