@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { canonicalJson } from "../live-state.mjs";
 import {
   DEPLOY_ACCOUNT, attestationCommit, classifyAuditEntry, compareDirectory, deployStep, describePrincipal, expectedHostingPaths,
-  newestHostingDeploy, servingConfig,
+  newestHostingDeploy, reviewedAuditChange, servingConfig,
 } from "../verify-live.mjs";
 
 const entry = (methodName, principalEmail, extra = {}) => ({ protoPayload: {
@@ -70,6 +70,55 @@ test("changes to who can deploy are failures", () => {
     { action: "ADD", role: "roles/iam.serviceAccountTokenCreator", member: "user:attacker@example.com" }] } } })), "deploy");
   assert.equal(classifyAuditEntry(entry("google.iam.admin.v1.SetIAMPolicy", person,
     { resourceName: "projects/-/serviceAccounts/113881711650884068808" })), "deploy");
+});
+
+test("only the two exact reviewed dashboard lifecycle events are acknowledged and remain visible", () => {
+  const historical = [
+    { timestamp: "2026-10-23T15:53:52.240414640Z", insertId: "kjl90zep1zq2",
+      method: "CreateServiceAccount", resource: "projects/always-on-time-zombit-2026" },
+    { timestamp: "2026-10-23T17:13:33.578223567Z", insertId: "gnlrrwf1r0zhe",
+      method: "DeleteServiceAccount", resource: "projects/-/serviceAccounts/105645861818873752394" },
+  ].map(({ timestamp, insertId, method, resource }) => ({
+    timestamp, insertId, logName: "projects/always-on-time-zombit-2026/logs/cloudaudit.googleapis.com%2Factivity",
+    ...entry(`google.iam.admin.v1.${method}`, person, {
+      serviceName: "iam.googleapis.com", resourceName: resource, status: {},
+    }),
+  }));
+  for (const original of historical) {
+    assert.equal(classifyAuditEntry(original), "reviewed");
+    assert.match(reviewedAuditChange(original), /Reviewed: temporary dashboard reader/);
+    // Reusing the account, resource or method at any other time must still fail. Missing
+    // or changed event identity must never widen this historical acknowledgement.
+    for (const field of ["timestamp", "insertId", "logName"]) {
+      for (const value of [undefined, "different"]) {
+        const changed = { ...original, [field]: value };
+        assert.equal(classifyAuditEntry(changed), "deploy", field);
+        assert.equal(reviewedAuditChange(changed), undefined, field);
+      }
+    }
+    for (const patch of [
+      { serviceName: "another.googleapis.com" }, { serviceName: undefined },
+      { resourceName: "projects/-/serviceAccounts/113881711650884068808" },
+      { resourceName: undefined }, { status: { code: 7 } },
+      { methodName: "google.iam.admin.v1.UndeleteServiceAccount" },
+      { methodName: "google.iam.admin.v1.CreateServiceAccountKey" },
+    ]) {
+      const changed = { ...original, protoPayload: { ...original.protoPayload, ...patch } };
+      assert.equal(classifyAuditEntry(changed), "deploy", JSON.stringify(patch));
+      assert.equal(reviewedAuditChange(changed), undefined);
+    }
+  }
+});
+
+test("new service account lifecycle changes still fail for users and CI", () => {
+  for (const method of ["CreateServiceAccount", "DeleteServiceAccount", "UndeleteServiceAccount"]) {
+    for (const principalEmail of [person, DEPLOY_ACCOUNT]) {
+      assert.equal(classifyAuditEntry(entry(`google.iam.admin.v1.${method}`, principalEmail, {
+        authenticationInfo: { principalEmail, ...ciDelegation },
+        resourceName: "projects/-/serviceAccounts/105645861818873752394",
+      })), "deploy");
+    }
+  }
 });
 
 test("look-alike service agents are not trusted", () => {
