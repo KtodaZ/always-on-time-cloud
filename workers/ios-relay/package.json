@@ -11,9 +11,9 @@
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.4.9",
+    "@cloudflare/vitest-plugin": "^1.5.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.5",
+    "vitest": "^5.1.0",
     "wrangler": "^4.152.0"
   },
   "allowScripts": {
