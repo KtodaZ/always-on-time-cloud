@@ -84,6 +84,14 @@ It also lists other changes made outside CI, such as secret rotation or enabling
 naming people. Any hosting change in the audit log other than a custom domain change counts as a deploy,
 but hosting releases have not been seen there, so hosting relies mainly on the signature check.
 
+Reviewed historical audit events remain visible with a **Reviewed** label and a reason, rather
+than failing every subsequent verification. Each record matches the original project log, event
+ID, timestamp, IAM service, method, resource and successful status; it never exempts an account
+or a method from future checks. The two records reviewed on 2026-11-06 are the creation and
+deletion of a temporary dashboard reader on 2026-10-23. Its grants were removed before deletion,
+and the account was confirmed absent. Monitoring still starts at the original date, and all
+other identity/trust changes and artifact checks retain their existing behavior.
+
 You can check a file yourself with the GitHub CLI. For example, the account deletion page:
 
 ```sh

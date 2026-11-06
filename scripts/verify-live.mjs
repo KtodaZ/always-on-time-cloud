@@ -62,6 +62,31 @@ const DEPLOY_METHODS = [
 ];
 // Changes to who can deploy: new identity trust, keys, or roles that allow impersonation.
 const TRUST_METHODS = /WorkloadIdentityPool|ServiceAccountKey|CreateServiceAccount$|DeleteServiceAccount$|UndeleteServiceAccount$/;
+// Reviewed historical events, not an exemption for an account or method. On 2026-10-23 a
+// temporary dashboard reader was created, its grants removed, and the account deleted. The
+// original audit entries and the account's absence were checked on 2026-11-06. Keep these
+// events visible while still failing every new identity/trust change, including for this name.
+const REVIEWED_AUDIT_CHANGES = [
+  {
+    timestamp: "2026-10-23T15:53:52.240414640Z", insertId: "kjl90zep1zq2",
+    method: "google.iam.admin.v1.CreateServiceAccount", resource: `projects/${PROJECT}`,
+    reason: "Reviewed: temporary dashboard reader created; grants later removed and account deleted.",
+  },
+  {
+    timestamp: "2026-10-23T17:13:33.578223567Z", insertId: "gnlrrwf1r0zhe",
+    method: "google.iam.admin.v1.DeleteServiceAccount", resource: "projects/-/serviceAccounts/105645861818873752394",
+    reason: "Reviewed: temporary dashboard reader deleted after its grants were removed.",
+  },
+];
+
+export function reviewedAuditChange(entry) {
+  const p = entry.protoPayload ?? {};
+  if (entry.logName !== `projects/${PROJECT}/logs/cloudaudit.googleapis.com%2Factivity` ||
+      p.serviceName !== "iam.googleapis.com" || (p.status?.code ?? 0) !== 0) return undefined;
+  return REVIEWED_AUDIT_CHANGES.find((change) => change.timestamp === entry.timestamp &&
+    change.insertId === entry.insertId && change.method === p.methodName && change.resource === p.resourceName)?.reason;
+}
+
 const TRUST_ROLES = new Set([
   "roles/owner", "roles/editor", "roles/iam.serviceAccountTokenCreator", "roles/iam.serviceAccountUser",
   "roles/iam.workloadIdentityUser", "roles/iam.serviceAccountKeyAdmin", "roles/iam.serviceAccountAdmin",
@@ -93,7 +118,8 @@ function grantsTrust(payload) {
 
 /**
  * Sorts an Admin Activity entry into `deploy` (a failure: code or deploy trust changed outside CI),
- * `config` (another change outside CI, listed), or null (expected or read-only).
+ * `reviewed` (an exact historical event reviewed and still listed), `config` (another change
+ * outside CI, listed), or null (expected or read-only).
  */
 export function classifyAuditEntry(entry) {
   const payload = entry.protoPayload ?? {};
@@ -103,6 +129,7 @@ export function classifyAuditEntry(entry) {
   const principal = auth.principalEmail ?? "";
   const resource = payload.resourceName ?? "";
   if (IGNORED_METHODS.test(method) || SERVICE_AGENT.test(principal)) return null;
+  if (reviewedAuditChange(entry)) return "reviewed";
   // Changing who can deploy is never part of a deploy, so it fails even when CI does it.
   if (TRUST_METHODS.test(method)) return "deploy";
   if (/SetI[Aa][Mm]Policy$/.test(method) &&
@@ -422,14 +449,15 @@ async function main() {
     if (deploys.length) failed = true;
     const line = ({ entry, kind }) => {
       const p = entry.protoPayload;
-      return `| ${kind === "deploy" ? "❌" : ""} | ${entry.timestamp} | \`${p.methodName}\` | ` +
-        `\`${(p.resourceName ?? "").split("/").slice(-2).join("/")}\` | ${describePrincipal(p.authenticationInfo?.principalEmail)} |`;
+      return `| ${kind === "deploy" ? "❌" : kind === "reviewed" ? "Reviewed" : ""} | ${entry.timestamp} | \`${p.methodName}\` | ` +
+        `\`${(p.resourceName ?? "").split("/").slice(-2).join("/")}\` | ${describePrincipal(p.authenticationInfo?.principalEmail)} | ${reviewedAuditChange(entry) ?? ""} |`;
     };
     report.push(`### Changes outside the Deploy workflow since ${MONITORING_STARTS}`, "");
     if (!findings.length) report.push("None.", "");
     else {
-      report.push("| | Time | Change | Resource | By |", "| --- | --- | --- | --- | --- |", ...findings.map(line), "",
+      report.push("| | Time | Change | Resource | By | Review |", "| --- | --- | --- | --- | --- | --- |", ...findings.map(line), "",
         "❌ marks a change to live code, settings, rules, indexes or hosting, or to who can deploy, made outside CI. " +
+        "Reviewed rows identify exact historical events acknowledged after investigation; new occurrences still fail. " +
         "Other rows are configuration changes (for example secret rotation) listed for transparency.", "");
     }
   } catch (error) {
