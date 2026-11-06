@@ -63,6 +63,7 @@ function eventView(event, snapshot) {
     recurring: event.recurring,
     rsvp: event.rsvp,
     alarms: event.alarms.map((alarm) => alarmView(alarm, snapshot)),
+    ...(event.skippedByKeyword ? { skippedByKeyword: event.skippedByKeyword } : {}),
   };
 }
 
@@ -167,7 +168,8 @@ const TOOLS = [
         lines.push(`${plural(matches.length, "matching event")}${matches.length > shown.length ? ` (first ${MAX_EVENTS} shown)` : ""}:`);
         for (const event of shown) {
           const on = event.alarms.filter((alarm) => alarm.status === "on" || alarm.status === "paused");
-          const alarmText = on.length ? `rings ${on.map(alarmDescription).join(", ")}` : "no alarms";
+          const alarmText = event.skippedByKeyword ? `alarms off: the title contains ${quoted(event.skippedByKeyword)}`
+            : on.length ? `rings ${on.map(alarmDescription).join(", ")}` : "no alarms";
           const calendar = calendarName(snapshot, event.calendarKey);
           lines.push(`- ${quoted(event.title)}: ${formatTime(event.start, snapshot.timeZone)}${calendar ? `, ${quoted(calendar)}` : ""}${event.recurring ? ", repeats" : ""}; ${alarmText}${keyNote(event)}`);
         }
@@ -204,9 +206,12 @@ const TOOLS = [
       if (!event.alarms.length) {
         lines.push("It has no alarms: its settings leave no lead times. Use set_event_alarms or set_series_alarms to add some.");
       }
+      if (event.skippedByKeyword) {
+        lines.push(`Its alarms are off because the title contains ${quoted(event.skippedByKeyword)}, which is on the "Skip events containing" list. set_event_alarms or set_series_alarms with mode "set" makes it ring anyway; removing the word with update_settings brings back every event it turned off.`);
+      }
       for (const alarm of event.alarms) {
         const source = alarm.source === "calendar" && calendar ? `the ${quoted(calendar)} calendar's lead times` : SOURCE_TEXT[alarm.source] ?? "the app";
-        const status = alarm.status === "off" ? "; turned off for this event"
+        const status = alarm.status === "off" ? (event.skippedByKeyword ? "; off because of the skip list" : "; turned off for this event")
           : alarm.status === "paused" ? `; paused (alarms are ${describePause(snapshot.paused.until, snapshot.timeZone)})`
             : alarm.status === "past" ? "; already passed" : "";
         lines.push(`- ${formatTime(alarm.at, snapshot.timeZone, { timeOnly: true })}: ${alarmDescription(alarm)}, from ${source}${status}.`);
@@ -278,7 +283,7 @@ const TOOLS = [
         if (stored === null) continue;
         const shown = setting.decode ? setting.decode(stored) : stored;
         settings[field] = shown;
-        lines.push(`- ${setting.label}: ${Array.isArray(shown) ? leadTimesText(tidyLeadTimes(shown)) : typeof shown === "string" ? cleanText(shown) : shown}`);
+        lines.push(`- ${setting.label}: ${setting.describe ? setting.describe(shown) : Array.isArray(shown) ? leadTimesText(tidyLeadTimes(shown)) : typeof shown === "string" ? cleanText(shown) : shown}`);
       }
       const paused = parseStored(values[`p_${PAUSED_UNTIL}`]);
       if (paused !== null) settings.alarmsPausedUntil = paused;

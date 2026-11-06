@@ -118,7 +118,7 @@ parameter (RFC 9207).
 | `update_settings` | App-wide settings |
 | `pause_alarms` / `resume_alarms` | Pause every alarm until a time or until resumed |
 | `undo` | Reverses an earlier change from the last 30 days unless those settings changed since |
-| `confirm_change` | Waits for the phones to apply a change and reports which did |
+| `confirm_change` | Waits for the phones to apply a change and reports which did (`confirmed`, `partial`, `pending`; `needs_update` when a skip-list change reached only phones too old to use it) |
 | `test_connection` | Setup check: sends a test notification to each phone and reports which received it |
 | `refresh` | Asks the phones for a fresh snapshot and waits for it |
 | `open_in_app` | A link that opens a screen of the app (sounds, permissions, Plus and so on) |

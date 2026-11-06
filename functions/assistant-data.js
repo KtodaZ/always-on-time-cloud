@@ -165,11 +165,20 @@ const APPLIED_THROUGH = /"valuesAppliedThrough"\s*:\s*(\d{1,16})\s*[,}]/;
  * null when the snapshot is gone or its payload is unreadable.
  */
 async function readAppliedThrough(db, uid, deviceId) {
+  return (await readAppliedState(db, uid, deviceId))?.appliedThrough ?? null;
+}
+
+// The payload's top-level "skipKeywords" list, found the same way. Phones that know the skip list
+// always send it, even empty.
+const SKIP_KEYWORDS_LIST = /"skipKeywords"\s*:\s*\[/;
+
+/** readAppliedThrough plus whether the phone's app knows the skip list, or null without a snapshot. */
+async function readAppliedState(db, uid, deviceId) {
   const doc = await refs.snapshots(db, uid).doc(deviceId).get();
   const text = doc.exists ? doc.data().payload : null;
   if (typeof text !== "string" || text.length > MAX_SNAPSHOT_CHARS) return null;
   const match = APPLIED_THROUGH.exec(text);
-  return match ? Number(match[1]) : 0;
+  return { appliedThrough: match ? Number(match[1]) : 0, knowsSkipKeywords: SKIP_KEYWORDS_LIST.test(text) };
 }
 
 /** Current payload strings for the given record ids (missing documents are null). */
@@ -309,6 +318,7 @@ module.exports = {
   isChangeId,
   parseSnapshotPayload,
   randomId,
+  readAppliedState,
   readAppliedThrough,
   readDevices,
   readLatestSnapshot,

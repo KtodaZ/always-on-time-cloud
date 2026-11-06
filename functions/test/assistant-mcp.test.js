@@ -39,8 +39,9 @@ const TOOL_NAMES = [
   "confirm_change", "test_connection", "refresh", "open_in_app",
 ];
 
-function snapshotPayload({ appliedThrough = T0 - HOUR } = {}) {
+function snapshotPayload({ appliedThrough = T0 - HOUR, skipKeywords, extraEvents = [] } = {}) {
   return JSON.stringify({
+    ...(skipKeywords ? { skipKeywords } : {}),
     device: "Pixel 9",
     timeZone: "America/Los_Angeles",
     valuesAppliedThrough: appliedThrough,
@@ -56,6 +57,7 @@ function snapshotPayload({ appliedThrough = T0 - HOUR } = {}) {
         alarms: [{ at: DENTIST_START - 30 * 60000, kind: "lead", minutes: 30, source: "event", status: "on" }, { at: DENTIST_START - 50 * 60000, kind: "travel", minutes: 0, source: "travel", status: "on" }] },
       { eventKey: STANDUP, seriesKey: STANDUP_SERIES, calendarKey: WORK, title: "Team standup", start: STANDUP_START, end: STANDUP_START + 15 * 60000, allDay: false, recurring: true, rsvp: "ACCEPTED",
         alarms: [{ at: STANDUP_START - 10 * 60000, kind: "lead", minutes: 10, source: "series", status: "on" }, { at: STANDUP_START, kind: "lead", minutes: 0, source: "series", status: "on" }] },
+      ...extraEvents,
       { eventKey: null, seriesKey: null, calendarKey: null, title: "Mom's birthday", start: T0 + 2 * HOUR, allDay: true, recurring: true,
         alarms: [{ at: T0 + 2 * HOUR, kind: "lead", minutes: 0, source: "app", status: "off" }] },
     ],
@@ -83,10 +85,10 @@ function setup({ scopes = ["alarms.read", "alarms.write"], phone = true, capabil
         // Like the real phone: the greatest updatedAt among the values it pulled and applied.
         const updated = [...db.documents].filter(([path]) => path.startsWith("accounts/alice/values/"))
           .map(([, doc]) => doc.updatedAt?.getTime?.() ?? 0);
-        db.documents.set(snapshotPath, { schemaVersion: 1, publishedAt: new Date(clock.time), payload: snapshotPayload({ appliedThrough: Math.max(0, ...updated) }) });
+        db.documents.set(snapshotPath, { schemaVersion: 1, publishedAt: new Date(clock.time), payload: snapshotPayload({ appliedThrough: Math.max(0, ...updated), skipKeywords: phoneState.skipKeywords, extraEvents: phoneState.extraEvents }) });
       }
       if (message.data.type === "publish") {
-        db.documents.set(snapshotPath, { schemaVersion: 1, publishedAt: new Date(clock.time), requestId: message.data.requestId, payload: snapshotPayload() });
+        db.documents.set(snapshotPath, { schemaVersion: 1, publishedAt: new Date(clock.time), requestId: message.data.requestId, payload: snapshotPayload({ skipKeywords: phoneState.skipKeywords, extraEvents: phoneState.extraEvents }) });
       }
     });
   };
@@ -334,6 +336,120 @@ test("a change from Google Calendar ids is validated, logged, pushed and confirm
     assert.deepEqual([confirmed.structuredContent.outcome, confirmed.text], ["confirmed", "Confirmed on Pixel 9."]);
     const same = await call(token, "set_event_alarms", { event: STANDUP, leadTimes: [5, 30] });
     assert.match(same.text, /already how it's set/);
+  });
+});
+
+const LUNCH_START = T0 + 5 * HOUR;
+const LUNCH = `e_${"7".repeat(64)}`;
+const LUNCH_SERIES = `s_${"7".repeat(64)}`;
+const lunchEvent = {
+  eventKey: LUNCH, seriesKey: LUNCH_SERIES, calendarKey: WORK, title: "Team lunch", start: LUNCH_START, end: LUNCH_START + HOUR, allDay: false, recurring: true, rsvp: "ACCEPTED", skippedByKeyword: "Lunch",
+  alarms: [{ at: LUNCH_START - 10 * 60000, kind: "lead", minutes: 10, source: "app", status: "off" }],
+};
+const keywordPhone = () => snapshotPayload({ skipKeywords: ["Lunch"], extraEvents: [lunchEvent] });
+
+test("the skip list reads and changes through settings, with an alert and undo", async () => {
+  const { db, handler, token, phoneState } = setup({ payload: () => snapshotPayload({ skipKeywords: [] }) });
+  phoneState.skipKeywords = [];
+  await withServer(handler, async ({ call }) => {
+    const changed = await call(token, "update_settings", { settings: { skipEventKeywords: [" Lunch ", "LUNCH", "Focus time"] } });
+    assert.match(changed.text, /skip events containing "Lunch", "Focus time"/);
+    assert.doesNotMatch(changed.text, /older version/);
+    const { changeId } = changed.structuredContent;
+    assert.equal(db.documents.get("accounts/alice/values/p_skip_event_keywords").payload, JSON.stringify('["Lunch","Focus time"]'));
+    assert.equal(db.documents.get(`accounts/alice/assistantActivity/${changeId}`).alert, "alarms_filtered");
+    const confirmed = await call(token, "confirm_change", { changeId, waitSeconds: 5 });
+    assert.deepEqual([confirmed.structuredContent.outcome, confirmed.text], ["confirmed", "Confirmed on Pixel 9."]);
+    const settings = await call(token, "get_settings", {});
+    assert.deepEqual(settings.structuredContent.settings.skipEventKeywords, ["Lunch", "Focus time"]);
+    assert.match(settings.text, /Skip events containing: "Lunch", "Focus time"/);
+    const undone = await call(token, "undo", { changeId });
+    assert.equal(undone.isError, undefined);
+    assert.equal(db.documents.get("accounts/alice/values/p_skip_event_keywords").payload, "null");
+    const tooLong = await call(token, "update_settings", { settings: { skipEventKeywords: ["x".repeat(61)] } });
+    assert.equal(tooLong.isError, true);
+  });
+});
+
+test("a phone too old for the skip list is never reported as having applied it", async () => {
+  const { handler, token } = setup();
+  await withServer(handler, async ({ call }) => {
+    const changed = await call(token, "update_settings", { settings: { skipEventKeywords: ["Lunch"] } });
+    assert.match(changed.text, /Pixel 9 runs an older version of Always On Time that doesn't use this list/);
+    const answer = await call(token, "confirm_change", { changeId: changed.structuredContent.changeId, waitSeconds: 5 });
+    assert.equal(answer.structuredContent.outcome, "needs_update");
+    assert.deepEqual(answer.structuredContent.appliedOn, []);
+    assert.deepEqual(answer.structuredContent.needsUpdate, ["Pixel 9"]);
+    assert.doesNotMatch(answer.text, /Confirmed/);
+    assert.match(answer.text, /nothing changed there; updating the app applies it/);
+    // Other settings on that phone still confirm as before.
+    const other = await call(token, "update_settings", { settings: { alarmVolume: 50 } });
+    const fine = await call(token, "confirm_change", { changeId: other.structuredContent.changeId, waitSeconds: 5 });
+    assert.equal(fine.structuredContent.outcome, "confirmed");
+  });
+});
+
+test("explain_alarm gives the keyword as the reason, and the title is only quoted data", async () => {
+  const { handler, token, phoneState } = setup({ payload: keywordPhone });
+  phoneState.skipKeywords = ["Lunch"];
+  phoneState.extraEvents = [lunchEvent];
+  await withServer(handler, async ({ call }) => {
+    const explained = await call(token, "explain_alarm", { event: LUNCH });
+    assert.match(explained.text, /off because the title contains "Lunch"/);
+    assert.match(explained.text, /off because of the skip list/);
+    assert.equal(explained.structuredContent.event.skippedByKeyword, "Lunch");
+    const found = await call(token, "find_events", { query: "lunch" });
+    assert.match(found.text, /alarms off: the title contains "Lunch"/);
+  });
+});
+
+const accountSkipList = (db, keywords) =>
+  db.documents.set("accounts/alice/values/p_skip_event_keywords", { payload: JSON.stringify(JSON.stringify(keywords)) });
+
+test("setting alarms past a keyword marks the exception, and reset says the keyword applies again", async () => {
+  const { db, handler, token, phoneState } = setup({ payload: keywordPhone });
+  phoneState.skipKeywords = ["Lunch"];
+  phoneState.extraEvents = [lunchEvent];
+  accountSkipList(db, ["Lunch"]);
+  await withServer(handler, async ({ call }) => {
+    const one = await call(token, "set_event_alarms", { event: LUNCH, leadTimes: [10] });
+    assert.match(one.text, /also marks it to ring anyway/);
+    assert.equal(db.documents.get(`accounts/alice/values/${LUNCH}`).payload, '{"leadTimes":[10],"enabled":true,"keywordExempt":true}');
+    const series = await call(token, "set_series_alarms", { event: LUNCH, leadTimes: [5] });
+    assert.equal(db.documents.get(`accounts/alice/values/${LUNCH_SERIES}`).payload, '{"leadTimes":[5],"enabled":true,"keywordExempt":true}');
+    assert.match(series.text, /also marks it to ring anyway/);
+    const reset = await call(token, "set_event_alarms", { event: LUNCH, mode: "reset" });
+    assert.match(reset.text, /on the skip list, so its alarms stay off/);
+    assert.equal(db.documents.get(`accounts/alice/values/${LUNCH}`).payload, "null");
+  });
+});
+
+test("the exception follows the account's skip list, not a stale or older phone's snapshot", async () => {
+  // The snapshot predates "Lunch" joining the list (or the phone is too old to report it).
+  const stale = { ...lunchEvent, skippedByKeyword: undefined };
+  const { db, handler, token, phoneState } = setup({ payload: () => snapshotPayload({ extraEvents: [stale] }) });
+  phoneState.extraEvents = [stale];
+  accountSkipList(db, ["lunch"]);
+  await withServer(handler, async ({ call }) => {
+    const one = await call(token, "set_event_alarms", { event: LUNCH, leadTimes: [10] });
+    assert.equal(db.documents.get(`accounts/alice/values/${LUNCH}`).payload, '{"leadTimes":[10],"enabled":true,"keywordExempt":true}');
+    assert.match(one.text, /contains "lunch", which is on the skip list/);
+    const reset = await call(token, "set_series_alarms", { event: LUNCH, mode: "reset" });
+    assert.match(reset.text, /so its alarms stay off/);
+    // The list doesn't count as part of the change.
+    assert.equal(db.documents.get("accounts/alice/values/p_skip_event_keywords").payload, JSON.stringify('["lunch"]'));
+  });
+});
+
+test("a keyword the account no longer lists adds no exception, whatever the snapshot says", async () => {
+  const { db, handler, token, phoneState } = setup({ payload: keywordPhone });
+  phoneState.skipKeywords = ["Lunch"];
+  phoneState.extraEvents = [lunchEvent];
+  accountSkipList(db, []);
+  await withServer(handler, async ({ call }) => {
+    const one = await call(token, "set_event_alarms", { event: LUNCH, leadTimes: [10] });
+    assert.equal(db.documents.get(`accounts/alice/values/${LUNCH}`).payload, '{"leadTimes":[10],"enabled":true}');
+    assert.doesNotMatch(one.text, /skip list/);
   });
 });
 

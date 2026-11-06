@@ -24,6 +24,11 @@ test("every assistant setting is a synced preference and accepts exactly the sha
       // Stored as the app's JSON list in a string preference with no fixed values.
       assert.equal(preferences.strings[record].values, null);
       assert.equal(setting.encode([10, 0, 10]), "[0,10]");
+    } else if (field === "skipEventKeywords") {
+      assert.equal(preferences.strings[record].values, null);
+      assert.equal(setting.encode(["  Lunch ", "LUNCH", "Focus  time", " "]), '["Lunch","Focus time"]');
+      assert.deepEqual(setting.decode('["Lunch"]'), ["Lunch"]);
+      assert.deepEqual(setting.decode("damaged"), []);
     } else {
       assert.deepEqual(schema.options, preferences.strings[record].values, field);
     }
@@ -92,4 +97,14 @@ test("alerts also flag changes that silence alarms in Do Not Disturb, filter eve
   // The most serious alert wins.
   assert.equal(changeAlert({ p_respect_dnd: rec(null, "true"), p_rsvp_filter: rec(null, '"accepted_only"') }), "alerts_reduced");
   assert.equal(changeAlert({ [e]: rec(null, '{"leadTimes":[2880],"enabled":false}') }), "alarms_off");
+});
+
+test("adding a skip keyword is flagged; removing one or changing its case is not", () => {
+  const rec = (before, after) => ({ p_skip_event_keywords: { before: before && JSON.stringify(before), after: after && JSON.stringify(after) } });
+  assert.equal(changeAlert(rec(null, '["Lunch"]')), "alarms_filtered");
+  assert.equal(changeAlert(rec('["Lunch"]', '["Lunch","Gym"]')), "alarms_filtered");
+  assert.equal(changeAlert(rec('["Lunch","Gym"]', '["Lunch"]')), null);
+  assert.equal(changeAlert(rec('["Lunch"]', '["LUNCH"]')), null);
+  assert.equal(changeAlert(rec('["Lunch"]', "[]")), null);
+  assert.equal(changeAlert(rec('["Lunch"]', null)), null);
 });
