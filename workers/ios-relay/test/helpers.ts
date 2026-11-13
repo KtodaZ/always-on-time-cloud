@@ -53,6 +53,7 @@ export interface Harness {
   /** HTTP status the mocked JWKS endpoint answers with. */
   jwksStatus: number;
   respond: ApnsResponder;
+  respondActivity: ApnsResponder;
   appCheck(claims?: Record<string, unknown>, options?: { kid?: string; key?: CryptoKey }): Promise<string>;
   now(): number;
   setNow(ms: number): void;
@@ -122,6 +123,7 @@ export async function harness({ freshness = FRESHNESS }: { freshness?: typeof FR
       return h.allApns.filter((call) => call.url.endsWith(`/3/device/${h.apnsToken}`));
     },
     allApns: [],
+    respondActivity: () => ({ status: 200 }),
     jwksFetches: 0,
     jwksStatus: 200,
     respond: () => ({ status: 200 }),
@@ -230,7 +232,7 @@ export async function harness({ freshness = FRESHNESS }: { freshness?: typeof FR
       const call: ApnsCall = { url: request.url, headers, body: await request.json() };
       h.allApns.push(call);
       const mine = call.url.endsWith(`/3/device/${h.apnsToken}`);
-      const result = mine ? await h.respond(call, h.apns.length) : { status: 200 };
+      const result = headers["apns-push-type"] === "liveactivity" ? await h.respondActivity(call, h.allApns.length) : mine ? await h.respond(call, h.apns.length) : { status: 200 };
       if (result instanceof Error) throw result;
       return new Response(result.status === 200 ? null : JSON.stringify({ reason: result.reason }), { status: result.status });
     }

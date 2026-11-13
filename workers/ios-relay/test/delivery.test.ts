@@ -366,6 +366,10 @@ describe("shard alarm", () => {
     // Each push failed twice (request and retry); the token authority call is not a fetch.
     expect(h.apns).toHaveLength(2 * PER_RUN);
     expect(h.apns.length).toBeLessThanOrEqual(subrequestBudget(env));
+    // These intentionally failed fixtures still have due work. They must not leak pushes
+    // into the later cross-shard provider-token test through its global fetch mock.
+    await h.sql(await h.shard(), "DELETE FROM installs WHERE install_id LIKE 'retry%'");
+    await h.sql(await h.shard(), "DELETE FROM apns_routes WHERE install_id LIKE 'retry%'");
   });
 
   it("reserves an environment probe for unverified tokens and still stays within the budget", async () => {

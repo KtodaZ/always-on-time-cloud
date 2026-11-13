@@ -1,3 +1,4 @@
+import { countdownPayload, countdownWake, countdownWork, replaceCountdown, selectedMilestone, type CountdownSnapshot, type CountdownState, type CountdownWork } from "./countdown";
 // InstallShard: one of SHARD_COUNT Durable Objects (SQLite storage). A shard holds
 //  - the installs whose ID hashes to it, with their alarm triggers, subscriptions, push
 //    bookkeeping and per-install rate limit, and sends their pushes from its DO alarm;
@@ -8,7 +9,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 
-import { ApnsConfigError, sendRelayPush, type ApnsEnvironment, type ApnsResult } from "./apns";
+import { ApnsConfigError, sendRelayPush, sendCountdownPush, type ApnsEnvironment, type ApnsResult } from "./apns";
 import { apnsConfigFromEnv, sharedProviderToken } from "./apns-token";
 import type { SyncReceipt } from "./http";
 import type { Env } from "./env";
@@ -103,6 +104,7 @@ export interface StoredSubscriptionInput {
 }
 
 export type DeviceOp =
+  | { kind: "countdown"; snapshot: CountdownSnapshot; fingerprint: string }
   | { kind: "authorize" }
   | { kind: "status" }
   | { kind: "update"; fields: RegistrationInput }
@@ -113,6 +115,7 @@ export type DeviceOp =
   | { kind: "deleteSubscription"; key: string };
 
 export type DeviceResult =
+  | { status: "conflict" }
   | { status: "unauthorized" }
   | { status: "rate-limited" }
   | { status: "ok"; releasedKeys: string[]; install?: InstallStatus };
@@ -351,6 +354,8 @@ export class InstallShard extends DurableObject<Env> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS countdown_state (install_id TEXT PRIMARY KEY, state TEXT NOT NULL, next_wake_at INTEGER);
+      CREATE INDEX IF NOT EXISTS countdown_next_wake ON countdown_state(next_wake_at) WHERE next_wake_at IS NOT NULL;`);
     addMissingColumns(this.sql);
   }
 
@@ -485,6 +490,8 @@ export class InstallShard extends DurableObject<Env> {
     const candidates: number[] = [];
     const wake = this.sql.exec<{ at: number | null }>("SELECT MIN(next_wake_at) AS at FROM installs WHERE next_wake_at IS NOT NULL").one().at;
     if (wake !== null) candidates.push(wake);
+    const countdown = this.sql.exec<{ at: number | null }>("SELECT MIN(next_wake_at) AS at FROM countdown_state WHERE next_wake_at IS NOT NULL").one().at;
+    if (countdown !== null) candidates.push(countdown);
     const prune = this.nextPruneAt();
     if (prune !== null) candidates.push(Math.max(prune, nowMs));
     const current = await this.ctx.storage.getAlarm();
@@ -537,6 +544,15 @@ export class InstallShard extends DurableObject<Env> {
     let releasedKeys: string[] = [];
     let patch: InstallPatch = {};
     switch (op.kind) {
+      case "countdown": {
+        const next = replaceCountdown(this.countdownState(installId), op.snapshot, nowMs, op.fingerprint);
+        if (next === "conflict") {
+          this.updateInstall(installId, rate, nowMs);
+          return { status: "conflict" };
+        }
+        if (next !== "stale") this.saveCountdown(installId, next, nowMs);
+        break;
+      }
       case "authorize":
       case "status":
         break;
@@ -607,6 +623,19 @@ export class InstallShard extends DurableObject<Env> {
     this.sql.exec("DELETE FROM subscriptions WHERE install_id = ?", installId);
     this.sql.exec("DELETE FROM alarms WHERE install_id = ?", installId);
     this.sql.exec("DELETE FROM delivery_state WHERE install_id = ?", installId);
+    const countdown = this.countdownState(installId);
+    const row = this.installRow(installId);
+    this.sql.exec("DELETE FROM countdown_state WHERE install_id = ?", installId);
+    if (countdown && row) {
+      const environment = this.route(row).environment;
+      this.ctx.waitUntil(forEachLimited(Object.values(countdown.activities), PUSH_CONCURRENCY, async a => {
+        try {
+          const work: CountdownWork = { event: "end", token: a.pushToken, milestone: a.milestone, activityID: a.activityID, revision: countdown.snapshot.revision };
+          await sendCountdownPush(apnsConfigFromEnv(this.env), sharedProviderToken(this.env, () => this.now()),
+            { environment, token: work.token, body: countdownPayload(work, this.now()), expiresAt: 0 });
+        } catch { /* Delete revokes all state even when best-effort ending is unavailable. */ }
+      }));
+    }
     this.sql.exec("DELETE FROM apns_routes WHERE install_id = ?", installId);
     this.sql.exec("DELETE FROM installs WHERE install_id = ?", installId);
     return keys;
@@ -964,6 +993,8 @@ export class InstallShard extends DurableObject<Env> {
       this.updateInstall(claim.installId, {}, nowMs);
       return false;
     }
+    const countdown = this.countdownState(claim.installId);
+    if (countdown) { countdown.snapshot.pushToStartToken = null; countdown.snapshot.milestones = []; this.saveCountdown(claim.installId, countdown, nowMs, false); }
     this.updateInstall(claim.installId, { enabled: 0, disabled_at: nowMs, disabled_reason: reason }, nowMs);
     return true;
   }
@@ -1066,12 +1097,87 @@ export class InstallShard extends DurableObject<Env> {
       }
     });
     if (ids.length > 0) log("info", "Shard push pass", counts);
+    const remaining = Math.floor(Math.max(0, budget - reserved - TOKEN_SUBREQUESTS) / 2);
+    if (remaining > 0) {
+      const countdowns = this.sql.exec<{ install_id: string }>("SELECT install_id FROM countdown_state WHERE next_wake_at <= ? ORDER BY next_wake_at LIMIT ?", this.now(), remaining).toArray();
+      await forEachLimited(countdowns, PUSH_CONCURRENCY, async ({install_id}) => {
+        try { await this.processCountdown(install_id); }
+        catch (error) { log("warn", "Countdown processing failed", { error: errorName(error) }); }
+      });
+    }
     try {
       await this.reschedule();
     } catch (error) {
       log("error", "Could not reschedule the shard alarm", { error: errorName(error) });
       throw error;
     }
+  }
+
+  private countdownState(installId: string): CountdownState | undefined {
+    const row = this.sql.exec<{state: string}>("SELECT state FROM countdown_state WHERE install_id = ?", installId).toArray()[0];
+    return row ? JSON.parse(row.state) as CountdownState : undefined;
+  }
+  private saveCountdown(installId: string, state: CountdownState, now: number, enabled = this.installRow(installId)?.enabled === 1): void {
+    this.sql.exec(`INSERT INTO countdown_state (install_id, state, next_wake_at) VALUES (?, ?, ?)
+      ON CONFLICT(install_id) DO UPDATE SET state = excluded.state, next_wake_at = excluded.next_wake_at`,
+      installId, JSON.stringify(state), countdownWake(state, now, enabled));
+  }
+  private async processCountdown(installId: string): Promise<void> {
+    const now = this.now(), row = this.installRow(installId), state = this.countdownState(installId);
+    if (!state) return;
+    if (!row) { this.sql.exec("DELETE FROM countdown_state WHERE install_id = ?", installId); return; }
+    const work = countdownWork(state, now, row.enabled === 1);
+    if (!work) { this.saveCountdown(installId, state, now); return; }
+    // Persist the claim before any await. Ambiguous starts are never replayed.
+    if (work.event === "start") {
+      state.attempted[work.milestone.presentationID] = work.milestone.targetAtMs;
+      state.startedAt ??= {}; state.startedAt[work.milestone.presentationID] = Math.floor(now / 1000);
+    }
+    else if (work.activityID) state.activities[work.activityID].retryAt = now + MINUTE_MS;
+    this.saveCountdown(installId, state, now);
+    const environment = this.route(row).environment;
+    const activity = work.activityID ? state.activities[work.activityID] : undefined;
+    const sentAt = Math.max(Math.floor(now / 1000), (activity?.lastTimestamp ?? 0) + 1) * 1000;
+    if (activity) { activity.lastTimestamp = sentAt / 1000; this.saveCountdown(installId, state, now); }
+    let result: ApnsResult | null = null;
+    try {
+      result = await sendCountdownPush(apnsConfigFromEnv(this.env), sharedProviderToken(this.env, () => this.now()), {
+        environment, token: work.token, body: countdownPayload(work, sentAt),
+        expiresAt: work.event === "end" ? 0 : Math.floor(work.milestone.targetAtMs / 1000),
+      }, () => {
+        const latest = this.countdownState(installId), install = this.installRow(installId);
+        if (!latest || !install || latest.snapshot.revision !== work.revision) return false;
+        if (work.event === "start") return install.enabled === 1 && latest.snapshot.pushToStartToken === work.token && selectedMilestone(latest.snapshot, this.now())?.presentationID === work.milestone.presentationID;
+        return !!work.activityID && latest.activities[work.activityID]?.pushToken === work.token;
+      });
+    } catch { /* An ambiguous start is deliberately not retried. Updates/ends have bounded retry. */ }
+    const latest = this.countdownState(installId);
+    if (!latest) return;
+    const invalid = result?.status === 410 || (result?.status === 400 && result.reason === "BadDeviceToken");
+    if (work.event === "start") {
+      if (invalid && latest.snapshot.pushToStartToken === work.token) latest.snapshot.pushToStartToken = null;
+    } else if (work.activityID) {
+      const activity = latest.activities[work.activityID];
+      // Never apply a response to a rotated token or a newer snapshot.
+      if (activity?.pushToken === work.token && latest.snapshot.revision === work.revision) {
+        if (invalid || (result?.status === 200 && work.event === "end")) {
+          delete latest.activities[work.activityID];
+          latest.snapshot.activities = latest.snapshot.activities.filter(a => a.activityID !== work.activityID);
+          if (invalid) latest.invalidTokens = [...(latest.invalidTokens ?? []), work.token].slice(-32);
+          else latest.ended[work.activityID] = this.now();
+        } else if (result?.status === 200) {
+          activity.sentRevision = work.revision; activity.retryAt = 0; activity.failures = 0;
+        } else {
+          activity.failures += 1;
+          // End cleanup is best effort, never retain a token indefinitely.
+          if (activity.failures >= 5 || this.now() >= activity.milestone.targetAtMs + DAY_MS) {
+            delete latest.activities[work.activityID]; latest.ended[work.activityID] = this.now();
+            latest.snapshot.activities = latest.snapshot.activities.filter(a => a.activityID !== work.activityID);
+          } else activity.retryAt = this.now() + Math.min(30 * MINUTE_MS, MINUTE_MS * 2 ** activity.failures);
+        }
+      }
+    }
+    this.saveCountdown(installId, latest, this.now());
   }
 
   // --- Retention ---------------------------------------------------------------------------

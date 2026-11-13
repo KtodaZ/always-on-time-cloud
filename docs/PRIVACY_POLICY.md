@@ -30,3 +30,15 @@ goes stale (its meeting's start), and push bookkeeping. It holds no
 calendar content, and its logs record no IP addresses, request headers or tokens (Cloudflare still
 sees the connecting IP address of each request to deliver it). The website policy must name Cloudflare as the processor of iPhone push tokens
 before the iOS app launches ([protocol](IOS_PUSH_PROTOCOL.md)).
+
+The informational iPhone countdown card adds ActivityKit push-to-start/update tokens, opaque
+activity/presentation IDs, milestone kind (departure or event start), target times, revisions and
+start/end/dismissal bookkeeping to the Cloudflare relay metadata. Calendar titles, descriptions,
+locations, meeting links and colors stay in the on-phone presentation cache. Known update tokens
+are removed after successful end; bounded failed cleanup can retain them for up to a day after the
+target. A bounded list of rejected tokens prevents reuse of invalid credentials until it is
+replaced by later rejections or the installation is deleted.
+The current snapshot and start-token metadata stay with the installation until replaced or the
+installation is deleted; disabling background updates deletes the installation through the existing
+retryable teardown. No tokens are logged. This paragraph describes the new code; **the published
+website policy must be updated before deploying/enabling the countdown service**.

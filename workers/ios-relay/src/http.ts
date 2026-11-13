@@ -234,6 +234,7 @@ export type ApiRoute =
   | { kind: "collection" }
   | { kind: "installation"; installId: string }
   | { kind: "alarms"; installId: string }
+  | { kind: "countdown"; installId: string }
   | { kind: "synced"; installId: string }
   | { kind: "subscription"; installId: string; provider: Provider; subscriptionId: string };
 
@@ -241,6 +242,7 @@ export const ROUTE_METHODS: Record<ApiRoute["kind"], string[]> = {
   collection: ["POST"],
   installation: ["GET", "PUT", "DELETE"],
   alarms: ["PUT"],
+  countdown: ["PUT"],
   synced: ["POST"],
   subscription: ["PUT", "DELETE"],
 };
@@ -261,6 +263,7 @@ export function parseApiRoute(pathname: string): ApiRoute | null {
   const installId = decodeSegment(parts[3]);
   if (installId === null || !INSTALL_ID.test(installId)) return null;
   if (parts.length === 4) return { kind: "installation", installId };
+  if (parts.length === 5 && parts[4] === "countdown") return { kind: "countdown", installId };
   if (parts.length === 5 && parts[4] === "alarms") return { kind: "alarms", installId };
   if (parts.length === 5 && parts[4] === "synced") return { kind: "synced", installId };
   if (parts.length === 7 && parts[4] === "subscriptions") {

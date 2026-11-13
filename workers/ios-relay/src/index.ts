@@ -1,3 +1,4 @@
+import { validateCountdown } from "./countdown";
 // Always On Time iOS push relay: device API v2 and provider webhooks (docs/IOS_PUSH_PROTOCOL.md).
 
 import { verifyAppCheckToken } from "./appcheck";
@@ -103,6 +104,7 @@ async function runDevice(shard: Stub, installId: string, secretHash: string, op:
   const result = await shard.device(installId, secretHash, op);
   if (result.status === "unauthorized") throw new HttpError(401, "invalid install credentials");
   if (result.status === "rate-limited") throw new HttpError(429, "rate limit exceeded");
+  if (result.status === "conflict") throw new HttpError(409, "countdown revision conflict");
   return result.releasedKeys;
 }
 
@@ -160,6 +162,7 @@ async function deviceApi(request: Request, env: Env, url: URL): Promise<Response
       const result = await shard.device(route.installId, secretHash, { kind: "status" });
       if (result.status === "unauthorized") throw new HttpError(401, "invalid install credentials");
       if (result.status === "rate-limited") throw new HttpError(429, "rate limit exceeded");
+      if (result.status === "conflict") throw new HttpError(409, "countdown revision conflict");
       return json(200, result.install ?? {});
     }
     if (route.kind === "installation" && method === "PUT") {
@@ -170,6 +173,11 @@ async function deviceApi(request: Request, env: Env, url: URL): Promise<Response
     if (route.kind === "installation") {
       const released = await runDevice(shard, route.installId, secretHash, { kind: "delete" });
       await releaseIndexEntries(env, released.map((key) => ({ key, installId: route.installId })));
+      return json(204);
+    }
+    if (route.kind === "countdown") {
+      const snapshot = validateCountdown(await readJson(request, MAX_API_BODY_BYTES), nowMs);
+      await runDevice(shard, route.installId, secretHash, { kind: "countdown", snapshot, fingerprint: await sha256Hex(JSON.stringify(snapshot)) });
       return json(204);
     }
     if (route.kind === "alarms") {
