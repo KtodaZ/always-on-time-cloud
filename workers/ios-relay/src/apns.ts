@@ -181,9 +181,11 @@ export async function sendRelayPush(config: ApnsConfig, tokens: ProviderTokenSou
 /** ActivityKit is a separate APNs namespace. Never probe environments or replay ambiguous starts. */
 export async function sendCountdownPush(config: ApnsConfig, tokens: ProviderTokenSource,
   request: { environment: ApnsEnvironment; token: string; body: string; expiresAt: number },
-  stillCurrent: () => boolean = () => true): Promise<ApnsResult | null> {
+  stillCurrent: () => boolean = () => true,
+  willSend: () => void = () => {}): Promise<ApnsResult | null> {
   const token = await tokens.get();
   if (!stillCurrent()) return null;
+  willSend();
   const response = await fetch(`${APNS_HOSTS[request.environment]}/3/device/${request.token}`, {
     method: "POST", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), body: request.body,
     headers: { authorization: `bearer ${token}`, "content-type": "application/json", "apns-push-type": "liveactivity",
@@ -208,6 +210,6 @@ export async function sendCountdownPush(config: ApnsConfig, tokens: ProviderToke
     } catch { /* An unreadable rejection is still a failed informational delivery. */ }
     finally { await reader.cancel().catch(() => {}); }
   }
-  if (response.status === 403 && reason && PROVIDER_TOKEN_ERRORS.has(reason)) await tokens.rejected(token);
+  if (response.status === 403 && reason && PROVIDER_TOKEN_ERRORS.has(reason)) await tokens.rejected(token).catch(() => undefined);
   return { status: response.status, ...(reason ? { reason } : {}) };
 }

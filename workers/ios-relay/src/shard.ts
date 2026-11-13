@@ -1,4 +1,4 @@
-import { countdownPayload, countdownWake, countdownWork, replaceCountdown, selectedMilestone, type CountdownSnapshot, type CountdownState, type CountdownWork } from "./countdown";
+import { releaseUnsentCountdownStart, countdownPayload, countdownWake, countdownWork, replaceCountdown, selectedMilestone, type CountdownSnapshot, type CountdownState, type CountdownWork } from "./countdown";
 // InstallShard: one of SHARD_COUNT Durable Objects (SQLite storage). A shard holds
 //  - the installs whose ID hashes to it, with their alarm triggers, subscriptions, push
 //    bookkeeping and per-install rate limit, and sends their pushes from its DO alarm;
@@ -525,6 +525,8 @@ export class InstallShard extends DurableObject<Env> {
       );
       this.updateInstall(installId, {}, nowMs);
     }
+    const countdown = this.countdownState(installId);
+    if (countdown) this.saveCountdown(installId, countdown, nowMs);
     await this.reschedule();
     return existing ? "updated" : "created";
   }
@@ -632,7 +634,7 @@ export class InstallShard extends DurableObject<Env> {
         try {
           const work: CountdownWork = { event: "end", token: a.pushToken, milestone: a.milestone, activityID: a.activityID, revision: countdown.snapshot.revision };
           await sendCountdownPush(apnsConfigFromEnv(this.env), sharedProviderToken(this.env, () => this.now()),
-            { environment, token: work.token, body: countdownPayload(work, this.now()), expiresAt: 0 });
+            { environment, token: work.token, body: countdownPayload(work, this.now()), expiresAt: Math.floor(this.now() / 1000) + 4 * 3600 });
         } catch { /* Delete revokes all state even when best-effort ending is unavailable. */ }
       }));
     }
@@ -1141,21 +1143,23 @@ export class InstallShard extends DurableObject<Env> {
     const sentAt = Math.max(Math.floor(now / 1000), (activity?.lastTimestamp ?? 0) + 1) * 1000;
     if (activity) { activity.lastTimestamp = sentAt / 1000; this.saveCountdown(installId, state, now); }
     let result: ApnsResult | null = null;
+    let sendAttempted = false;
     try {
       result = await sendCountdownPush(apnsConfigFromEnv(this.env), sharedProviderToken(this.env, () => this.now()), {
         environment, token: work.token, body: countdownPayload(work, sentAt),
-        expiresAt: work.event === "end" ? 0 : Math.floor(work.milestone.targetAtMs / 1000),
+        expiresAt: work.event === "end" ? Math.floor(now / 1000) + 4 * 3600 : Math.floor(work.milestone.targetAtMs / 1000),
       }, () => {
         const latest = this.countdownState(installId), install = this.installRow(installId);
         if (!latest || !install || latest.snapshot.revision !== work.revision) return false;
         if (work.event === "start") return install.enabled === 1 && latest.snapshot.pushToStartToken === work.token && selectedMilestone(latest.snapshot, this.now())?.presentationID === work.milestone.presentationID;
         return !!work.activityID && latest.activities[work.activityID]?.pushToken === work.token;
-      });
+      }, () => { sendAttempted = true; });
     } catch { /* An ambiguous start is deliberately not retried. Updates/ends have bounded retry. */ }
     const latest = this.countdownState(installId);
     if (!latest) return;
     const invalid = result?.status === 410 || (result?.status === 400 && result.reason === "BadDeviceToken");
     if (work.event === "start") {
+      if (!sendAttempted || (result && result.status !== 200)) releaseUnsentCountdownStart(latest, work, now, this.now());
       if (invalid && latest.snapshot.pushToStartToken === work.token) latest.snapshot.pushToStartToken = null;
     } else if (work.activityID) {
       const activity = latest.activities[work.activityID];
