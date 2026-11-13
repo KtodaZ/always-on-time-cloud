@@ -541,3 +541,58 @@ APNs status codes and error names, never tokens, secrets, IP addresses or reques
 Invocation logs (`observability.logs.invocation_logs: false`) are off, because they would record
 request metadata such as `X-Goog-Resource-URI` (which names the calendar), App Check tokens and
 client IPs.
+
+## Informational iPhone countdowns (additive)
+
+`PUT /v2/installations/{installId}/countdown` uses the same install-secret authentication and
+32 KiB body bound as other device operations. Older clients need no changes. This endpoint is
+separate from alarms, receipts and subscriptions; it does not schedule or stop AlarmKit alarms.
+
+```json
+{
+  "version": 1,
+  "revision": 42,
+  "pushToStartToken": null,
+  "milestones": [{"presentationID": "<64 lowercase SHA-256 hex>", "kind": "start", "targetAtMs": 1800000900000}],
+  "activities": [{"activityID": "<opaque ActivityKit activity ID>", "presentationID": "<64 lowercase SHA-256 hex>", "pushToken": "<ActivityKit update token>"}],
+  "dismissedPresentationIDs": []
+}
+```
+
+Every key is required; unknown keys are rejected. A snapshot fully replaces the prior schedule.
+`revision` is a positive JSON-safe integer, monotonic per installation. Lower revisions return
+204 without changing state; identical equal revisions are idempotent, and equal revisions with
+conflicting content return 409. Success is 204. Arrays contain at most 64 unique milestones,
+16 unique activity IDs and 64 unique dismissed IDs. IDs are opaque, salted on the phone; no
+calendar titles, IDs, descriptions, locations, tint or meeting links are accepted. Activity tokens
+are lowercase hexadecimal (64–200 characters); activity IDs are printable ASCII (1–200 characters).
+`pushToStartToken: null` revokes remote starts. Invalid tokens never disable ordinary alarm refresh.
+
+The phone computes eligibility and supplies only departure and event-start anchors. A milestone is
+eligible from ten minutes before its target until, excluding, its target. At overlaps the earliest
+target wins, with kind and opaque ID as stable tie breakers. The server never derives countdowns
+from early alarm triggers. Moved or removed milestones cancel old cards. User-dismissed IDs are
+suppressed. Known activity tokens claim the presentation; a durable attempted-start marker prevents
+replay when a push token does not arrive or start acceptance is ambiguous. Local/remote creation
+races are reconciled on the phone. Ending is best effort, including during install deletion.
+
+ActivityKit APNs uses the existing key and chosen installation environment, with push type
+`liveactivity`, topic `<app bundle>.push-type.liveactivity`, priority 5, and no alarm-refresh
+collapse ID or environment probing. Start payloads name `MeetingCountdownAttributes`, with
+immutable `attributes: {presentationID}` and mutable `content-state: {kind,targetAtMs,revision}`.
+APNs timestamps and stale/dismissal dates use **seconds**; targetAtMs remains **milliseconds**.
+Starts expire at the target. Apple requires a generic soundless alert on remote start:
+“Always On Time” / “Your departure countdown is ready.” (or “Your event countdown is ready.”).
+No sound or interruption level is added. The widget resolves private presentation from an on-phone
+App Group cache. No per-second pushes are sent: the timer renders locally. Stale dates do not end
+activities; the relay sends an end with dismissal-date 0. Delivery and removal can be delayed or
+missed by iOS/APNs; the next runnable app reconciliation cleans up.
+
+Countdown work runs after normal alarm-refresh work within the existing shard subrequest budget.
+Tokens rotate atomically; stale in-flight responses cannot overwrite newer snapshots or tokens.
+End/update failures have bounded retries. Ambiguous starts are never retried, preferring a missing
+informational card over a duplicate. Queued starts are revoked on disable/delete. Deletion removes
+all stored countdown state; known cards receive a best-effort end. A successful APNs response proves
+acceptance only. Before releasing a dependent app, verify authenticated upload, closed-app start,
+locked-device cache resolution, overlap, cancellation, swipe suppression and end against the live
+Worker on a physical iPhone.

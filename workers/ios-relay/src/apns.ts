@@ -177,3 +177,37 @@ export async function sendRelayPush(config: ApnsConfig, tokens: ProviderTokenSou
   }
   return { status: response.status, ...(reason ? { reason } : {}) };
 }
+
+/** ActivityKit is a separate APNs namespace. Never probe environments or replay ambiguous starts. */
+export async function sendCountdownPush(config: ApnsConfig, tokens: ProviderTokenSource,
+  request: { environment: ApnsEnvironment; token: string; body: string; expiresAt: number },
+  stillCurrent: () => boolean = () => true): Promise<ApnsResult | null> {
+  const token = await tokens.get();
+  if (!stillCurrent()) return null;
+  const response = await fetch(`${APNS_HOSTS[request.environment]}/3/device/${request.token}`, {
+    method: "POST", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), body: request.body,
+    headers: { authorization: `bearer ${token}`, "content-type": "application/json", "apns-push-type": "liveactivity",
+      "apns-topic": `${config.topic}.push-type.liveactivity`, "apns-priority": "5", "apns-id": crypto.randomUUID(),
+      "apns-expiration": String(request.expiresAt) },
+  });
+  let reason: string | undefined;
+  if (response.status !== 200 && response.body) {
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = []; let length = 0;
+    try {
+      while (length <= 8192) {
+        const part = await reader.read(); if (part.done) break;
+        length += part.value.length; if (length <= 8192) chunks.push(part.value);
+      }
+      if (length <= 8192) {
+        const bytes = new Uint8Array(length); let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+        const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+        if (parsed && typeof parsed === "object" && "reason" in parsed && typeof parsed.reason === "string") reason = parsed.reason;
+      }
+    } catch { /* An unreadable rejection is still a failed informational delivery. */ }
+    finally { await reader.cancel().catch(() => {}); }
+  }
+  if (response.status === 403 && reason && PROVIDER_TOKEN_ERRORS.has(reason)) await tokens.rejected(token);
+  return { status: response.status, ...(reason ? { reason } : {}) };
+}
