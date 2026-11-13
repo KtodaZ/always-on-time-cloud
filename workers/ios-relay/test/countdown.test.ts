@@ -1,6 +1,7 @@
+import { runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sendCountdownPush } from "../src/apns";
-import { countdownPayload, selectedMilestone, validateCountdown, type CountdownSnapshot } from "../src/countdown";
+import { countdownWork, countdownWake, replaceCountdown, releaseUnsentCountdownStart, countdownPayload, selectedMilestone, validateCountdown, type CountdownSnapshot } from "../src/countdown";
 import { harness, MINUTE, START, type Harness } from "./helpers";
 
 const created: Harness[] = [];
@@ -77,6 +78,8 @@ describe("countdown windows and APNs lifecycle", () => {
     await tick(h, START + 15 * MINUTE); await h.tick();
     expect(live(h).map(c => c.body.aps.event)).toEqual(["start", "update", "end", "start"]);
     const end = live(h)[2]; expect(end.body.aps["dismissal-date"]).toBe(0);
+    expect(Number(end.headers["apns-expiration"])).toBe((START + 15 * MINUTE) / 1000 + 4 * 3600);
+    expect(end.body.aps["content-state"]).toMatchObject({endedByRelay: true});
     expect(live(h)[3].body.aps.attributes).toEqual({presentationID: start});
     await tick(h, START + 20 * MINUTE); expect(live(h)).toHaveLength(4);
   });
@@ -165,4 +168,73 @@ it("payloads use seconds for APNs and milliseconds in content state", () => {
   expect(body.aps["content-state"].targetAtMs).toBe(START+10*MINUTE);
   expect(body.aps["dismissal-date"]).toBe(0);
   expect(() => validateCountdown({version: 1},START)).toThrow();
+});
+
+it("re-registration recomputes a dormant countdown wake", async () => {
+  const h = await setup(); const s = snapshot(h); await put(h, s);
+  await h.sql(await h.shard(), "UPDATE installs SET enabled = 0 WHERE install_id = ?", h.installId);
+  await tick(h, START + 10 * MINUTE);
+  expect(live(h)).toHaveLength(0);
+  expect((await h.sql(await h.shard(), "SELECT next_wake_at FROM countdown_state WHERE install_id = ?", h.installId))[0].next_wake_at).toBeNull();
+  expect((await h.register()).status).toBe(200);
+  await h.tick();
+  expect(live(h).map(c => c.body.aps.event)).toEqual(["start"]);
+});
+
+it("clears unsent claims but preserves newer and token-confirmed claims", async () => {
+  const h = await setup(); const s = snapshot(h);
+  const state = replaceCountdown(undefined, s, START, "digest");
+  if (typeof state === "string") throw new Error(state);
+  const at = START + 10 * MINUTE;
+  const work = countdownWork(state, at, true)!;
+  state.attempted[start] = s.milestones[0].targetAtMs;
+  state.startedAt = {[start]: at / 1000};
+  releaseUnsentCountdownStart(state, work, at, at);
+  expect(state.attempted[start]).toBeUndefined();
+  expect(countdownWork(state, at, true)).toBeUndefined();
+  expect(countdownWake(state, at, true)).toBe(at + MINUTE);
+  expect(countdownWork(state, at + MINUTE, true)?.event).toBe("start");
+  state.attempted[start] = s.milestones[0].targetAtMs;
+  state.startedAt[start] = at / 1000 + 1;
+  releaseUnsentCountdownStart(state, work, at, at);
+  expect(state.attempted[start]).toBeDefined();
+});
+
+it("provider-token failure is known unsent; fetch failure remains ambiguous", async () => {
+  const willSend = vi.fn();
+  const request = {environment: "development" as const, token: startToken, body: "{}", expiresAt: 1};
+  const config = {topic: "com.example.app", keyPem: "unused", keyId: "unused", teamId: "unused"};
+  await expect(sendCountdownPush(config, {get: async () => {throw new Error("provider");}, rejected: async () => {}}, request, () => true, willSend)).rejects.toThrow("provider");
+  expect(willSend).not.toHaveBeenCalled();
+  expect(await sendCountdownPush(config, {get: async () => "token", rejected: async () => {}}, request, () => false, willSend)).toBeNull();
+  expect(willSend).not.toHaveBeenCalled();
+  vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("network"));
+  await expect(sendCountdownPush(config, {get: async () => "token", rejected: async () => {}}, request, () => true, willSend)).rejects.toThrow("network");
+  expect(willSend).toHaveBeenCalledOnce();
+});
+
+it("removes tokens for ignored unknown activities from stored snapshots", async () => {
+  const h = await setup();
+  await put(h, snapshot(h, {activities: [{activityID:"unknown", presentationID:departure, pushToken:updateToken}]}));
+  const row = (await h.sql(await h.shard(), "SELECT state FROM countdown_state WHERE install_id = ?", h.installId))[0];
+  expect(JSON.stringify(JSON.parse(row.state as string))).not.toContain(updateToken);
+});
+
+it("retries a start after a configuration failure before fetch", async () => {
+  const h = await setup(); await put(h, snapshot(h)); h.setNow(START + 10 * MINUTE);
+  await runInDurableObject(await h.shard(), async instance => {
+    const shard = instance as unknown as { env: { APNS_TOPIC: string }; processCountdown(id: string): Promise<void> };
+    const topic = shard.env.APNS_TOPIC;
+    try {
+      shard.env.APNS_TOPIC = "";
+      await shard.processCountdown(h.installId);
+    } finally { shard.env.APNS_TOPIC = topic; }
+  });
+  expect(live(h)).toHaveLength(0);
+  const row = (await h.sql(await h.shard(), "SELECT state FROM countdown_state WHERE install_id = ?", h.installId))[0];
+  const stored = JSON.parse(row.state as string);
+  expect(stored.attempted[start]).toBeUndefined();
+  expect(stored.startRetryAt).toBe(START + 11 * MINUTE);
+  await tick(h, START + 11 * MINUTE);
+  expect(live(h).map(c => c.body.aps.event)).toEqual(["start"]);
 });

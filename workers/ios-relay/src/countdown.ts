@@ -36,7 +36,7 @@ export function validateCountdown(body: unknown, now: number): CountdownSnapshot
   const dismissed = body.dismissedPresentationIDs;
   if (dismissed.some(id => typeof id !== "string" || !ID.test(id)) || new Set(dismissed).size !== dismissed.length) throw new HttpError(400, "invalid dismissed IDs");
   return { version: 1, revision: body.revision as number, pushToStartToken: body.pushToStartToken as string | null,
-    milestones: milestones.sort(compareMilestones), activities: activities.sort((a,b) => a.activityID.localeCompare(b.activityID)), dismissedPresentationIDs: [...dismissed].sort() };
+    milestones: milestones.sort(compareMilestones), activities: activities.sort((a,b) => (a.activityID < b.activityID ? -1 : a.activityID > b.activityID ? 1 : 0)), dismissedPresentationIDs: [...dismissed].sort() };
 }
 function compareMilestones(a: Milestone, b: Milestone): number {
   return a.targetAtMs - b.targetAtMs || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0) || a.presentationID.localeCompare(b.presentationID);
@@ -55,12 +55,13 @@ export interface CountdownState {
   invalidTokens?: string[];
   startedAt?: Record<string, number>;
   presentations?: Record<string, Milestone>;
+  startRetryAt?: number;
 }
 export interface CountdownWork { event: "start" | "update" | "end"; token: string; milestone: Milestone; revision: number; activityID?: string }
 export function replaceCountdown(old: CountdownState | undefined, snapshot: CountdownSnapshot, now: number, accepted: string): CountdownState | "stale" | "conflict" {
   if (old && snapshot.revision < old.snapshot.revision) return "stale";
   if (old && snapshot.revision === old.snapshot.revision) return old.accepted === accepted ? "stale" : "conflict";
-  const state: CountdownState = { snapshot, accepted, attempted: old?.attempted ?? {}, activities: old?.activities ?? {}, ended: old?.ended ?? {}, invalidTokens: old?.invalidTokens ?? [], startedAt: old?.startedAt ?? {}, presentations: old?.presentations ?? {} };
+  const state: CountdownState = { snapshot, accepted, attempted: old?.attempted ?? {}, activities: old?.activities ?? {}, ended: old?.ended ?? {}, invalidTokens: old?.invalidTokens ?? [], startedAt: old?.startedAt ?? {}, presentations: old?.presentations ?? {}, startRetryAt: old?.startRetryAt };
   for (const a of snapshot.activities) {
     const milestone = snapshot.milestones.find(m => m.presentationID === a.presentationID) ?? state.activities[a.activityID]?.milestone ?? state.presentations?.[a.presentationID] ?? old?.snapshot.milestones.find(m => m.presentationID === a.presentationID);
     if (!milestone || state.ended[a.activityID] || state.invalidTokens?.includes(a.pushToken)) continue;
@@ -80,13 +81,14 @@ export function replaceCountdown(old: CountdownState | undefined, snapshot: Coun
   for (const id of Object.keys(state.activities).slice(32)) delete state.activities[id];
   for (const [id, m] of Object.entries(state.presentations ?? {})) if (m.targetAtMs + 86_400_000 <= now) { delete state.presentations![id]; if (state.startedAt) delete state.startedAt[id]; }
   state.presentations = Object.fromEntries(Object.entries(state.presentations ?? {}).sort((a,b) => b[1].targetAtMs - a[1].targetAtMs).slice(0,1024));
+  state.snapshot.activities = snapshot.activities.filter(a => state.activities[a.activityID]?.pushToken === a.pushToken);
   const ended = Object.entries(state.ended).sort((a,b) => b[1] - a[1]).slice(0,256);
   state.ended = Object.fromEntries(ended);
   return state;
 }
 export function countdownWork(state: CountdownState, now: number, enabled: boolean): CountdownWork | undefined {
   const selected = enabled ? selectedMilestone(state.snapshot, now) : undefined;
-  const activities = Object.values(state.activities).sort((a,b) => a.activityID.localeCompare(b.activityID));
+  const activities = Object.values(state.activities).sort((a,b) => (a.activityID < b.activityID ? -1 : a.activityID > b.activityID ? 1 : 0));
   const keeper = activities.find(a => a.presentationID === selected?.presentationID && a.sentRevision !== -1)?.activityID;
   for (const a of activities) {
     if (a.retryAt > now) continue;
@@ -95,7 +97,7 @@ export function countdownWork(state: CountdownState, now: number, enabled: boole
     }
     if (a.sentRevision < state.snapshot.revision) return { event: "update", token: a.pushToken, milestone: selected, activityID: a.activityID, revision: state.snapshot.revision };
   }
-  if (selected && state.snapshot.pushToStartToken && !state.attempted[selected.presentationID] && Object.keys(state.attempted).length < 1024) {
+  if (selected && (state.startRetryAt ?? 0) <= now && state.snapshot.pushToStartToken && !state.attempted[selected.presentationID] && Object.keys(state.attempted).length < 1024) {
     // Finish previous cards before starting another. Failed ends retry within a bounded window.
     if (Object.values(state.activities).some(a => a.presentationID !== selected.presentationID)) return;
     return { event: "start", token: state.snapshot.pushToStartToken, milestone: selected, revision: state.snapshot.revision };
@@ -110,13 +112,24 @@ export function countdownWake(state: CountdownState, now: number, enabled: boole
     if (m.targetAtMs - COUNTDOWN_WINDOW_MS > now) boundaries.push(m.targetAtMs - COUNTDOWN_WINDOW_MS);
   }
   for (const a of Object.values(state.activities)) if (a.retryAt > now) boundaries.push(a.retryAt);
+  if (enabled && selectedMilestone(state.snapshot, now) && (state.startRetryAt ?? 0) > now) boundaries.push(state.startRetryAt!);
   return boundaries.length ? Math.min(...boundaries) : null;
 }
 export function countdownPayload(work: CountdownWork, at: number): string {
   const m = work.milestone;
   return JSON.stringify({ aps: { timestamp: Math.floor(at / 1000), event: work.event,
-    "content-state": { kind: m.kind, targetAtMs: m.targetAtMs, revision: work.revision },
+    "content-state": { kind: m.kind, targetAtMs: m.targetAtMs, revision: work.revision, ...(work.event === "end" ? { endedByRelay: true } : {}) },
     ...(work.event === "start" ? { "attributes-type": "MeetingCountdownAttributes", attributes: { presentationID: m.presentationID }, "input-push-token": 1,
       alert: { title: "Always On Time", body: m.kind === "departure" ? "Your departure countdown is ready." : "Your event countdown is ready." } } : {}),
     ...(work.event === "end" ? { "dismissal-date": 0 } : { "stale-date": Math.floor(m.targetAtMs / 1000) }) } });
+}
+
+/** A claim may be released only when the APNs fetch was never attempted. */
+export function releaseUnsentCountdownStart(state: CountdownState, work: CountdownWork, claimedAt: number, now: number): void {
+  if (work.event !== "start" || state.startedAt?.[work.milestone.presentationID] !== Math.floor(claimedAt / 1000)
+      || Object.values(state.activities).some(a => a.presentationID === work.milestone.presentationID)) return;
+  state.startRetryAt = now + 60_000;
+  delete state.attempted[work.milestone.presentationID];
+  delete state.startedAt[work.milestone.presentationID];
+  if (state.presentations) delete state.presentations[work.milestone.presentationID];
 }

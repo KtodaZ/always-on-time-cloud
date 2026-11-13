@@ -561,7 +561,8 @@ separate from alarms, receipts and subscriptions; it does not schedule or stop A
 
 Every key is required; unknown keys are rejected. A snapshot fully replaces the prior schedule.
 `revision` is a positive JSON-safe integer, monotonic per installation. Lower revisions return
-204 without changing state; identical equal revisions are idempotent, and equal revisions with
+204 without changing state (the phone floors each new revision at epoch milliseconds to survive
+reinstall); identical equal revisions are idempotent, and equal revisions with
 conflicting content return 409. Success is 204. Arrays contain at most 64 unique milestones,
 16 unique activity IDs and 64 unique dismissed IDs. IDs are opaque, salted on the phone; no
 calendar titles, IDs, descriptions, locations, tint or meeting links are accepted. Activity tokens
@@ -574,7 +575,9 @@ target wins, with kind and opaque ID as stable tie breakers. The server never de
 from early alarm triggers. Moved or removed milestones cancel old cards. User-dismissed IDs are
 suppressed. Known activity tokens claim the presentation; a durable attempted-start marker prevents
 replay when a push token does not arrive or start acceptance is ambiguous. Local/remote creation
-races are reconciled on the phone. Ending is best effort, including during install deletion.
+races keep the lowest activity ID on both the phone and relay. Claims are released when no APNs
+fetch was attempted or APNs explicitly rejected a start, with a one-minute retry delay. Ending is
+best effort, including during install deletion.
 
 ActivityKit APNs uses the existing key and chosen installation environment, with push type
 `liveactivity`, topic `<app bundle>.push-type.liveactivity`, priority 5, and no alarm-refresh
@@ -585,12 +588,18 @@ Starts expire at the target. Apple requires a generic soundless alert on remote 
 “Always On Time” / “Your departure countdown is ready.” (or “Your event countdown is ready.”).
 No sound or interruption level is added. The widget resolves private presentation from an on-phone
 App Group cache. No per-second pushes are sent: the timer renders locally. Stale dates do not end
-activities; the relay sends an end with dismissal-date 0. Delivery and removal can be delayed or
+activities; the relay sends an end with dismissal-date 0 and a four-hour APNs expiration. End
+content state adds optional `endedByRelay: true`, so the phone does not mistake automatic removal
+for a user swipe. Delivery and removal can be delayed or
 missed by iOS/APNs; the next runnable app reconciliation cleans up.
 
 Countdown work runs after normal alarm-refresh work within the existing shard subrequest budget.
 Tokens rotate atomically; stale in-flight responses cannot overwrite newer snapshots or tokens.
-End/update failures have bounded retries. Ambiguous starts are never retried, preferring a missing
+Registration recomputes the countdown wake when re-enabling an installation. Snapshots discard
+unknown/ignored activity tokens; missing known tokens are retained only for bounded end cleanup
+(at most 32 known activities), and at most 32 rejected tokens are retained to prevent reuse until
+displaced or installation deletion. End/update failures have bounded retries. Ambiguous starts
+are never retried, preferring a missing
 informational card over a duplicate. Queued starts are revoked on disable/delete. Deletion removes
 all stored countdown state; known cards receive a best-effort end. A successful APNs response proves
 acceptance only. Before releasing a dependent app, verify authenticated upload, closed-app start,
