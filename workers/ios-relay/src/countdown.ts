@@ -54,14 +54,15 @@ export interface CountdownState {
   ended: Record<string, number>;
   invalidTokens?: string[];
   startedAt?: Record<string, number>;
+  presentations?: Record<string, Milestone>;
 }
 export interface CountdownWork { event: "start" | "update" | "end"; token: string; milestone: Milestone; revision: number; activityID?: string }
 export function replaceCountdown(old: CountdownState | undefined, snapshot: CountdownSnapshot, now: number, accepted: string): CountdownState | "stale" | "conflict" {
   if (old && snapshot.revision < old.snapshot.revision) return "stale";
   if (old && snapshot.revision === old.snapshot.revision) return old.accepted === accepted ? "stale" : "conflict";
-  const state: CountdownState = { snapshot, accepted, attempted: old?.attempted ?? {}, activities: old?.activities ?? {}, ended: old?.ended ?? {}, invalidTokens: old?.invalidTokens ?? [], startedAt: old?.startedAt ?? {} };
+  const state: CountdownState = { snapshot, accepted, attempted: old?.attempted ?? {}, activities: old?.activities ?? {}, ended: old?.ended ?? {}, invalidTokens: old?.invalidTokens ?? [], startedAt: old?.startedAt ?? {}, presentations: old?.presentations ?? {} };
   for (const a of snapshot.activities) {
-    const milestone = snapshot.milestones.find(m => m.presentationID === a.presentationID) ?? state.activities[a.activityID]?.milestone;
+    const milestone = snapshot.milestones.find(m => m.presentationID === a.presentationID) ?? state.activities[a.activityID]?.milestone ?? state.presentations?.[a.presentationID] ?? old?.snapshot.milestones.find(m => m.presentationID === a.presentationID);
     if (!milestone || state.ended[a.activityID] || state.invalidTokens?.includes(a.pushToken)) continue;
     const prior = state.activities[a.activityID];
     state.activities[a.activityID] = { ...a, milestone, sentRevision: prior?.pushToken === a.pushToken ? prior.sentRevision : 0, retryAt: 0, failures: 0, lastTimestamp: prior?.lastTimestamp ?? state.startedAt?.[a.presentationID] };
@@ -77,6 +78,8 @@ export function replaceCountdown(old: CountdownState | undefined, snapshot: Coun
   // Admission bounds include old tokens retained for cancellation. Prefer missing information
   // over unbounded state when an installation repeatedly replaces a snapshot.
   for (const id of Object.keys(state.activities).slice(32)) delete state.activities[id];
+  for (const [id, m] of Object.entries(state.presentations ?? {})) if (m.targetAtMs + 86_400_000 <= now) { delete state.presentations![id]; if (state.startedAt) delete state.startedAt[id]; }
+  state.presentations = Object.fromEntries(Object.entries(state.presentations ?? {}).sort((a,b) => b[1].targetAtMs - a[1].targetAtMs).slice(0,1024));
   const ended = Object.entries(state.ended).sort((a,b) => b[1] - a[1]).slice(0,256);
   state.ended = Object.fromEntries(ended);
   return state;

@@ -93,6 +93,15 @@ describe("countdown windows and APNs lifecycle", () => {
     expect(live(h).at(-1)?.body.aps).toMatchObject({event: "end", "content-state": {kind: "start", targetAtMs: START + 20 * MINUTE, revision: 3}});
     await tick(h, START + 20 * MINUTE); expect(live(h).filter(c => c.body.aps.event === "start")).toHaveLength(1);
   });
+  it("ends a remotely started card when its first update token arrives after cancellation", async () => {
+    const h = await setup(); const s = snapshot(h); await put(h,s); await tick(h,START+10*MINUTE);
+    await put(h,{...s,revision:2,milestones:[],pushToStartToken:null});
+    await tick(h,START+21*MINUTE);
+    await put(h,{...s,revision:3,milestones:[],pushToStartToken:null,activities:[{activityID:"late",presentationID:start,pushToken:updateToken}]});
+    await h.tick();
+    expect(live(h).map(c=>c.body.aps.event)).toEqual(["start","end"]);
+    expect(live(h)[1].body.aps["content-state"]).toMatchObject({kind:"start",targetAtMs:START+20*MINUTE});
+  });
   it("token rotation replaces the old update token and rejected ActivityKit tokens do not disable alarms", async () => {
     const h = await setup(); const s = snapshot(h); const a = {activityID: "a", presentationID: start, pushToken: updateToken};
     await put(h, {...s, activities: [a]}); await tick(h, START + 10 * MINUTE);

@@ -1132,6 +1132,7 @@ export class InstallShard extends DurableObject<Env> {
     if (work.event === "start") {
       state.attempted[work.milestone.presentationID] = work.milestone.targetAtMs;
       state.startedAt ??= {}; state.startedAt[work.milestone.presentationID] = Math.floor(now / 1000);
+      state.presentations ??= {}; state.presentations[work.milestone.presentationID] = work.milestone;
     }
     else if (work.activityID) state.activities[work.activityID].retryAt = now + MINUTE_MS;
     this.saveCountdown(installId, state, now);
