@@ -22,9 +22,9 @@
   "extensions": {
     "com.openai": {
       "interface": {
-        "displayName": "Calendar Alarm: Always On Time",
+        "displayName": "Always On Time: Calendar Alarm",
         "shortDescription": "Automate your meeting alarms",
-        "longDescription": "Set up your meeting alarms by telling ChatGPT how you want them to work, in the Always On Time app for Android. Requires the app on your phone, signed in under Settings > Account & sync.\n\nSay \"Ring 20 minutes early for my gym sessions,\" \"Ring an hour before my flight on Friday,\" or \"No alarms for my personal calendar.\" Set alarms for one meeting, every meeting in a recurring series or a whole calendar, change alarm and snooze settings, or pause alarms until a set time. You can also ask what rings next and why. Changes are sent to your phone, and each one can be undone for 30 days.\n\nYou approve the connection on a consent page. ChatGPT receives meeting titles and times from the calendars your phone watches, 14 days of alarm history and the app's alarm settings. It works only with Always On Time's alarms: your calendar events stay unchanged, and meeting locations, links, notes and attendees stay on your phone.",
+        "longDescription": "Set up your meeting alarms by telling ChatGPT how you want them to work, in the Always On Time app for Android. Requires the app on your phone, signed in under Settings > Account & sync.\n\nTell ChatGPT how you want your alarms to work: have a recurring workout ring 20 minutes early, add an alarm an hour before a flight, or turn off alarms for a personal calendar. Set alarms for one meeting, every meeting in a recurring series or a whole calendar, change alarm and snooze settings, or pause alarms until a set time. You can also ask what rings next and why. Changes are sent to your phone, and each one can be undone for 30 days.\n\nYou approve the connection on a consent page. ChatGPT receives meeting titles and times from the calendars your phone watches, 14 days of alarm history and the app's alarm settings. It works only with Always On Time's alarms: your calendar events stay unchanged, and meeting locations, links, notes and attendees stay on your phone.",
         "developerName": "Zombit Studios LLC",
         "category": "Productivity",
         "capabilities": [
