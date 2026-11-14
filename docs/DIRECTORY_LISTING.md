@@ -9,10 +9,17 @@ Reviewer credentials are entered only in each portal, never here.
 The package is [`plugin/`](../plugin/): `plugin.json` (listing, review test cases, release notes),
 `mcp.json` (the server, with OAuth through a client metadata document) and `assets/icon.png`.
 Zip the folder's contents and upload them at platform.openai.com/plugins under the verified
-Zombit Studios identity. The portal's domain challenge is served from
+Zombit Studios LLC identity (`developerName` must match it exactly). The portal's domain challenge is served from
 `https://alwaysontime.zombit.io/.well-known/openai-apps-challenge`.
 The ChatGPT description leaves out the "free, no Plus needed" line, because OpenAI's checker
 flags pricing in descriptions.
+
+The first submission (2026-11-13) was rejected because the "name or description did not meet our
+quality standards". Version 1.0.1 uses the Play Store name, a plain short description, a long
+description that states tasks, requirements and data without promotional claims ("Secure and
+private", "within moments"), and example prompts that work on the reviewers' demo account (its
+"Gym session" and Friday "Flight to Denver" events exist for them). The connector no longer links
+to Plus, since directory rules forbid promoting upgrades.
 
 ## Claude
 
