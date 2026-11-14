@@ -56,8 +56,8 @@ const SCHEDULE = [
   { id: "lunchlearn", calendar: "work", title: "Lunch and learn", days: [5], start: "12:00", minutes: 60, rsvp: "DECLINED" },
   { id: "retro", calendar: "work", title: "Sprint retro", days: [5], start: "16:00", minutes: 45, recurring: true, rsvp: "ORGANIZER" },
   { id: "dentist", calendar: "personal", title: "Dentist appointment", days: [2], start: "08:00", minutes: 60 },
-  { id: "yoga", calendar: "personal", title: "Yoga class", days: [4], start: "18:30", minutes: 60, recurring: true },
-  { id: "flight", calendar: "personal", title: "Flight to Denver", days: [6], start: "07:15", minutes: 150 },
+  { id: "gym", calendar: "personal", title: "Gym session", days: [4], start: "18:30", minutes: 60, recurring: true },
+  { id: "flight", calendar: "personal", title: "Flight to Denver", days: [5], start: "07:15", minutes: 150 },
   { id: "birthday", calendar: "personal", title: "Sam's birthday", days: [0], allDay: true, recurring: true },
 ];
 
