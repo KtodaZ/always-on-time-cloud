@@ -124,7 +124,7 @@ const minutesLabel = (minutes) => {
 
 const DESTINATIONS = [
   "event", "calendars", "calendar", "settings/alarms", "settings/sounds", "settings/spoken",
-  "permissions", "battery", "travel", "account", "assistants", "plus",
+  "permissions", "battery", "travel", "account", "assistants",
 ];
 
 /** App Link for a destination. Links only open screens and never contain titles. */
@@ -137,7 +137,6 @@ function appLink(origin, destination, key) {
     if (!isCalendarKey(key)) throw new ToolError("calendar links need a full calendar key (c_...)");
     return `${origin}/open/calendar/${key}`;
   }
-  if (destination === "plus") return `${origin}/open/plus?source=assistant`;
   if (!DESTINATIONS.includes(destination)) throw new ToolError(`unknown destination ${destination}`);
   return `${origin}/open/${destination}`;
 }

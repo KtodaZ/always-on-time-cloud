@@ -121,7 +121,7 @@ parameter (RFC 9207).
 | `confirm_change` | Waits for the phones to apply a change and reports which did (`confirmed`, `partial`, `pending`; `needs_update` when a skip-list change reached only phones too old to use it) |
 | `test_connection` | Setup check: sends a test notification to each phone and reports which received it |
 | `refresh` | Asks the phones for a fresh snapshot and waits for it |
-| `open_in_app` | A link that opens a screen of the app (sounds, permissions, Plus and so on) |
+| `open_in_app` | A link that opens a screen of the app (sounds, permissions and so on) |
 
 Each change writes the new `values` records and an activity entry atomically, then sends the
 phones a `sync` message (FCM on Android, APNs on iPhone). Write tools return a `changeId` for `confirm_change` and `undo`. Once
@@ -132,7 +132,7 @@ are annotated `destructiveHint: true`, and the server instructions tell the assi
 them with the user first. Event titles and calendar names are third-party text (anyone can send an
 invitation): they are cleaned, quoted in tool output, and the instructions say never to follow
 instructions in them. Live traffic for travel alarms needs Plus benefits; the connector only
-explains that and links to the app.
+says so, with no upgrade link (ChatGPT directory rules forbid promoting upgrades).
 
 ### Rate limits
 

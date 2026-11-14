@@ -255,7 +255,7 @@ const TOOLS = [
   {
     name: "open_in_app",
     title: "Link to a screen in the app",
-    description: "Returns a link that opens a screen of Always On Time on the user's phone: an event, calendars, settings, permissions, battery guidance, travel, account, connected assistants, or Plus. Use it for anything that has to be done on the phone (sounds, voices, permissions) and when the user wants Plus. Links only open screens; they never change anything.",
+    description: "Returns a link that opens a screen of Always On Time on the user's phone: an event, calendars, settings, permissions, battery guidance, travel, account, or connected assistants. Use it for anything that has to be done on the phone (sounds, voices, permissions). Links only open screens; they never change anything.",
     inputSchema: {
       destination: z.enum(DESTINATIONS),
       key: z.string().max(80).optional().describe("Event key for \"event\", calendar key for \"calendar\" (short forms work)."),
@@ -272,12 +272,7 @@ const TOOLS = [
           : resolveCalendar(snapshot, key).key;
       }
       const link = appLink(ctx.origin, args.destination, key);
-      let text = `Open in Always On Time: ${link}`;
-      if (args.destination === "plus") {
-        ctx.count("plusGate");
-        text = `Live traffic updates are part of Always On Time Plus, which the user can get in the app (the assistant can't turn it on): ${link}`;
-      }
-      return result(text, { link });
+      return result(`Open in Always On Time: ${link}`, { link });
     },
   },
 ];

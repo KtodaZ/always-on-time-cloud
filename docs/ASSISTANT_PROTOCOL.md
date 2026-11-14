@@ -381,7 +381,8 @@ echoes a `publish` push's `aot.requestId`. `204`.
 (Universal Links). Hosting serves both on every domain, so links on
 `always-on-time-zombit-2026.web.app` keep verifying too. Destinations: `event/{eventKey}`, `calendars`, `calendar/{calendarKey}`,
 `settings/alarms`, `settings/sounds`, `settings/spoken`, `permissions`, `battery`, `travel`,
-`account`, `assistants`, `plus?source=assistant`. Links only open screens; they never change
+`account`, `assistants`. The apps also accept `plus?source=assistant`, which the connector no
+longer returns. Links only open screens; they never change
 settings and never contain titles. Both apps accept every destination: on iOS, `travel` and
 `plus` (Android-only features) open Settings, and a key that is not on the phone falls back as on
 Android. When the app does not open a link, the page at `/open/**` offers it again: an intent

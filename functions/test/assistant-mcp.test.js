@@ -298,17 +298,19 @@ test("reads come from the snapshot, say what they are based on, and use short ke
   });
 });
 
-test("travel alarms mention Plus for live traffic, and the Plus link is counted", async () => {
+test("travel alarms mention Plus for live traffic without an upgrade link, and it is counted", async () => {
   const { db, handler, token } = setup();
   await withServer(handler, async ({ call }) => {
     const explained = await call(token, "explain_alarm", { event: DENTIST });
-    assert.match(explained.text, /live traffic updates need Always On Time Plus: https:\/\/alwaysontime\.zombit\.io\/open\/plus\?source=assistant/);
-    const link = await call(token, "open_in_app", { destination: "plus" });
-    assert.equal(link.structuredContent.link, "https://alwaysontime.zombit.io/open/plus?source=assistant");
+    assert.match(explained.text, /live traffic updates need Always On Time Plus\.$/m);
+    assert.doesNotMatch(explained.text, /open\/plus/);
+    assert.equal(explained.structuredContent.links, undefined);
+    const plus = await call(token, "open_in_app", { destination: "plus" });
+    assert.equal(plus.isError, true);
     const event = await call(token, "open_in_app", { destination: "event", key: DENTIST.slice(0, 12) });
     assert.equal(event.structuredContent.link, `https://alwaysontime.zombit.io/open/event/${DENTIST}`);
   });
-  assert.equal(usageOf(db).plusGate, 2);
+  assert.equal(usageOf(db).plusGate, 1);
 });
 
 test("a change from Google Calendar ids is validated, logged, pushed and confirmed", async () => {

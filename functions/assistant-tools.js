@@ -28,7 +28,7 @@ Answers come from the phone's latest snapshot; say what they are based on (the "
 
 Before a change that could stop alarms from ringing or being heard (pausing alarms, turning alarms off for an event, series or calendar, no longer watching a calendar, lowering the volume, switching to vibrate-only or silent alerts, respecting Do Not Disturb, skipping unaccepted invitations or all-day events, adding a word to the "Skip events containing" list, a very short ring, or moving alarms more than a day early), confirm it with the user first unless they asked for exactly that change.
 
-Some things need the phone itself (sounds, voices, permissions, battery settings): give the open_in_app link. Live traffic needs Always On Time Plus, which the connector never turns on; when the user asks for it, open_in_app("plus") opens it on the phone.`;
+Some things need the phone itself (sounds, voices, permissions, battery settings): give the open_in_app link. Live traffic needs Always On Time Plus, which the connector can't turn on.`;
 
 const byName = Object.fromEntries([...connection.TOOLS, ...read.TOOLS, ...write.TOOLS].map((tool) => [tool.name, tool]));
 

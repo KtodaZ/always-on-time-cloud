@@ -15,7 +15,7 @@ const {
   SETTINGS, describePause, leadTimesText, parseStored, tidyLeadTimes,
 } = require("./assistant-settings");
 const {
-  ToolError, appLink, basedOn, basis, calendarName, cleanText, formatTime, isoLocal, minutesLabel, parseTime, quoted,
+  ToolError, basedOn, basis, calendarName, cleanText, formatTime, isoLocal, minutesLabel, parseTime, quoted,
   resolveCalendar, resolveEvent, searchEvents, shortKey,
 } = require("./assistant-snapshot");
 const {
@@ -221,10 +221,8 @@ const TOOLS = [
       const data = { found: true, event: eventView(event, snapshot), pendingChange: pending };
       // `plus` is reported by phones with Plus benefits (subscribed, or while Plus is free).
       if (event.alarms.some((alarm) => alarm.kind === "travel") && !hasPlus(devices)) {
-        const link = appLink(ctx.origin, "plus");
         ctx.count("plusGate");
-        lines.push(`Leave times use the travel estimate saved on the phone; live traffic updates need Always On Time Plus: ${link}`);
-        data.links = { plus: link };
+        lines.push("Leave times use the travel estimate saved on the phone; live traffic updates need Always On Time Plus.");
       }
       return result(lines.join("\n"), data);
     },
