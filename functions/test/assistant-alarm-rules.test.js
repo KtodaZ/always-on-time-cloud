@@ -231,3 +231,32 @@ test("dont-ring previews silence travel rings too and delete restores their actu
   assert.equal(restored[0].kind, "travel");
   assert.equal(restored[0].at, events[0].travelRings[0].at);
 });
+
+test("next_after scales and matches only the first event after, same day, within the gap", () => {
+  const { evaluate, sentence } = require("../assistant-alarm-rules");
+  const h = 3600000;
+  const base = Date.UTC(2026, 10, 16, 16); // 08:00 Los Angeles
+  const ev = (id, title, startH, endH) => ({
+    id, title, start: base + startH * h, end: base + endH * h,
+    calendarKey: null, rings: [{ minutes: 10 }], eligible: true,
+  });
+  const events = [
+    ev("gym", "Gym", 4, 5), ev("a", "Design review", 6, 7), ev("b", "1:1", 8, 9),
+    ev("late", "Late call", 9.5, 10),
+  ];
+  const rule = {
+    enabled: true, order: 0, when: [{ type: "next_after", text: "Gym", hours: 2 }],
+    then: { type: "add_ring", minutes: 45 }, createdBy: "user", createdAt: 0,
+  };
+  const out = evaluate(events, { r1: rule }, "America/Los_Angeles");
+  assert.deepEqual(out.a.rings.map((r) => r.minutes), [45, 10]);
+  assert.deepEqual(out.b.rings.map((r) => r.minutes), [10]);
+  const far = evaluate([ev("gym", "Gym", 1, 2), ev("x", "Standup", 4.5, 5)], { r1: rule }, "America/Los_Angeles");
+  assert.deepEqual(far.x.rings.map((r) => r.minutes), [10]);
+  const many = Array.from({ length: 600 }, (_, i) => ev(`e${i}`, i % 5 ? "Meeting" : "Gym", i * 0.2, i * 0.2 + 0.1));
+  const t0 = Date.now();
+  evaluate(many, { r1: rule }, "America/Los_Angeles");
+  assert.ok(Date.now() - t0 < 2000);
+  assert.match(sentence({ ...rule, then: { type: "add_ring", minutes: 1440 } }), /1 day before/);
+  assert.match(sentence({ ...rule, then: { type: "add_ring", minutes: 90 } }), /90 min before/);
+});

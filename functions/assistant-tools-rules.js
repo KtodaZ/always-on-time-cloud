@@ -421,7 +421,7 @@ const TOOLS = [
         enable: "enabled",
         disable: "disabled",
       }[approved.operation];
-      const summary = `${cleanText(ctx.grant.clientName, 100) || "Assistant"} ${verb} a rule: ${approved.sentence} · ${approved.silencedCount} events`;
+      const summary = `${cleanText(ctx.grant.clientName, 100) || "Assistant"} ${verb} a rule: ${approved.sentence}${approved.silencedCount > 0 ? ` · ${approved.silencedCount} ${approved.silencedCount === 1 ? "event" : "events"}` : ""}`;
       const rule = parseStored(approved.payload);
       const alert =
         approved.silencedCount > 0 ||
@@ -452,21 +452,12 @@ const TOOLS = [
             throw new ToolError(
               "Settings changed since this preview. Call preview_rule again.",
             );
-          const [rules, snapshots] = await Promise.all([
-            rulesOf(ctx, read),
-            read(
-              refs
-                .snapshots(ctx.db, ctx.uid)
-                .orderBy("publishedAt", "desc")
-                .limit(1),
-            ),
-          ]);
-          if (
-            toMillis(snapshots.docs[0]?.data().publishedAt) !== p.snapshotAt ||
-            Object.keys(rules).some((id) => !(id in p.baseline))
-          )
+          const rules = await rulesOf(ctx, read);
+          // A newer phone snapshot alone (any scheduling pass publishes one) doesn't
+          // invalidate the preview; changed settings or rules do (checked above and here).
+          if (Object.keys(rules).some((id) => !(id in p.baseline)))
             throw new ToolError(
-              "The phone snapshot or rules changed. Call preview_rule again.",
+              "Rules changed since this preview. Call preview_rule again.",
             );
           if (p.operation === "create" && Object.keys(rules).length >= 30)
             throw new ToolError("At most 30 rules are allowed.");

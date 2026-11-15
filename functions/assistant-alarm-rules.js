@@ -9,6 +9,11 @@ const CONDITIONS = [
 const understood = (r) =>
   r.when.every((c) => CONDITIONS.includes(c.type)) &&
   ["add_ring", "dont_ring"].includes(r.then.type);
+function leadText(minutes) {
+  if (minutes % 1440 === 0) return minutes === 1440 ? "1 day" : `${minutes / 1440} days`;
+  if (minutes % 60 === 0) return minutes === 60 ? "1 hour" : `${minutes / 60} hours`;
+  return `${minutes} min`;
+}
 function sentence(rule, calendars = []) {
   const conditions = rule.when.map((c) =>
     c.type === "title_contains"
@@ -24,38 +29,51 @@ function sentence(rule, calendars = []) {
   return rule.then.type === "dont_ring"
     ? `Don't ring for ${conditions.join(" ")} `.trim()
     : rule.then.type === "add_ring"
-      ? `Add a ring ${rule.then.minutes} minutes before ${conditions.join(" ")}${rule.then.label ? ` · ${rule.then.label}` : ""}${rule.then.style === "notification" ? " · notification" : ""}`
+      ? `Add a ring ${leadText(rule.then.minutes)} before ${conditions.join(" ")}${rule.then.label ? ` · ${rule.then.label}` : ""}${rule.then.style === "notification" ? " · notification" : ""}`
       : "Unsupported rule";
 }
 // Pure equivalent of AlarmRuleEvaluator. Events contain ordinary (pre-rule) rings.
 function evaluate(events, rules, zone) {
-  const day = (e) =>
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: zone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(e.start);
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: zone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const days = new Map();
+  const day = (e) => {
+    if (!days.has(e.id)) days.set(e.id, fmt.format(e.start));
+    return days.get(e.id);
+  };
   const ordered = [...events].sort(
     (a, b) => a.start - b.start || String(a.id).localeCompare(String(b.id)),
   );
+  // Events that are the first to start after a matching event ends, on the same day and
+  // within the gap. One pass per (text, hours) pair instead of rescanning per event.
+  const nextAfterCache = new Map();
+  const nextAfter = (c) => {
+    const key = `${c.text}\u0000${c.hours ?? 2}`;
+    if (nextAfterCache.has(key)) return nextAfterCache.get(key);
+    const hits = new Set();
+    ordered.forEach((p, i) => {
+      if (!firstSkipMatch(p.title, [c.text])) return;
+      for (let j = i + 1; j < ordered.length; j++) {
+        const n = ordered[j];
+        if (day(n) !== day(p)) break;
+        if (n.start < p.end) continue;
+        if (n.start - p.end <= (c.hours ?? 2) * 3600000) hits.add(n.id);
+        break;
+      }
+    });
+    nextAfterCache.set(key, hits);
+    return hits;
+  };
   const ordinary = (c, e) => {
     if (c.type === "title_contains") return !!firstSkipMatch(e.title, [c.text]);
     if (c.type === "on_calendar")
       return e.calendarKey != null && e.calendarKey === c.calendarKey;
     if (c.type === "first_of_day") return true;
-    if (c.type === "next_after")
-      return ordered.some(
-        (p) =>
-          day(p) === day(e) &&
-          p.id !== e.id &&
-          p.end <= e.start &&
-          e.start - p.end <= (c.hours ?? 2) * 3600000 &&
-          firstSkipMatch(p.title, [c.text]) &&
-          ordered.find(
-            (n) => n.id !== p.id && day(n) === day(p) && n.start >= p.end,
-          )?.id === e.id,
-      );
+    if (c.type === "next_after") return nextAfter(c).has(e.id);
     return false;
   };
   const matches = [];

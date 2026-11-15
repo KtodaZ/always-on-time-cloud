@@ -99,7 +99,7 @@ test(
       ).data();
       assert.match(
         activity.summary,
-        /Claude added a rule: Don't ring for Lunch · 1 events/,
+        /Claude added a rule: Don't ring for Lunch · 1 event/,
       );
       assert.ok((await previewRef.get()).data().usedAt);
       await assert.rejects(
@@ -212,11 +212,9 @@ test(
         .snapshots(db, uid)
         .doc("phone")
         .update({ publishedAt: new Date(now + 1) });
-      await assert.rejects(
-        call("apply_rule", { previewId: stale.data.previewId }),
-        /snapshot or rules changed/,
-      );
-      assert.equal(
+      // A newer snapshot (any scheduling pass publishes one) doesn't void the preview.
+      await call("apply_rule", { previewId: stale.data.previewId });
+      assert.notEqual(
         (
           await refs
             .account(db, uid)
