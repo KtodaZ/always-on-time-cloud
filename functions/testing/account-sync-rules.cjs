@@ -39,6 +39,18 @@ const fs = require('node:fs');
     for (const prefix of ['c', 's', 'e']) {
       await assertSucceeds(setDoc(doc(alice, `accounts/alice/values/${prefix}_${'0'.repeat(64)}`), { payload: 'null' }));
     }
+    const ruleId = 'r_02652016-e79a-47a3-a9b1-891549de8a02';
+    await assertSucceeds(setDoc(doc(alice, `accounts/alice/values/${ruleId}`), {payload: '{"enabled":true}'}));
+    await assertFails(setDoc(doc(bob, `accounts/alice/values/${ruleId}`), {payload: '{}'}));
+    await assertFails(setDoc(doc(alice, `accounts/alice/values/${ruleId}`), {payload: 'x'.repeat(16385)}));
+    await assertFails(setDoc(doc(alice, 'accounts/alice/values/r_not-a-uuid'), {payload:'{}'}));
+    await assertSucceeds(deleteDoc(doc(alice, `accounts/alice/values/${ruleId}`)));
+    await assertSucceeds(setDoc(doc(alice, 'accounts/alice/values/p_default_ring_options'), {payload:'"{}"'}));
+    await assertFails(setDoc(doc(alice, 'accounts/alice/assistantRulePreviews/fake'), {payload:'{}'}));
+    for (const prefix of ['c','s','e']) {
+      const value = prefix === 'c' ? {overrides:{leadTimes:[45],ringOptions:{45:{label:'Prepare',style:'notification'}}}} : {leadTimes:[45],ringOptions:{45:{label:'Prepare',style:'notification'}}};
+      await assertSucceeds(setDoc(doc(alice, `accounts/alice/values/${prefix}_${'2'.repeat(64)}`), {payload:JSON.stringify(value)}));
+    }
     // Phones delete their own records of ended occurrences (e_) and nothing else.
     const ended = `e_${'1'.repeat(64)}`;
     await assertSucceeds(setDoc(doc(alice, `accounts/alice/values/${ended}`), { payload: '{"leadTimes":[10],"enabled":true}' }));

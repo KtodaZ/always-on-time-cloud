@@ -28,11 +28,16 @@ Answers come from the phone's latest snapshot; say what they are based on (the "
 
 Before a change that could stop alarms from ringing or being heard (pausing alarms, turning alarms off for an event, series or calendar, no longer watching a calendar, lowering the volume, switching to vibrate-only or silent alerts, respecting Do Not Disturb, skipping unaccepted invitations or all-day events, adding a word to the "Skip events containing" list, a very short ring, or moving alarms more than a day early), confirm it with the user first unless they asked for exactly that change.
 
+For every alarm rule change, call preview_rule first, show the sentence and affected events (including silenced events and the large-share warning), and get the user’s yes in chat before apply_rule(previewId). Never apply a rule without that chat approval. There is no second approval in the app.
+
 Some things need the phone itself (sounds, voices, permissions, battery settings): give the open_in_app link. Live traffic needs Always On Time Plus, which the connector can't turn on.`;
 
-const byName = Object.fromEntries([...connection.TOOLS, ...read.TOOLS, ...write.TOOLS].map((tool) => [tool.name, tool]));
+const rules = require("./assistant-tools-rules");
+
+const byName = Object.fromEntries([...connection.TOOLS, ...read.TOOLS, ...write.TOOLS, ...rules.TOOLS].map((tool) => [tool.name, tool]));
 
 const TOOLS = [
+  "list_rules", "preview_rule", "apply_rule",
   "get_status", "list_upcoming_alarms", "find_events", "explain_alarm", "list_calendars", "get_settings", "get_alarm_history",
   "set_event_alarms", "set_series_alarms", "set_calendar", "update_settings", "pause_alarms", "resume_alarms", "undo",
   "confirm_change", "test_connection", "refresh", "open_in_app",

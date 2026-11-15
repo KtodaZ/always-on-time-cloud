@@ -5,7 +5,8 @@
     {"kind": "series", "input": ["c_42fb4c3a3db8d2bba3e4897484575c76b2c03322bddf69f7dfcd787a6c213d5a", "4kq0l1v3s9example"], "key": "s_050961489e18b374331b1996aed77c48ac038669dd77a00357129ece44535a7d"},
     {"kind": "occurrence", "input": "s_050961489e18b374331b1996aed77c48ac038669dd77a00357129ece44535a7d:single", "key": "e_e41735eed816bc24db9dc5b08d92ac12b112a12a4600a6ede42faf14cf6df08d"},
     {"kind": "series", "input": ["c_42fb4c3a3db8d2bba3e4897484575c76b2c03322bddf69f7dfcd787a6c213d5a", "7rcurring0example"], "key": "s_a4b8d08d97e8a3a8fd964c4e1811abafeb4c2ae465c396f6b6debbbf06929e5f"},
-    {"kind": "occurrence", "input": "s_a4b8d08d97e8a3a8fd964c4e1811abafeb4c2ae465c396f6b6debbbf06929e5f:1793124000000", "key": "e_7b1ec89029a39d5b40d6ffb94cb7187192ac341db9b4f614b97fae4fc623abda"}
+    {"kind": "occurrence", "input": "s_a4b8d08d97e8a3a8fd964c4e1811abafeb4c2ae465c396f6b6debbbf06929e5f:1793124000000", "key": "e_7b1ec89029a39d5b40d6ffb94cb7187192ac341db9b4f614b97fae4fc623abda"},
+    {"kind": "rule", "input": "02652016-e79a-47a3-a9b1-891549de8a02", "key": "r_02652016-e79a-47a3-a9b1-891549de8a02"}
   ],
   "payloads": [
     {"record": "e", "description": "Several lead times given unsorted with a duplicate: ascending, de-duplicated, fields in data class order", "value": {"enabled": true, "leadTimes": [30, 5, 30, 0]}, "canonical": "{\"leadTimes\":[0,5,30],\"enabled\":true}"},
@@ -26,7 +27,12 @@
     {"record": "p", "name": "vibration_enabled", "description": "null clears a preference", "value": null, "canonical": "null"},
     {"record": "p", "name": "alarms_paused_until", "description": "Paused until resumed", "value": -1, "canonical": "-1"},
     {"record": "p", "name": "alarms_paused_until", "description": "Paused until an epoch time", "value": 1793124000000, "canonical": "1793124000000"},
-    {"record": "p", "name": "alarms_paused_until", "description": "Not paused", "value": 0, "canonical": "0"}
+    {"record": "p", "name": "alarms_paused_until", "description": "Not paused", "value": 0, "canonical": "0"},
+    {"description": "Future per-ring fields survive canonicalization", "record": "e", "value": {"leadTimes": [45, 10], "ringOptions": {"45": {"future": 7, "style": "notification", "label": "Prepare"}, "10": {"future": true}, "90": {"future": "stale"}}}, "canonical": "{\"leadTimes\":[10,45],\"ringOptions\":{\"10\":{\"future\":true},\"45\":{\"label\":\"Prepare\",\"style\":\"notification\",\"future\":7}}}"},
+    {"description": "Labelled notification ring beside ordinary lead times", "record": "e", "value": {"ringOptions": {"90": {"style": "alarm"}, "45": {"style": "notification", "label": "Time to shower"}, "999": {"label": "stale"}}, "leadTimes": [90, 45]}, "canonical": "{\"leadTimes\":[45,90],\"ringOptions\":{\"45\":{\"label\":\"Time to shower\",\"style\":\"notification\"}}}"},
+    {"description": "Assistant-created alarm rule", "record": "r", "value": {"enabled": true, "order": 0, "when": [{"type": "next_after", "text": "Gym", "hours": 2}], "then": {"type": "add_ring", "minutes": 45, "label": "Time to shower", "style": "notification"}, "createdBy": "assistant", "createdAt": 1763200000000, "assistantName": "Claude"}, "canonical": "{\"enabled\":true,\"order\":0,\"when\":[{\"type\":\"next_after\",\"text\":\"Gym\",\"hours\":2}],\"then\":{\"type\":\"add_ring\",\"minutes\":45,\"label\":\"Time to shower\",\"style\":\"notification\"},\"createdBy\":\"assistant\",\"createdAt\":1763200000000,\"assistantName\":\"Claude\"}"},
+    {"description": "Unknown condition is retained and inert", "record": "r", "value": {"enabled": true, "order": 0, "when": [{"type": "future_condition"}], "then": {"type": "add_ring", "minutes": 45, "label": "Time to shower", "style": "notification"}, "createdBy": "assistant", "createdAt": 1763200000000, "assistantName": "Claude"}, "canonical": "{\"enabled\":true,\"order\":0,\"when\":[{\"type\":\"future_condition\"}],\"then\":{\"type\":\"add_ring\",\"minutes\":45,\"label\":\"Time to shower\",\"style\":\"notification\"},\"createdBy\":\"assistant\",\"createdAt\":1763200000000,\"assistantName\":\"Claude\"}"},
+    {"description": "App default ring options JSON string", "record": "p", "name": "default_ring_options", "value": "{\"45\":{\"label\":\"Time to shower\",\"style\":\"notification\"}}", "canonical": "\"{\\\"45\\\":{\\\"label\\\":\\\"Time to shower\\\",\\\"style\\\":\\\"notification\\\"}}\""}
   ],
   "preferences": {
     "booleans": [
@@ -53,7 +59,8 @@
       "spoken_alarm_meeting_type_preference": {"maxLength": 500, "values": ["enabled", "disabled"]},
       "spoken_alarm_repetition": {"maxLength": 500, "values": ["never", "after_15_seconds", "after_30_seconds", "after_1_minute", "after_2_minutes", "once", "automatic"]},
       "rsvp_filter": {"maxLength": 500, "values": ["accepted_only", "accepted_or_tentative", "not_declined", "all_events"]},
-      "skip_event_keywords": {"maxLength": 4000, "values": null}
+      "skip_event_keywords": {"maxLength": 4000, "values": null},
+      "default_ring_options": {"values": null, "maxLength": 12000}
     },
     "longs": {
       "alarms_paused_until": [-1, 4102444800000]

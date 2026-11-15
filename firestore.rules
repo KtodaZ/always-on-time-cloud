@@ -85,7 +85,7 @@ service cloud.firestore {
     // Synced record ids: the app's preference allowlist (PortablePreferences.kt, mirrored in
     // functions/assistant-records.js PREFERENCE_NAMES and checked by a test) or a hashed key.
     function isRecordId(recordId) {
-      return recordId.matches('^(p_(dynamic_color|apply_accent_to_app|vibration_enabled|gradual_volume_enabled|spoken_alarm_include_event_name|spoken_alarm_include_time_until_event|spoken_alarm_include_location|spoken_alarm_include_helpful_reminder|respect_dnd|override_dnd_for_priority|ignore_all_day_events|auto_detect_meeting_urls|override_system_volume|smart_snooze_suggestions|default_lead_time_minutes|alarm_volume|snooze_duration_minutes|alarm_duration_seconds|max_snoozes|spoken_alarm_speech_rate_hundredths|theme_preference|accent_id|default_lead_times_csv|alert_type|vibration_pattern|spoken_alarm_meeting_type_preference|spoken_alarm_repetition|rsvp_filter|skip_event_keywords|alarms_paused_until)|[cse]_[a-f0-9]{64})$');
+      return recordId.matches('^(p_(dynamic_color|apply_accent_to_app|vibration_enabled|gradual_volume_enabled|spoken_alarm_include_event_name|spoken_alarm_include_time_until_event|spoken_alarm_include_location|spoken_alarm_include_helpful_reminder|respect_dnd|override_dnd_for_priority|ignore_all_day_events|auto_detect_meeting_urls|override_system_volume|smart_snooze_suggestions|default_lead_time_minutes|alarm_volume|snooze_duration_minutes|alarm_duration_seconds|max_snoozes|spoken_alarm_speech_rate_hundredths|theme_preference|accent_id|default_lead_times_csv|alert_type|vibration_pattern|spoken_alarm_meeting_type_preference|spoken_alarm_repetition|rsvp_filter|skip_event_keywords|default_ring_options|alarms_paused_until)|[cse]_[a-f0-9]{64}|r_[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12})$');
     }
     match /accounts/{uid} {
       allow read: if isSyncAccount(uid);
@@ -108,8 +108,10 @@ service cloud.firestore {
           && isRecordId(recordId)
           && request.resource.data.keys().hasOnly(['payload'])
           && request.resource.data.payload is string && request.resource.data.payload.size() <= 16384;
-        // Phones delete an occurrence's record once its event has ended; other records stay.
-        allow delete: if activeAccount(uid) && recordId.matches('^e_[a-f0-9]{64}$');
+        // Occurrences are removed after their event ends; rules are removed when deleted.
+        // Payloads are opaque JSON strings. Field validation and the 30-rule limit are
+        // enforced by the apps and MCP, not by these size/key checks.
+        allow delete: if activeAccount(uid) && recordId.matches('^(e_[a-f0-9]{64}|r_[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12})$');
       }
       match /history/{recordId} {
         allow read: if activeAccount(uid);

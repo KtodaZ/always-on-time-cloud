@@ -24,6 +24,9 @@ test("every assistant setting is a synced preference and accepts exactly the sha
       // Stored as the app's JSON list in a string preference with no fixed values.
       assert.equal(preferences.strings[record].values, null);
       assert.equal(setting.encode([10, 0, 10]), "[0,10]");
+    } else if (field === "defaultRingOptions") {
+      assert.equal(schema.safeParse({"45":{label:"Prepare",style:"notification"}}).success,true);
+      assert.equal(schema.safeParse({"45":{label:"x".repeat(41)}}).success,false);
     } else if (field === "skipEventKeywords") {
       assert.equal(preferences.strings[record].values, null);
       assert.equal(setting.encode(["  Lunch ", "LUNCH", "Focus  time", " "]), '["Lunch","Focus time"]');

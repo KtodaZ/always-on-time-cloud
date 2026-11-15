@@ -17,10 +17,11 @@ const CALENDAR = VECTORS.recordKeys[0].key;
 const HEX = "a".repeat(64);
 
 test("record keys reproduce every shared test vector", () => {
-  assert.equal(VECTORS.recordKeys.length, 6);
+  assert.ok(VECTORS.recordKeys.length >= 7);
   for (const { kind, input, key } of VECTORS.recordKeys) {
     if (kind === "calendar") assert.equal(calendarKey(...input), key);
     else if (kind === "series") assert.equal(seriesKey(...input), key);
+    else if (kind === "rule") assert.equal(`r_${input}`, key);
     else {
       assert.equal(`e_${sha256Hex(input)}`, key);
       const [series, start] = input.split(":");
@@ -32,7 +33,7 @@ test("record keys reproduce every shared test vector", () => {
 test("payloads encode to the canonical form in every shared vector", () => {
   assert.ok(VECTORS.payloads.length >= 8);
   for (const vector of VECTORS.payloads) {
-    const recordId = vector.record === "p" ? `p_${vector.name}` : `${vector.record}_${HEX}`;
+    const recordId = vector.record === "p" ? `p_${vector.name}` : vector.record === "r" ? "r_02652016-e79a-47a3-a9b1-891549de8a02" : `${vector.record}_${HEX}`;
     assert.equal(encodePayload(recordId, vector.value), vector.canonical, vector.description);
     // Encoding the canonical form again changes nothing.
     assert.equal(canonicalPayload(recordId, vector.canonical), vector.canonical, vector.description);
@@ -164,7 +165,7 @@ test("the Firestore rules accept exactly the synced preferences and the server's
   const fs = require("node:fs");
   const { PREFERENCE_NAMES } = require("../assistant-records");
   const rules = fs.readFileSync(path.join(__dirname, "../../firestore.rules"), "utf8");
-  const ids = /recordId\.matches\('\^\(p_\(([a-z_|]+)\)\|\[cse\]_\[a-f0-9\]\{64\}\)\$'\)/.exec(rules);
+  const ids = /recordId\.matches\('\^\(p_\(([a-z_|]+)\)/.exec(rules);
   assert.ok(ids, "isRecordId lists the preferences");
   assert.deepEqual(ids[1].split("|").sort(), [...PREFERENCE_NAMES].sort());
   const { MAX_SNAPSHOT_CHARS } = require("../assistant-data");

@@ -50,7 +50,10 @@ const setting = (record, label, extra = {}) => ({ record, label, schema: prefere
 
 const RSVP_FILTER_VALUES = PREFERENCE_STRINGS.get("rsvp_filter");
 
+const ringOptionsInput = z.record(z.string(), z.object({label:z.string().max(40).optional(),style:z.enum(["alarm","notification"]).optional()}).strict());
+
 const SETTINGS = {
+  defaultRingOptions: {record:"default_ring_options",label:"Default ring options",schema:ringOptionsInput,encode:JSON.stringify,decode:parseStored},
   defaultLeadTimes: {
     record: "default_lead_times_csv",
     label: "Default alarms",
@@ -172,6 +175,7 @@ function changeAlert(records, current = {}) {
   if (overrides.some((id) => enabledOf(id, after(id)) === false && enabledOf(id, before(id)) !== false)) {
     return "alarms_off";
   }
+  if (changed.some(id => id.startsWith("r_") && after(id)?.enabled && after(id)?.then?.type === "dont_ring")) return "alarms_off";
   if (records.p_alarm_volume) {
     const volume = after("p_alarm_volume");
     if (Number.isInteger(volume) && volume <= QUIET_VOLUME && volume < (before("p_alarm_volume") ?? DEFAULT_ALARM_VOLUME)) return "alerts_reduced";
@@ -218,6 +222,7 @@ module.exports = {
   SETTINGS,
   changeAlert,
   describePause,
+  ringOptionsInput,
   leadTimesInput,
   leadTimesText,
   parseStored,

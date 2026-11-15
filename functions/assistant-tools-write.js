@@ -14,7 +14,7 @@ const {
   PAUSED_UNTIL, RecordError, SKIP_KEYWORDS, decodeSkipKeywords, firstSkipMatch, isRecordId, samePayload, validatePayload,
 } = require("./assistant-records");
 const {
-  RSVP_FILTER_VALUES, SETTINGS, leadTimesInput, leadTimesText, parseStored, tidyLeadTimes,
+  RSVP_FILTER_VALUES, SETTINGS, ringOptionsInput, leadTimesInput, leadTimesText, parseStored, tidyLeadTimes,
 } = require("./assistant-settings");
 const {
   ToolError, formatTime, parseTime, quoted, resolveCalendar, resolveEvent,
@@ -57,13 +57,13 @@ function writeTool({ plan, ...tool }) {
 const asObject = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
 
 /** Builds an Override for set/off/reset from the stored one, keeping fields the assistant doesn't manage. */
-function nextOverride(stored, mode, leadTimes, currentLeadTimes) {
+function nextOverride(stored, mode, leadTimes, currentLeadTimes, ringOptions) {
   if (mode === "reset") return null;
   const base = { ...asObject(stored) };
   if (mode === "off") {
     return { ...base, leadTimes: base.leadTimes ?? currentLeadTimes ?? [], enabled: false };
   }
-  const next = { ...base, leadTimes, enabled: true };
+  const next = { ...base, leadTimes, enabled: true, ...(ringOptions !== undefined ? {ringOptions} : {}) };
   const added = (Array.isArray(base.addedLeadTimes) ? base.addedLeadTimes : []).filter((minutes) => leadTimes.includes(minutes));
   if (added.length) next.addedLeadTimes = added;
   else delete next.addedLeadTimes;
@@ -96,6 +96,7 @@ function keywordNote(mode, keyword) {
 
 function modeOf(args) {
   const mode = args.mode ?? "set";
+  if (args.ringOptions !== undefined && (mode !== "set" || !args.leadTimes)) throw new ToolError("ringOptions need leadTimes in set mode.");
   if (mode === "set" && !args.leadTimes) throw new ToolError("Give leadTimes to set, or use mode \"off\" or \"reset\".");
   if (mode !== "set" && args.leadTimes) throw new ToolError(`leadTimes only apply with mode "set".`);
   return mode;
@@ -111,7 +112,7 @@ const TOOLS = [
     name: "set_event_alarms",
     title: "Set alarms for one event",
     description: "Changes the alarms for one event occurrence only: set lead times, turn its alarms off, or reset it to follow its series, calendar and app settings. For every occurrence of a recurring event use set_series_alarms. Returns a changeId for confirm_change.",
-    inputSchema: { ...eventInputs, mode: modeInput("series/calendar/app"), leadTimes: leadTimesInput.optional() },
+    inputSchema: { ...eventInputs, mode: modeInput("series/calendar/app"), leadTimes: leadTimesInput.optional(), ringOptions: ringOptionsInput.optional() },
     async plan(ctx, args) {
       const mode = modeOf(args);
       const snapshot = await latestSnapshot(ctx);
@@ -128,7 +129,7 @@ const TOOLS = [
         build: (current) => {
           keyword = accountSkipMatch(current, event?.title);
           return {
-            [resolved.eventKey]: pastKeyword(nextOverride(parseStored(current[resolved.eventKey]), mode, leadTimes, currentLeadMinutes(event)), mode, keyword),
+            [resolved.eventKey]: pastKeyword(nextOverride(parseStored(current[resolved.eventKey]), mode, leadTimes, currentLeadMinutes(event), args.ringOptions), mode, keyword),
           };
         },
         finish: (out) => {
@@ -147,7 +148,7 @@ const TOOLS = [
       ...eventInputs,
       event: z.string().max(80).optional().describe("Any event key (e_...) of the series, or its series key (s_...)."),
       mode: modeInput("calendar/app"),
-      leadTimes: leadTimesInput.optional(),
+      leadTimes: leadTimesInput.optional(), ringOptions: ringOptionsInput.optional(),
     },
     async plan(ctx, args) {
       const mode = modeOf(args);
@@ -168,7 +169,7 @@ const TOOLS = [
         build: (current) => {
           keyword = accountSkipMatch(current, sample?.title);
           return {
-            [resolved.seriesKey]: pastKeyword(nextOverride(parseStored(current[resolved.seriesKey]), mode, leadTimes, currentLeadMinutes(sample)), mode, keyword),
+            [resolved.seriesKey]: pastKeyword(nextOverride(parseStored(current[resolved.seriesKey]), mode, leadTimes, currentLeadMinutes(sample), args.ringOptions), mode, keyword),
           };
         },
         finish: (out) => {
@@ -185,7 +186,7 @@ const TOOLS = [
     inputSchema: {
       calendar: z.string().min(1).max(300).describe("Calendar key, name, or Google calendarId."),
       watched: z.boolean().optional().describe("true to ring for this calendar's events, false to stop."),
-      leadTimes: leadTimesInput.optional(),
+      leadTimes: leadTimesInput.optional(), ringOptions: ringOptionsInput.optional(),
       useAppDefaultLeadTimes: z.boolean().optional().describe("true to drop the calendar's own lead times and use the app default."),
       rsvpFilter: z.enum(RSVP_FILTER_VALUES).optional().describe("Which invitations ring."),
       ringThroughDoNotDisturb: z.boolean().optional()
@@ -196,6 +197,7 @@ const TOOLS = [
       if ([watched, leadTimes, useAppDefaultLeadTimes, rsvpFilter, ringThroughDoNotDisturb].every((value) => value === undefined)) {
         throw new ToolError("Say what to change: watched, leadTimes, useAppDefaultLeadTimes, rsvpFilter or ringThroughDoNotDisturb.");
       }
+      if (args.ringOptions !== undefined && !leadTimes) throw new ToolError("Include leadTimes with ringOptions.");
       if (leadTimes && useAppDefaultLeadTimes) throw new ToolError("Use either leadTimes or useAppDefaultLeadTimes, not both.");
       const snapshot = await latestSnapshot(ctx);
       const { calendar, key } = resolveCalendar(snapshot, args.calendar, { accountEmails: await accountEmails(ctx) });
@@ -219,7 +221,8 @@ const TOOLS = [
           const stored = asObject(parseStored(current[key]));
           const overrides = { ...asObject(stored.overrides) };
           if (leadTimes) overrides.leadTimes = leadTimes;
-          if (useAppDefaultLeadTimes) delete overrides.leadTimes;
+          if (args.ringOptions !== undefined) overrides.ringOptions = args.ringOptions;
+          if (useAppDefaultLeadTimes) { delete overrides.leadTimes; delete overrides.ringOptions; }
           if (rsvpFilter) overrides.rsvpFilter = rsvpFilter;
           // Only true is stored; off is no override, as the app writes it.
           if (ringThroughDoNotDisturb === true) overrides.ringThroughDnd = true;
@@ -251,14 +254,23 @@ const TOOLS = [
         parts.push(`${setting.label.replace(/ \(.*\)$/, "").toLowerCase()} ${text}`);
       }
       // Turning vibration off silences vibrate-only alarms, so the alert type is read alongside.
+      if (next.p_default_ring_options !== undefined && next.p_default_ring_options !== null && !next.p_default_lead_times_csv) throw new ToolError("Include defaultLeadTimes with defaultRingOptions.");
       const recordIds = Object.keys(next);
+      if (recordIds.includes("p_default_lead_times_csv") && !recordIds.includes("p_default_ring_options")) recordIds.push("p_default_ring_options");
       if (next.p_vibration_enabled === false && !recordIds.includes("p_alert_type")) recordIds.push("p_alert_type");
       // A phone too old to use the list ignores it, so say so now; confirm_change says so too.
       const tooOld = recordIds.includes(`p_${SKIP_KEYWORDS}`) ? await phonesWithoutSkipKeywords(ctx) : [];
       return {
         recordIds,
         summary: `Changed settings: ${parts.join(", ")}`,
-        build: () => next,
+        build: (current) => {
+          if (recordIds.includes("p_default_ring_options") && next.p_default_ring_options !== null) {
+            const minutes = parseStored(next.p_default_lead_times_csv) ?? [];
+            const options = parseStored(next.p_default_ring_options === undefined ? parseStored(current.p_default_ring_options) : next.p_default_ring_options) ?? {};
+            next.p_default_ring_options = JSON.stringify(require("./assistant-records").canonicalRingOptions(options, minutes));
+          }
+          return next;
+        },
         finish: (out) => {
           if (tooOld.length) out.text += ` ${tooOld.map(deviceName).join(", ")} runs an older version of Always On Time that doesn't use this list, so nothing changes there until the app is updated.`;
         },
@@ -328,6 +340,7 @@ const TOOLS = [
         ? [...originalIds, "p_alert_type"] : originalIds;
       return {
         recordIds,
+        atomicReads: originalIds.some(id => id.startsWith("r_")),
         summary: `Undid: ${original.summary}`,
         build: async (current, read) => {
           const fresh = await read(activityRef);
@@ -341,6 +354,12 @@ const TOOLS = [
           // Compared by meaning: a phone re-encoding the same setting doesn't block undo.
           if (originalIds.some((id) => !samePayload(id, current[id], original.records[id].after))) {
             throw new ToolError("Those settings have changed again since, so undo would overwrite newer changes. Make the change you want directly instead.");
+          }
+          if (originalIds.some(id => id.startsWith("r_") && current[id] == null && parseStored(original.records[id].before))) {
+            const rules = await read(refs.values(ctx.db,ctx.uid).orderBy("__name__").startAt("r_").endBefore("s_").limit(100));
+            const count = rules.docs.filter(doc => parseStored(doc.data().payload)).length;
+            const restoring = originalIds.filter(id => id.startsWith("r_") && current[id] == null && parseStored(original.records[id].before)).length;
+            if (count + restoring > 30) throw new ToolError("Undo would exceed 30 rules. Delete another rule first.");
           }
           return Object.fromEntries(originalIds.map((id) => {
             const before = original.records[id].before;
