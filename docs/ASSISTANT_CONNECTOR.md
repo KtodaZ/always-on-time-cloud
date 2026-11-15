@@ -105,6 +105,9 @@ parameter (RFC 9207).
 
 | Tool | What it does |
 | --- | --- |
+| `list_rules` | Rule sentences, enabled state and creator |
+| `preview_rule` | Preview create/edit/delete/enable/disable against the latest snapshot; expires in 15 minutes |
+| `apply_rule` | Apply an approved preview once, with activity, confirmation and undo |
 | `get_status` | Connected phones, snapshot age, pause state, capabilities, whether setup is confirmed |
 | `list_upcoming_alarms` | Alarms that will ring in a time range (default next 24 h), in ring order |
 | `find_events` | Searches event titles in the next 30 days; returns keys and alarms |
@@ -306,3 +309,40 @@ in the Emulator UI so the account counts as set up, or seed the [review account]
 (its uid as `ASSISTANT_DEMO_UID` in `functions/.env.local`) and sign in with email. Without a phone, tools report that no phone has shared its alarms; [`functions/testing/assistant-e2e.cjs`](../functions/testing/assistant-e2e.cjs)
 shows how to write a device and snapshot to stand in for one. In the emulator, FCM messages are
 logged instead of sent, and APNs pushes are recorded in the `emulatorApnsPushes` collection.
+
+### Alarm rules and per-ring options
+
+`list_rules` returns each rule's sentence, enabled state and creator. `preview_rule` takes
+`operation: create | edit | delete | enable | disable`, an existing `ruleId` except for create,
+and a `rule: {enabled?, order?, when, then}` for create/edit. Conditions and actions follow the
+[portable protocol](ASSISTANT_PROTOCOL.md#alarm-rules-and-ring-options).
+
+Show the returned sentence, before/after ring times, silenced events, counts and large-share note,
+then obtain the user's yes in chat before `apply_rule({previewId})`. There is no second app approval.
+The opaque preview is stored under the authenticated account, tied to the connection, exact payload
+and the settings/snapshot used for preview, and expires after 15 minutes. It is consumed atomically
+with the rule and activity write. Missing, expired, changed and reused previews are rejected.
+A changed snapshot/settings requires a new preview. No-op changes produce no preview.
+Rules use the existing `changeId`, `confirm_change`, risky-change notification and `undo` flow.
+A silencing rule's activity summary names the assistant, rule sentence and affected-event count.
+Rule deletion removes the synced record; undo restores it with its original creator metadata, subject to the 30-rule limit. Server-only deletion markers deliver deleted rules through incremental iPhone sync as `payload: "null"`, including when the original push was missed.
+
+Previews are estimates from the latest phone snapshot and account settings, never calendar writes.
+The phone computes the authoritative schedule. Snapshots omit local-only overrides, some ordinary
+rings that have merged with rule rings, and suppressed travel times. Visible travel rings are included in before/after results. Those effects cannot be
+reconstructed exactly from the current snapshot contract; preview output explicitly says so.
+Past events still present in the snapshot participate in same-day matching, but only upcoming
+changes are shown and counted. At most 30 rules, including disabled rules, may be managed here.
+
+`set_event_alarms`, `set_series_alarms` and `set_calendar` accept `ringOptions` alongside `leadTimes`:
+`{"45":{"label":"Prepare","style":"notification"}}`. `update_settings` accepts
+`settings.defaultRingOptions` alongside `settings.defaultLeadTimes`. Labels use at most 40 UTF-16
+units, single-line and trimmed. Style is `alarm` (default) or `notification`. Unlisted minutes and
+empty/default entries are dropped on rewrite; travel alarms have no such options.
+
+Release prerequisite: deploy the Firestore rules allowing `r_<uuid>`, rule deletion and
+`p_default_ring_options`, plus the assistant functions and `assistantRulePreviews.expiresAt` TTL
+configuration, before shipping app support. The preview expiry check is enforced synchronously;
+TTL merely removes expired documents later. Firestore cannot decode JSON string payloads or count
+siblings in security rules: direct phone writes retain the existing key/size/owner checks; apps
+must validate fields and enforce their 30-rule limit. MCP independently validates both.
