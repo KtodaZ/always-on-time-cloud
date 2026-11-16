@@ -83,6 +83,35 @@ describe("countdown windows and APNs lifecycle", () => {
     expect(live(h)[3].body.aps.attributes).toEqual({presentationID: start});
     await tick(h, START + 20 * MINUTE); expect(live(h)).toHaveLength(4);
   });
+  it("shows two overlapping meetings at once, never a third, and keeps the later card when the first ends", async () => {
+    const third = "3".repeat(64), pickupToken = "ab".repeat(32);
+    const h = await setup(); const s = snapshot(h, { milestones: [
+      { presentationID: departure, kind: "start", targetAtMs: START + 15 * MINUTE },
+      { presentationID: start, kind: "start", targetAtMs: START + 20 * MINUTE },
+      { presentationID: third, kind: "start", targetAtMs: START + 21 * MINUTE },
+    ] }); await put(h, s);
+    await tick(h, START + 11 * MINUTE); await h.tick(); await h.tick();
+    expect(live(h).map(c => c.body.aps.attributes)).toEqual([{presentationID: departure}, {presentationID: start}]);
+    const activities = [{activityID: "a", presentationID: departure, pushToken: pickupToken},
+      {activityID: "b", presentationID: start, pushToken: updateToken}];
+    await put(h, {...s, revision: 2, activities}); await h.tick(); await h.tick();
+    expect(live(h).map(c => c.body.aps.event)).toEqual(["start", "start", "update", "update"]);
+    // The first meeting starts: its card ends and the third takes the free slot.
+    await tick(h, START + 15 * MINUTE); await h.tick(); await h.tick();
+    const after = live(h).slice(4);
+    expect(after.map(c => [c.body.aps.event, c.url.endsWith(pickupToken)])).toEqual([["end", true], ["start", false]]);
+    expect(after[1].body.aps.attributes).toEqual({presentationID: third});
+  });
+  it("a dismissed card frees its slot without ending the other meeting's card", async () => {
+    const h = await setup(); const s = snapshot(h, { milestones: [
+      { presentationID: departure, kind: "start", targetAtMs: START + 15 * MINUTE },
+      { presentationID: start, kind: "start", targetAtMs: START + 20 * MINUTE },
+    ] }); await put(h, s);
+    await tick(h, START + 11 * MINUTE); await h.tick();
+    const activities = [{activityID: "b", presentationID: start, pushToken: updateToken}];
+    await put(h, {...s, revision: 2, activities, dismissedPresentationIDs: [departure]}); await h.tick(); await h.tick();
+    expect(live(h).map(c => c.body.aps.event)).toEqual(["start", "start", "update"]);
+  });
   it("does not start an already expired window or a dismissed presentation", async () => {
     const h = await setup(); const s = snapshot(h); await put(h, {...s, dismissedPresentationIDs: [start]});
     await tick(h, START + 10 * MINUTE); expect(live(h)).toHaveLength(0);

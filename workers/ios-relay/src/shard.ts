@@ -1,4 +1,4 @@
-import { releaseUnsentCountdownStart, countdownPayload, countdownWake, countdownWork, replaceCountdown, selectedMilestone, type CountdownSnapshot, type CountdownState, type CountdownWork } from "./countdown";
+import { releaseUnsentCountdownStart, countdownPayload, countdownWake, countdownWork, replaceCountdown, selectedMilestones, type CountdownSnapshot, type CountdownState, type CountdownWork } from "./countdown";
 // InstallShard: one of SHARD_COUNT Durable Objects (SQLite storage). A shard holds
 //  - the installs whose ID hashes to it, with their alarm triggers, subscriptions, push
 //    bookkeeping and per-install rate limit, and sends their pushes from its DO alarm;
@@ -1151,7 +1151,7 @@ export class InstallShard extends DurableObject<Env> {
       }, () => {
         const latest = this.countdownState(installId), install = this.installRow(installId);
         if (!latest || !install || latest.snapshot.revision !== work.revision) return false;
-        if (work.event === "start") return install.enabled === 1 && latest.snapshot.pushToStartToken === work.token && selectedMilestone(latest.snapshot, this.now())?.presentationID === work.milestone.presentationID;
+        if (work.event === "start") return install.enabled === 1 && latest.snapshot.pushToStartToken === work.token && selectedMilestones(latest.snapshot, this.now()).some(m => m.presentationID === work.milestone.presentationID);
         return !!work.activityID && latest.activities[work.activityID]?.pushToken === work.token;
       }, () => { sendAttempted = true; });
     } catch { /* An ambiguous start is deliberately not retried. Updates/ends have bounded retry. */ }
