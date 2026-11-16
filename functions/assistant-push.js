@@ -61,7 +61,7 @@ const assistantLabel = (value) => cleanText(value, 60) || "Your assistant";
  * after force quit and in Low Power Mode, and every push shows a notification: the quiet ones share
  * the relay's `aot-sync` entry, a change that could stop alarms gets its own entry with Undo.
  */
-function buildAssistantApnsRequest({ type, data = {}, deviceId, at, alert = null, assistant = null }) {
+function buildAssistantApnsRequest({ type, data = {}, deviceId, at, alert = null, assistant = null, ruleAlert = null }) {
   const aot = { v: PAYLOAD_VERSION, kind: "assistant", type, at, deviceId };
   let aps;
   let collapseId = SYNC_COLLAPSE_ID;
@@ -75,7 +75,7 @@ function buildAssistantApnsRequest({ type, data = {}, deviceId, at, alert = null
     Object.assign(aot, { pingId: String(data.pingId), assistant: name });
     collapseId = PING_COLLAPSE_ID;
   } else if (type === "sync" && alert) {
-    aps = { alert: { ...CHANGE_ALERT }, "mutable-content": 1, "interruption-level": "active", category: CHANGE_CATEGORY };
+    aps = { alert: { ...CHANGE_ALERT, ...(ruleAlert?.text ? {body: cleanText(ruleAlert.text,500)} : {}) }, "mutable-content": 1, "interruption-level": "active", category: CHANGE_CATEGORY };
     Object.assign(aot, { changeId: String(data.changeId), alert: String(alert), assistant: assistantLabel(assistant) });
     collapseId = `aot-change-${data.changeId}`;
   } else if (type === "sync" || type === "publish") {
@@ -154,7 +154,7 @@ async function sendToDevices({ db, messaging, apns = null, logger, logId = null,
 
   async function sendApns(device) {
     const at = now();
-    const request = buildAssistantApnsRequest({ type, data, deviceId: device.id, at, alert: options.alert ?? null, assistant: options.assistant ?? null });
+    const request = buildAssistantApnsRequest({ type, data, deviceId: device.id, at, alert: options.alert ?? null, assistant: options.assistant ?? null, ruleAlert: options.ruleAlert ?? null });
     let response;
     try {
       if (!apns) throw new ApnsConfigError("no APNs transport");

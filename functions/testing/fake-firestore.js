@@ -220,6 +220,7 @@ class Transaction {
     return refOrQuery.get();
   }
 
+  create(ref, value) { this.pending.push(() => ref.create(value)); }
   set(ref, value, options) { this.pending.push(() => ref.set(value, options)); }
   update(ref, value) { this.pending.push(() => ref.update(value)); }
   delete(ref) { this.pending.push(() => ref.delete()); }

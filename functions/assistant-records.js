@@ -15,7 +15,7 @@ const MAX_LEAD_TIMES = 20;
 const MAX_TRAVEL_LEAD_TIMES = 4;
 const TRAVEL_LEAD_TIME_MAX = 179;
 
-const RECORD_ID = /^(p_[a-z_]+|[cse]_[a-f0-9]{64})$/;
+const RECORD_ID = /^(p_[a-z_]+|[cse]_[a-f0-9]{64}|r_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/;
 const KEY = { c: /^c_[a-f0-9]{64}$/, s: /^s_[a-f0-9]{64}$/, e: /^e_[a-f0-9]{64}$/ };
 
 // The app's synced preferences (PortablePreferences.kt), mirrored in
@@ -49,13 +49,14 @@ const PREFERENCE_STRINGS = new Map([
   ["spoken_alarm_repetition", ["never", "after_15_seconds", "after_30_seconds", "after_1_minute", "after_2_minutes", "once", "automatic"]],
   ["rsvp_filter", ["accepted_only", "accepted_or_tentative", "not_declined", "all_events"]],
   ["skip_event_keywords", null],
+  ["default_ring_options", null],
 ]);
 // "Skip events containing": a string holding a JSON list (SkipKeywords.kt, SkipKeywords.swift).
 const SKIP_KEYWORDS = "skip_event_keywords";
 const MAX_SKIP_KEYWORDS = 30;
 const MAX_SKIP_KEYWORD_LENGTH = 60;
 // Strings allowed past PREFERENCE_STRING_MAX: the JSON at the limits above, however it is escaped.
-const PREFERENCE_STRING_LIMITS = new Map([[SKIP_KEYWORDS, 4000]]);
+const PREFERENCE_STRING_LIMITS = new Map([[SKIP_KEYWORDS, 4000], ["default_ring_options", 12000]]);
 const PAUSED_UNTIL = "alarms_paused_until";
 // 0 = not paused, -1 = until resumed, otherwise epoch ms up to 2100-01-01 (PortablePreferences.LATEST_EPOCH_MILLIS).
 const PAUSED_UNTIL_MAX = 4102444800000;
@@ -196,6 +197,8 @@ function validateSkipKeywords(value) {
     throw new RecordError(`${SKIP_KEYWORDS} keywords must be 1-${MAX_SKIP_KEYWORD_LENGTH} characters, tidy and different from each other`);
   }
 }
+
+const { validateRule, canonicalRule, validateRingOptions, canonicalRingOptions } = require("./assistant-rule-model").model({RecordError, cleanSkipKeyword, foldSkipKeyword});
 
 const sha256Hex = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -339,7 +342,7 @@ function googleEventKeys(calendar, { eventId, recurringEventId, originalStartTim
 
 const OVERRIDE_FIELDS = [
   "leadTimes", "enabled", "volume", "vibrationPattern", "ignoreAllDay", "rsvpFilter", "addedLeadTimes", "travelLeadTimes",
-  "ringThroughDnd", "keywordExempt",
+  "ringThroughDnd", "keywordExempt", "ringOptions",
 ];
 const CALENDAR_FIELDS = ["selected", "overrides"];
 const LEAD_TIME_LISTS = new Set(["leadTimes", "addedLeadTimes", "travelLeadTimes"]);
@@ -360,6 +363,9 @@ function validateOverride(value) {
     const item = value[field];
     if (item === null || item === undefined) continue;
     switch (field) {
+      case "ringOptions":
+        canonicalRingOptions(item, value.leadTimes ?? []);
+        break;
       case "leadTimes":
       case "addedLeadTimes":
         intList(item, field, { min: LEAD_TIME_MIN, max: LEAD_TIME_MAX, maxSize: MAX_LEAD_TIMES });
@@ -399,6 +405,11 @@ function validatePreference(name, value) {
     if (typeof value !== "string" || value.length > max) throw new RecordError(`${name} must be text up to ${max} characters`);
     if (allowed && !allowed.includes(value)) throw new RecordError(`${name} must be one of ${allowed.join(", ")}`);
     if (name === SKIP_KEYWORDS) validateSkipKeywords(value);
+    if (name === "default_ring_options") {
+      let options;
+      try { options = JSON.parse(value); } catch { throw new RecordError("default_ring_options must hold JSON"); }
+      canonicalRingOptions(options, Object.keys(options ?? {}).map(Number));
+    }
   } else {
     const [min, max] = PREFERENCE_LONGS.get(name);
     if (!Number.isSafeInteger(value) || value < min || value > max) throw new RecordError(`${name} must be 0, -1 or epoch milliseconds before 2100`);
@@ -429,6 +440,7 @@ function validateValue(recordId, value) {
     return value;
   }
   if (value === null) return value;
+  if (recordId.startsWith("r_")) return validateRule(value);
   return validateOverride(value);
 }
 
@@ -454,11 +466,16 @@ function ordered(value, order, transform = (field, item) => item) {
   return out;
 }
 
-const canonicalOverride = (value) => ordered(value, OVERRIDE_FIELDS, (field, item) => (LEAD_TIME_LISTS.has(field) ? ascendingUnique(item) : item));
+const canonicalOverride = (value) => {
+ const out = ordered(value, OVERRIDE_FIELDS, (field, item) => field === "ringOptions" ? canonicalRingOptions(item, value.leadTimes ?? []) : LEAD_TIME_LISTS.has(field) ? ascendingUnique(item) : item);
+ if (out.ringOptions && !Object.keys(out.ringOptions).length) delete out.ringOptions;
+ return out;
+};
 
 /** The canonical form of a validated value. */
 function canonicalValue(recordId, value) {
   if (recordId.startsWith("p_") || value === null) return value;
+  if (recordId.startsWith("r_")) return canonicalRule(value);
   if (recordId.startsWith("c_")) return ordered(value, CALENDAR_FIELDS, (field, item) => (field === "overrides" ? canonicalOverride(item) : item));
   return canonicalOverride(value);
 }
@@ -491,6 +508,7 @@ function canonicalPayload(recordId, payload) {
 const samePayload = (recordId, a, b) => canonicalPayload(recordId, a) === canonicalPayload(recordId, b);
 
 module.exports = {
+  validateRule, canonicalRingOptions, validateRingOptions, cleanSkipKeyword,
   MAX_SKIP_KEYWORDS,
   MAX_SKIP_KEYWORD_LENGTH,
   PREFERENCE_STRING_LIMITS,

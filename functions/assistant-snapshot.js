@@ -147,7 +147,7 @@ const shortKey = (key) => (typeof key === "string" ? key.slice(0, 2 + SHORT_KEY_
 
 // The snapshot vocabulary (docs/ASSISTANT_PROTOCOL.md "Snapshot"); anything else becomes null.
 const ALARM_KINDS = ["lead", "travel"];
-const ALARM_SOURCES = ["app", "calendar", "series", "event", "travel"];
+const ALARM_SOURCES = ["app", "calendar", "series", "event", "travel", "rule"];
 const ALARM_STATUSES = ["on", "off", "paused", "past"];
 const RSVP_VALUES = ["ACCEPTED", "TENTATIVE", "DECLINED", "INVITED", "NONE", "ORGANIZER"];
 const RSVP_FILTERS = ["accepted_only", "accepted_or_tentative", "not_declined", "all_events"];
@@ -166,6 +166,9 @@ function normalizeAlarm(alarm) {
     minutes: Number.isInteger(alarm.minutes) ? alarm.minutes : 0,
     source: oneOf(ALARM_SOURCES, alarm.source),
     status: oneOf(ALARM_STATUSES, alarm.status) ?? "on",
+    ...(Array.isArray(alarm.ruleIds) ? {ruleIds: alarm.ruleIds.filter(id => /^(?:r_)?[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id)).slice(0,30)} : {}),
+    ...(alarm.label ? {label: cleanText(alarm.label,40)} : {}),
+    ...(alarm.style === "notification" || alarm.style === "alarm" ? {style:alarm.style} : {}),
   };
 }
 
@@ -182,6 +185,7 @@ function normalizeEvent(event) {
     rsvp: oneOf(RSVP_VALUES, event.rsvp),
     alarms: (Array.isArray(event.alarms) ? event.alarms : []).filter((alarm) => alarm && Number.isFinite(alarm.at)).map(normalizeAlarm),
     skippedByKeyword: cleanText(event.skippedByKeyword) || null,
+    ...(Array.isArray(event.silencedByRules) ? {silencedByRules:event.silencedByRules.filter(id => /^(?:r_)?[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id)).slice(0,30)} : {}),
   };
 }
 

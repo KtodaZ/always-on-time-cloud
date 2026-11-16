@@ -161,11 +161,11 @@ async function phonesWithoutSkipKeywords(ctx) {
     .map(({ deviceId }) => devices.find((device) => device.id === deviceId) ?? {});
 }
 
-async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite }) {
+async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite, alert: alertForChange = changeAlert, ruleAlert, atomicReads }) {
   let saved;
   try {
     saved = await recordChange(ctx.db, ctx.uid, {
-      recordIds, build, assistant: ctx.grant.clientName, tool, summary, now: ctx.now(), afterWrite, alert: changeAlert,
+      recordIds, build, assistant: ctx.grant.clientName, tool, summary, now: ctx.now(), afterWrite, alert: alertForChange, ruleAlert, atomicReads,
     });
   } catch (error) {
     if (error instanceof RecordError) throw new ToolError(`That setting can't be saved: ${error.message}.`);
@@ -183,7 +183,7 @@ async function applyChange(ctx, { recordIds, build, tool, summary, afterWrite })
   try {
     const devices = await readDevices(ctx.db, ctx.uid);
     // iPhones show a change that could stop alarms with Undo, naming the assistant that made it.
-    const sent = await push(ctx, "sync", { changeId }, devices, alert ? { alert, assistant: ctx.grant.clientName } : {});
+    const sent = await push(ctx, "sync", { changeId }, devices, alert ? { alert, assistant: ctx.grant.clientName, ...(ruleAlert ? {ruleAlert} : {}) } : {});
     sentTo = sent.sent.map(deviceName);
     if (sent.sent.length) delivery = `Sent to ${names(sent.sent)}; call confirm_change with this changeId to check the phone applied it.`;
     else if (!devices.length) delivery = "No phone is connected yet; the change applies when Always On Time next syncs on the user's phone.";

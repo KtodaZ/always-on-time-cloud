@@ -40,8 +40,10 @@ test('only a Google or Apple session linked to that provider counts, whatever el
 test('deleting reports whether an Always On Time account used the sign-in', async () => {
   const db = new FakeFirestore();
   db.documents.set('accounts/user', { active: true, schemaVersion: 1 });
+  db.documents.set('accounts/user/assistantRuleDeletions/r_deleted', {payload:'null'});
   const auth = { deleteUser: async () => {} };
   assert.deepEqual(await deleteAccountData(db, auth, 'user'), { hadAccount: true });
+  assert.equal(db.documents.has('accounts/user/assistantRuleDeletions/r_deleted'),false);
   assert.deepEqual(await deleteAccountData(db, auth, 'stray'), { hadAccount: false });
   assert.deepEqual(db.documents.get('accounts/stray'), { active: false, schemaVersion: 1 }, 'a stray sign-in still leaves the marker');
 });

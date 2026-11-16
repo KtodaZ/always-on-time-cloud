@@ -34,7 +34,7 @@ const DENTIST_SERIES = seriesKey(WORK, "4kq0l1v3s9example");
 const DENTIST = occurrenceKey(DENTIST_SERIES, null);
 const DENTIST_START = T0 + 26 * HOUR;
 const TOOL_NAMES = [
-  "get_status", "list_upcoming_alarms", "find_events", "explain_alarm", "list_calendars", "get_settings", "get_alarm_history",
+  "list_rules", "preview_rule", "apply_rule", "get_status", "list_upcoming_alarms", "find_events", "explain_alarm", "list_calendars", "get_settings", "get_alarm_history",
   "set_event_alarms", "set_series_alarms", "set_calendar", "update_settings", "pause_alarms", "resume_alarms", "undo",
   "confirm_change", "test_connection", "refresh", "open_in_app",
 ];

@@ -130,15 +130,24 @@ const valueItem = (doc) => ({ id: doc.id, payload: doc.data().payload ?? null, u
  */
 async function valuesSince(db, uid, since) {
   const values = refs.values(db, uid);
-  const page = await values.where("updatedAt", ">=", new Date(since + 1)).orderBy("updatedAt").limit(PAGE_SIZE + 1).get();
-  let items = page.docs.map(valueItem);
-  if (items.length <= PAGE_SIZE) return { values: items, more: false };
+  const deletions = refs.ruleDeletions(db, uid);
+  const query = collection => collection.where("updatedAt", ">=", new Date(since + 1)).orderBy("updatedAt").limit(PAGE_SIZE + 1).get();
+  const pages = await Promise.all([query(values), query(deletions)]);
+  // A phone can restore a rule directly (e.g. local undo). A live record wins over
+  // an old delivery tombstone, including phone writes without updatedAt.
+  const live = await Promise.all(pages[1].docs.map(doc => values.doc(doc.id).get()));
+  const merge = (docs, deleted, restored) => [...docs.map(valueItem), ...deleted.map((doc,i) => ({...valueItem(doc), ...(restored[i].exists ? {payload:restored[i].data().payload} : {})}))]
+    .sort((a,b) => a.updatedAt-b.updatedAt || a.id.localeCompare(b.id));
+  let items = merge(pages[0].docs, pages[1].docs, live);
+  const hasMore = pages.some(page => page.size > PAGE_SIZE);
+  if (items.length <= PAGE_SIZE) return { values: items, more: hasMore };
   const boundary = items[PAGE_SIZE].updatedAt;
-  items = items.slice(0, PAGE_SIZE).filter((item) => item.updatedAt < boundary);
-  if (items.length === 0) {
-    const bucket = await values.where("updatedAt", ">=", new Date(boundary)).where("updatedAt", "<", new Date(boundary + 1))
-      .orderBy("updatedAt").limit(MAX_BUCKET).get();
-    items = bucket.docs.map(valueItem);
+  items = items.slice(0, PAGE_SIZE).filter(item => item.updatedAt < boundary);
+  if (!items.length) {
+    const bucket = collection => collection.where("updatedAt", ">=", new Date(boundary)).where("updatedAt", "<", new Date(boundary + 1)).orderBy("updatedAt").limit(MAX_BUCKET).get();
+    const buckets = await Promise.all([bucket(values),bucket(deletions)]);
+    const restored = await Promise.all(buckets[1].docs.map(doc => values.doc(doc.id).get()));
+    items = merge(buckets[0].docs,buckets[1].docs,restored);
   }
   return { values: items, more: true };
 }
@@ -153,6 +162,7 @@ async function changeInfo(db, uid, changeId) {
     changeId,
     assistant: typeof data.assistant === "string" ? data.assistant : null,
     alert: typeof data.alert === "string" ? data.alert : null,
+    ...(data.tool === "apply_rule" && data.ruleAlert ? {ruleAlert:data.ruleAlert} : {}),
     writtenAt: toMillis(data.writtenAt),
     undoneAt: toMillis(data.undoneAt),
     recordIds: data.records && typeof data.records === "object" ? Object.keys(data.records).sort() : [],

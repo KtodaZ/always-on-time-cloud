@@ -266,3 +266,12 @@ test("test_connection and get_status treat an iPhone with an APNs token as reach
   const status = await tool("get_status").handler(ctx, {});
   assert.deepEqual(status.data.phones.map((phone) => [phone.name, phone.canReceiveMessages]), [["iPhone 17", true], ["iPhone 15", false]]);
 });
+
+test('risky rule notifications name the connected assistant and rule, with the usual Undo category',()=>{
+  const text="Claude added a rule: Don't ring for Lunch on Work · 3 events";
+  const request=buildAssistantApnsRequest({type:'sync',data:{changeId:'ch_test'},deviceId:IPHONE,at:T0,alert:'alarms_off',assistant:'Claude',ruleAlert:{text}});
+  const payload=JSON.parse(request.body);
+  assert.equal(payload.aps.alert.body,text);
+  assert.equal(payload.aps.category,CHANGE_CATEGORY);
+  assert.equal(payload.aot.assistant,'Claude');
+});

@@ -50,6 +50,7 @@ const refs = {
   snapshots: (db, uid) => account(db, uid).collection("assistantSnapshots"),
   activity: (db, uid) => account(db, uid).collection("assistantActivity"),
   values: (db, uid) => account(db, uid).collection("values"),
+  ruleDeletions: (db, uid) => account(db, uid).collection("assistantRuleDeletions"),
   history: (db, uid) => account(db, uid).collection("history"),
 };
 
@@ -208,7 +209,7 @@ async function deleteCollection(db, collection) {
  * false.
  */
 async function deleteConnectorData(db, uid, { onlyIfDisconnected = false } = {}) {
-  for (const collection of [refs.snapshots(db, uid), refs.devices(db, uid), refs.activity(db, uid)]) {
+  for (const collection of [refs.snapshots(db, uid), refs.devices(db, uid), refs.activity(db, uid), account(db,uid).collection("assistantRulePreviews")]) {
     if (onlyIfDisconnected) {
       const state = await refs.state(db, uid).get();
       if (state.exists && state.data().connected === true) return false;
@@ -240,16 +241,17 @@ const MAX_ATTEMPTS = 5;
  * The activity's `writtenAt` and the values' `updatedAt` are the same server timestamp (the commit
  * time), which phones report back.
  */
-async function recordChange(db, uid, { recordIds, build, assistant, tool, summary, now, afterWrite, alert }) {
+async function recordChange(db, uid, { recordIds, build, assistant, tool, summary, now, afterWrite, alert, ruleAlert, atomicReads = false, transaction = null }) {
+  if (atomicReads && !transaction) return db.runTransaction(tx => recordChange(db, uid, {recordIds, build, assistant, tool, summary, now, afterWrite, alert, ruleAlert, transaction: tx}));
   const values = refs.values(db, uid);
   for (let attempt = 1; ; attempt += 1) {
     const snapshots = new Map();
     const read = async (ref) => {
-      const doc = await ref.get();
+      const doc = await (transaction ? transaction.get(ref) : ref.get());
       snapshots.set(ref.path, doc);
       return doc;
     };
-    const [root, ...docs] = await Promise.all([refs.account(db, uid).get(), ...recordIds.map((id) => read(values.doc(id)))]);
+    const [root, ...docs] = await Promise.all([(transaction ? transaction.get(refs.account(db, uid)) : refs.account(db, uid).get()), ...recordIds.map((id) => read(values.doc(id)))]);
     if (!root.exists || root.data().active !== true) throw new RecordError("the account is no longer active");
     const current = Object.fromEntries(docs.map((doc, index) => [recordIds[index], doc.exists ? doc.data().payload ?? null : null]));
     const next = await build(current, read);
@@ -265,13 +267,14 @@ async function recordChange(db, uid, { recordIds, build, assistant, tool, summar
     const changeId = randomId(CHANGE_ID_PREFIX, CHANGE_ID_BYTES);
     const activityRef = refs.activity(db, uid).doc(changeId);
     const changeAlert = alert ? alert(records, current) : null;
-    const batch = db.batch();
+    const batch = transaction ?? db.batch();
     batch.create(activityRef, {
       assistant: String(assistant ?? "Assistant").slice(0, 60),
       tool,
       summary: String(summary).slice(0, 500),
       records,
       ...(changeAlert ? { alert: changeAlert } : {}),
+      ...(ruleAlert ? {ruleAlert} : {}),
       // Every server timestamp in one commit resolves to the commit time, so this equals the
       // values' updatedAt below, which phones report back.
       writtenAt: FieldValue.serverTimestamp(),
@@ -282,7 +285,15 @@ async function recordChange(db, uid, { recordIds, build, assistant, tool, summar
       // Android's Firestore SDK doesn't expose updateTime, so phones report this field back as
       // valuesAppliedThrough. Phone writes replace it.
       const value = { payload: after, updatedAt: FieldValue.serverTimestamp() };
-      if (doc.exists) batch.update(doc.ref, value, { lastUpdateTime: doc.updateTime });
+      if (recordId.startsWith("r_")) {
+        // Keep a server-only delivery tombstone: the iPhone extension reads incremental
+        // values rather than a Firestore listener, and must also learn about deletion.
+        const deletion = refs.ruleDeletions(db, uid).doc(recordId);
+        if (after === "null") batch.set(deletion, {payload: "null", updatedAt: FieldValue.serverTimestamp()});
+        else batch.delete(deletion);
+      }
+      if (recordId.startsWith("r_") && after === "null") { if (doc.exists) batch.delete(doc.ref, {lastUpdateTime:doc.updateTime}); }
+      else if (doc.exists) batch.update(doc.ref, value, { lastUpdateTime: doc.updateTime });
       else batch.create(doc.ref, value);
     }
     if (afterWrite) afterWrite(batch, (ref) => snapshots.get(ref.path));
@@ -290,7 +301,7 @@ async function recordChange(db, uid, { recordIds, build, assistant, tool, summar
     // account deletion has written its tombstone since, this fails and the retry stops the change.
     batch.update(root.ref, { active: true }, { lastUpdateTime: root.updateTime });
     try {
-      await batch.commit();
+      if (!transaction) await batch.commit();
     } catch (error) {
       if (CONFLICT_CODES.has(error?.code) && attempt < MAX_ATTEMPTS) continue;
       throw error;

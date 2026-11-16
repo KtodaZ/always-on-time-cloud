@@ -167,6 +167,7 @@ and no escaping beyond JSON's required escapes (kotlinx `Json.encodeToString(lis
 - Occurrence: `e_` + sha256(`{seriesKey}:{originalStartMillis}`) for recurring events, or
   `e_` + sha256(`{seriesKey}:single`) for single events.
 - Preferences: `p_{name}` from the allowlist below.
+- Alarm rules: `r_<lowercase UUID>`; see [rules and ring options](#alarm-rules-and-ring-options).
 
 Test vectors (both implementations must reproduce them; also in the vectors file):
 
@@ -352,7 +353,7 @@ echoes a `publish` push's `aot.requestId`. `204`.
 
 - `change` is the [activity](#activity) entry for `changeId`, or null when it is absent, unknown or
   expired. `alert` and `undoneAt` are null when absent. Its summary and before/after payloads are
-  never returned.
+  never returned, except a rule change may include `ruleAlert` (`text`, `sentence`, `operation`, `affectedCount`) so the phone can name the rule in its Undo notification.
 - `values` are the records the connector wrote after `since`: those whose `updatedAt`, in whole
   milliseconds, is greater than `since`, oldest first, with their current payload. Records phones
   wrote have no `updatedAt` and are never listed; nor are deleted ones.
@@ -413,3 +414,74 @@ same change as the code, and ship the side that must accept a value before the s
   `DESTINATIONS` and `appLink` in [`assistant-snapshot.js`](../functions/assistant-snapshot.js)
   (`open_in_app` takes its values) and this file's App Links list. The Hosting fallback in
   `account-web/open/` serves every path, so it needs no change.
+
+## Alarm rules and ring options
+
+Synced `values` keys now include `r_<uuid>` (lowercase UUID, not a hash). Each rule payload is
+compact JSON with declaration order:
+
+```json
+{"enabled":true,"order":0,"when":[{"type":"next_after","text":"Gym","hours":2}],"then":{"type":"add_ring","minutes":45,"label":"Time to shower","style":"notification"},"createdBy":"assistant","createdAt":1763200000000,"assistantName":"Claude"}
+```
+
+Conditions have ordered fields `type, text, calendarKey, hours`; actions have
+`type, minutes, label, style`. Null fields are omitted and future fields retained. A rule has
+one or two conditions, all required: `first_of_day`, `title_contains` (the skip-keyword whole-word
+matcher), `on_calendar` (portable calendar key), or `next_after` (whole-word predecessor text;
+1–6 hours, default 2). At most one first-of-day and next-after condition per rule. Actions are
+`add_ring` (1–2880 minutes, optional label/style) or `dont_ring` (all rings, including travel).
+Unknown condition/action vocabulary is retained and inert. `createdBy` is `user` or `assistant`;
+`createdAt` is nonnegative epoch ms; optional `assistantName` is 1–100 UTF-16 units and only valid
+for assistant-created rules. MCP sets it from the connected client name. There are at most 30 rules.
+Deleting a rule deletes its record. The normal activity before/after payloads support undo.
+
+Own event or series choices of lead times/enabled beat every rule. Rules never revive filtered
+or disabled events. `dont_ring` wins over added rings. Added rings stack; same-minute `alarm`
+beats `notification`, and rule labels beat inherited labels (rule order breaks equal-tier ties).
+All-day events and silent duplicate copies are never matched or linked. `first_of_day` counts
+events that would ring (a usual ring on, not silenced by `dont_ring`): first-of-day `dont_ring`
+rules look past events ordinary `dont_ring` rules silence, then first-of-day `add_ring` rules look
+past every silenced event. `next_after` links each event to the first start at/after its end on
+the same local day, within the inclusive gap (default 2 hours). Only the first 30 rules by
+`order`, then id, take effect. Rules evaluate whole local days; previews list and count only
+upcoming events. Rules are derived on the phone, never
+materialized as occurrence overrides by MCP.
+
+Overrides on `c_` (inside `overrides`), `s_` and `e_` can include optional `ringOptions`, after
+`keywordExempt` in canonical field order. It maps canonical integer-minute strings to
+`{label?, style?}`. Keys sort numerically, label precedes style, nulls are omitted, `alarm` is
+omitted, empty options/maps and minutes absent from `leadTimes` are dropped. Unknown option fields
+survive on retained minutes. Label is cleaned with the app's keyword cleaner and bounded at 40
+UTF-16 units; style is `alarm` or `notification`. The new allowlisted string preference
+`p_default_ring_options` contains the same JSON object (max 12,000 characters).
+Older apps retain unknown fields and use ordinary full alarms with no labels.
+
+Snapshot alarms accept `source: "rule"`, `ruleIds`, `label`, and `style`; events accept
+`silencedByRules`. Rule IDs in snapshot provenance may be bare UUIDs (the Android model's local
+IDs) or `r_<uuid>` keys; the reader keeps both and resolves either to its synced rule for
+`explain_alarm`. Read tools expose the metadata. This does not change snapshot schemaVersion.
+The current snapshot lacks enough ordinary/pre-rule inputs to guarantee exact previews of every
+edit/deletion (local-only choices, merged ring provenance, suppressed travel times, events that
+already ended today, and which same-title copies the phone keeps silent); MCP labels previews
+approximate, and phones remain authoritative.
+
+Server-only `accounts/{uid}/assistantRulePreviews/{previewId}` holds the exact canonical payload,
+operation, rule key, connection ID, baseline records, snapshot publish time, integrity digest,
+15-minute `expiresAt`, sentence and silenced count. Clients cannot read or write previews.
+`apply_rule` is the only MCP rule mutation path and consumes the preview in the same commit as
+values/activity. Rule writes follow the existing sync hint and confirmation protocol; silencing
+changes use the existing `alarms_off` risky-change alert, with a named rule summary in activity.
+Expired previews are checked on access and removed by Firestore TTL; disconnect cleanup removes
+all account previews. No second in-app approval is required.
+
+
+Rule deletion delivery: `accounts/{uid}/assistantRuleDeletions/{ruleId}` is a server-only
+marker with `payload: "null"` and the deletion's `updatedAt`, written atomically with the delete
+and activity. Device API sync merges markers with values in timestamp order, preserving page
+boundaries. If a phone restored the record, its current payload wins over an old marker.
+Assistant restoration removes the marker; account deletion removes the collection. Markers stay
+across disconnects so a missed push or later reconnection cannot revive an old rule.
+Rule application reads the preview, baseline settings, complete rule set and latest snapshot in
+one transaction. Concurrent edits invalidate the approved preview instead of silently changing it.
+For risky rule changes, the APNs notification body can carry the cleaned rule summary (including
+matching text and calendar name); other assistant push payloads retain their existing format.

@@ -319,3 +319,20 @@ test("an unexpected failure is a plain 500 and its log line names no account", a
   assert.equal(line.outcome, "unexpected_error");
   assert.doesNotMatch(JSON.stringify(line), /accounts\/alice/);
 });
+
+test('incremental sync delivers deleted rules, retains page boundaries, and respects restored rules', async () => {
+  const env = setup();
+  const id = n => `r_00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
+  for (let i=0;i<55;i++) env.db.documents.set(`accounts/alice/assistantRuleDeletions/${id(i)}`, {payload:'null',updatedAt:new Date(T0+i)});
+  env.db.documents.set(`accounts/alice/values/${id(0)}`, {payload:'{"enabled":true}'});
+  env.db.documents.set('accounts/bob/assistantRuleDeletions/'+id(99), {payload:'null',updatedAt:new Date(T0)});
+  const first = (await env.call('POST','/v1/sync',{uid:'alice',deviceId:DEVICE,since:0})).body;
+  assert.equal(first.values.length,50);
+  assert.equal(first.more,true);
+  assert.deepEqual(first.values[0],{id:id(0),payload:'{"enabled":true}',updatedAt:T0});
+  assert.equal(first.values[1].payload,'null');
+  const second = (await env.call('POST','/v1/sync',{uid:'alice',deviceId:DEVICE,since:first.values.at(-1).updatedAt})).body;
+  assert.equal(second.values.length,5);
+  assert.equal(second.more,false);
+  assert.ok(second.values.every(v=>v.id!==id(99)));
+});

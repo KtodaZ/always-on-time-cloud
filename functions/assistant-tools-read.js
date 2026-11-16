@@ -46,6 +46,9 @@ function alarmView(alarm, snapshot) {
     kind: alarm.kind,
     minutes: alarm.minutes,
     source: alarm.source,
+    ...(alarm.ruleIds ? {ruleIds:alarm.ruleIds} : {}),
+    ...(alarm.label ? {label:alarm.label} : {}),
+    ...(alarm.style ? {style:alarm.style} : {}),
     status: alarm.status,
   };
 }
@@ -62,6 +65,7 @@ function eventView(event, snapshot) {
     allDay: event.allDay,
     recurring: event.recurring,
     rsvp: event.rsvp,
+    ...(event.silencedByRules ? {silencedByRules:event.silencedByRules} : {}),
     alarms: event.alarms.map((alarm) => alarmView(alarm, snapshot)),
     ...(event.skippedByKeyword ? { skippedByKeyword: event.skippedByKeyword } : {}),
   };
@@ -196,27 +200,35 @@ const TOOLS = [
       if (!event) {
         return result(`${basis(snapshot, now)}\nThat event isn't in what the phone shared. Either it is more than ${SNAPSHOT_WINDOW_DAYS} days away, on a calendar the app doesn't watch, filtered out (declined invitations or all-day events, depending on settings), or not on this phone. list_calendars shows which calendars ring.`, { found: false });
       }
-      const ids = [event.eventKey, event.seriesKey, event.calendarKey].filter(isRecordId);
+      const ruleIds = [...new Set([...(event.silencedByRules ?? []), ...event.alarms.flatMap(a => a.ruleIds ?? [])])];
+      const ruleKey = id => id.startsWith("r_") ? id : `r_${id}`;
+      const ids = [event.eventKey, event.seriesKey, event.calendarKey, ...ruleIds.map(ruleKey)].filter(isRecordId);
       const docs = await Promise.all(ids.map((id) => refs.values(ctx.db, ctx.uid).doc(id).get()));
       // Only connector writes carry updatedAt; values a phone wrote are already on that phone.
+      const ruleSentences = Object.fromEntries(docs.filter(doc => doc.exists && doc.id.startsWith("r_")).map(doc => {
+        const rule = parseStored(doc.data().payload);
+        return [doc.id, rule ? require("./assistant-alarm-rules").sentence(rule, snapshot.calendars) : doc.id];
+      }));
+      const describeRule = id => quoted(ruleSentences[ruleKey(id)] ?? id);
       const pending = docs.some((doc) => doc.exists && (toMillis(doc.data().updatedAt) ?? 0) > snapshot.valuesAppliedThrough);
       const devices = await readDevices(ctx.db, ctx.uid);
       const calendar = calendarName(snapshot, event.calendarKey);
       const lines = [basis(snapshot, now), `${quoted(event.title)}: ${formatTime(event.start, snapshot.timeZone)}${calendar ? ` on ${quoted(calendar)}` : ""}${event.recurring ? " (repeats)" : ""}.`];
-      if (!event.alarms.length) {
+      if (event.silencedByRules?.length) lines.push(`Silenced by rules: ${event.silencedByRules.map(describeRule).join(", ")}.`);
+      if (!event.alarms.length && !event.silencedByRules?.length) {
         lines.push("It has no alarms: its settings leave no lead times. Use set_event_alarms or set_series_alarms to add some.");
       }
       if (event.skippedByKeyword) {
         lines.push(`Its alarms are off because the title contains ${quoted(event.skippedByKeyword)}, which is on the "Skip events containing" list. set_event_alarms or set_series_alarms with mode "set" makes it ring anyway; removing the word with update_settings brings back every event it turned off.`);
       }
       for (const alarm of event.alarms) {
-        const source = alarm.source === "calendar" && calendar ? `the ${quoted(calendar)} calendar's lead times` : SOURCE_TEXT[alarm.source] ?? "the app";
+        const source = alarm.source === "rule" ? `rule ${alarm.ruleIds?.map(describeRule).join(", ") ?? "shared by the phone"}` : alarm.source === "calendar" && calendar ? `the ${quoted(calendar)} calendar's lead times` : SOURCE_TEXT[alarm.source] ?? "the app";
         const status = alarm.status === "off" ? (event.skippedByKeyword ? "; off because of the skip list" : "; turned off for this event")
           : alarm.status === "paused" ? `; paused (alarms are ${describePause(snapshot.paused.until, snapshot.timeZone)})`
             : alarm.status === "past" ? "; already passed" : "";
-        lines.push(`- ${formatTime(alarm.at, snapshot.timeZone, { timeOnly: true })}: ${alarmDescription(alarm)}, from ${source}${status}.`);
+        lines.push(`- ${formatTime(alarm.at, snapshot.timeZone, { timeOnly: true })}: ${alarmDescription(alarm)}${alarm.label ? ` · ${quoted(alarm.label)}` : ""}${alarm.style === "notification" ? " · notification" : ""}, from ${source}${status}.`);
       }
-      lines.push("The most specific setting wins: this occurrence, then its series, then its calendar, then the app default.");
+      lines.push("Own occurrence or series choices beat rules. Otherwise, rules combine with the calendar and app defaults; a Don’t ring rule wins over added rings.");
       if (pending) lines.push("A newer change to this event's settings hasn't reached the phone yet; refresh or confirm_change will show when it has.");
       const data = { found: true, event: eventView(event, snapshot), pendingChange: pending };
       // `plus` is reported by phones with Plus benefits (subscribed, or while Plus is free).
