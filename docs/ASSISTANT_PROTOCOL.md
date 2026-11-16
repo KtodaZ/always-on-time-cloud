@@ -438,9 +438,13 @@ Deleting a rule deletes its record. The normal activity before/after payloads su
 Own event or series choices of lead times/enabled beat every rule. Rules never revive filtered
 or disabled events. `dont_ring` wins over added rings. Added rings stack; same-minute `alarm`
 beats `notification`, and rule labels beat inherited labels (rule order breaks equal-tier ties).
-`first_of_day` counts ringing, non-all-day events that meet the other condition, in the phone's
-local day. `next_after` selects the first event starting at/after a matching event's end on that
-same local day, within the inclusive end-to-start gap. Rules are derived on the phone, never
+All-day events and silent duplicate copies are never matched or linked. `first_of_day` counts
+events that would ring (a usual ring on, not silenced by `dont_ring`): first-of-day `dont_ring`
+rules look past events ordinary `dont_ring` rules silence, then first-of-day `add_ring` rules look
+past every silenced event. `next_after` links each event to the first start at/after its end on
+the same local day, within the inclusive gap (default 2 hours). Only the first 30 rules by
+`order`, then id, take effect. Rules evaluate whole local days; previews list and count only
+upcoming events. Rules are derived on the phone, never
 materialized as occurrence overrides by MCP.
 
 Overrides on `c_` (inside `overrides`), `s_` and `e_` can include optional `ringOptions`, after
@@ -457,8 +461,9 @@ Snapshot alarms accept `source: "rule"`, `ruleIds`, `label`, and `style`; events
 IDs) or `r_<uuid>` keys; the reader keeps both and resolves either to its synced rule for
 `explain_alarm`. Read tools expose the metadata. This does not change snapshot schemaVersion.
 The current snapshot lacks enough ordinary/pre-rule inputs to guarantee exact previews of every
-edit/deletion (local-only choices, merged ring provenance, suppressed travel times); MCP labels
-previews approximate, and phones remain authoritative.
+edit/deletion (local-only choices, merged ring provenance, suppressed travel times, events that
+already ended today, and which same-title copies the phone keeps silent); MCP labels previews
+approximate, and phones remain authoritative.
 
 Server-only `accounts/{uid}/assistantRulePreviews/{previewId}` holds the exact canonical payload,
 operation, rule key, connection ID, baseline records, snapshot publish time, integrity digest,

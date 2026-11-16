@@ -69,96 +69,167 @@ async function rulesOf(ctx, read = (query) => query.get()) {
     );
   return rules;
 }
-// Rebuild ordinary rings for the combined before/after evaluator. Snapshot is derived, so a
-// silenced event's ordinary rings must come from its authoritative inheritance chain.
+// Builds the evaluator's inputs (assistant-alarm-rules.js) from the latest snapshot and the synced
+// values, mirroring the phones' AlarmRuleInputs as far as the snapshot allows:
+// - Whole days: the snapshot holds events that end after it was built (in-progress ones
+//   included) up to its window end, so events that already ended earlier today are missing and
+//   "first of the day" / "next after" can't see them for the current day.
+// - Cancelled, deleted and superseded occurrences never reach the snapshot; RSVP- and
+//   all-day-filtered ones are dropped here too (re-checked against synced settings), so none of
+//   them is a candidate or a next_after predecessor.
+// - Silent duplicate copies aren't flagged in the snapshot, and it has no locations: copies are
+//   inferred as non-all-day events with the same title (ignoring case and spacing) and start,
+//   keeping the copy with a ring on, then a personal choice, then the lowest key. Two same-named
+//   events at different places would wrongly be treated as copies.
+// - Ring options come from the tier that owns the lead-time list (event > series > calendar >
+//   app default). The snapshot's calendar lead times are effective values, so a calendar counts
+//   as owning them only when its record sets them or they differ from the app default.
 function eventsOf(snapshot, values) {
-  const value = (id) => (id ? parseStored(values[id]) : null);
-  const defaults = value("p_default_lead_times_csv")
-    ? parseStored(value("p_default_lead_times_csv"))
-    : [value("p_default_lead_time_minutes") ?? 10];
-  return snapshot.events
-    .filter((e) => e.eventKey)
-    .map((e) => {
-      const cal = snapshot.calendars.find((c) => c.key === e.calendarKey);
-      const c = value(e.calendarKey)?.overrides ?? {};
-      const s = value(e.seriesKey) ?? {},
-        own = value(e.eventKey) ?? {};
-      const layers = [own, s, c];
-      const personalChoice = [own, s].some(
-        (v) => v.leadTimes != null || v.enabled != null,
-      );
-      const enabled =
-        layers.find((v) => v.enabled != null)?.enabled ?? cal?.enabled ?? true;
-      const minutes =
-        layers.find((v) => v.leadTimes != null)?.leadTimes ??
-        cal?.leadTimes ??
-        defaults;
-      const owner = layers.find((v) => v.leadTimes != null);
-      const options = owner
-        ? (owner.ringOptions ?? {})
-        : cal?.leadTimes != null
-          ? {}
-          : (parseStored(value("p_default_ring_options")) ?? {});
-      const rsvp =
-        layers.find((v) => v.rsvpFilter != null)?.rsvpFilter ??
-        cal?.rsvpFilter ??
-        value("p_rsvp_filter") ??
-        "not_declined";
-      const rsvpOk =
-        rsvp === "all_events" ||
-        e.rsvp === "NONE" ||
-        e.rsvp === "ORGANIZER" ||
-        (rsvp === "accepted_only"
-          ? e.rsvp === "ACCEPTED"
-          : rsvp === "accepted_or_tentative"
-            ? ["ACCEPTED", "TENTATIVE"].includes(e.rsvp)
-            : e.rsvp !== "DECLINED");
-      const skip = firstSkipMatch(
-        e.title,
-        decodeSkipKeywords(value("p_skip_event_keywords")),
-      );
-      const eligible =
-        enabled &&
-        cal?.watched !== false &&
-        value(e.calendarKey)?.selected !== false &&
-        rsvpOk &&
-        !(
-          e.allDay &&
-          (c.ignoreAllDay ??
-            (cal?.includeAllDay == null
-              ? (value("p_ignore_all_day_events") ?? true)
-              : !cal.includeAllDay))
-        ) &&
-        (!skip || own.keywordExempt || s.keywordExempt);
-      const ordinary = e.alarms.filter(
-        (a) => a.kind === "lead" && a.source !== "rule",
-      );
-      const rings = (
-        ordinary.length &&
-        !e.alarms.some((a) => a.source === "rule" || a.ruleIds?.length)
-          ? ordinary
-          : (minutes ?? []).map((minutes) => ({
+  // Lists and option maps are JSON inside the stored string; plain strings stay as they are.
+  const json = (v) =>
+    typeof v === "string" && /^\s*[[{]/.test(v) ? parseStored(v) : v;
+  const value = (id) => (id ? json(parseStored(values[id])) : null);
+  const same = (a, b) =>
+    Array.isArray(a) &&
+    Array.isArray(b) &&
+    a.length === b.length &&
+    [...a].sort((x, y) => x - y).every((m, i) => m === [...b].sort((x, y) => x - y)[i]);
+  const defaults = value("p_default_lead_times_csv") ?? [
+    value("p_default_lead_time_minutes") ?? 10,
+  ];
+  const defaultOptions = value("p_default_ring_options") ?? {};
+  const keywords = decodeSkipKeywords(parseStored(values.p_skip_event_keywords));
+  const built = snapshot.events.flatMap((e, index) => {
+    const cal = snapshot.calendars.find((c) => c.key === e.calendarKey);
+    const record = (e.calendarKey && value(e.calendarKey)) || {};
+    const c = record.overrides ?? {};
+    const s = (e.seriesKey && value(e.seriesKey)) || {},
+      own = (e.eventKey && value(e.eventKey)) || {};
+    const layers = [own, s, c];
+    const rsvp =
+      layers.find((v) => v.rsvpFilter != null)?.rsvpFilter ??
+      cal?.rsvpFilter ??
+      value("p_rsvp_filter") ??
+      "not_declined";
+    const rsvpOk =
+      rsvp === "all_events" ||
+      e.rsvp == null ||
+      e.rsvp === "NONE" ||
+      e.rsvp === "ORGANIZER" ||
+      (rsvp === "accepted_only"
+        ? e.rsvp === "ACCEPTED"
+        : rsvp === "accepted_or_tentative"
+          ? ["ACCEPTED", "TENTATIVE"].includes(e.rsvp)
+          : e.rsvp !== "DECLINED");
+    const allDayIgnored =
+      e.allDay &&
+      (c.ignoreAllDay ??
+        (cal?.includeAllDay == null
+          ? (value("p_ignore_all_day_events") ?? true)
+          : !cal.includeAllDay));
+    // Filtered occurrences aren't in the phones' event set at all.
+    if (!rsvpOk || allDayIgnored) return [];
+    const ownsLeads = (v) => v.leadTimes != null;
+    const personalChoice =
+      [own, s].some((v) => ownsLeads(v) || v.enabled != null) ||
+      e.alarms.some((a) => ["event", "series"].includes(a.source));
+    // The event's own switch: its own choice, its series, then its calendar.
+    const enabled =
+      layers.find((v) => v.enabled != null)?.enabled ?? cal?.enabled ?? true;
+    const calendarLeads =
+      c.leadTimes ??
+      (cal?.leadTimes != null && !same(cal.leadTimes, defaults)
+        ? cal.leadTimes
+        : null);
+    const usual =
+      s.leadTimes != null
+        ? { minutes: s.leadTimes, options: s.ringOptions ?? {} }
+        : calendarLeads != null
+          ? { minutes: calendarLeads, options: c.ringOptions ?? {} }
+          : { minutes: defaults, options: defaultOptions };
+    const snapshotOwn = e.alarms.filter(
+      (a) =>
+        a.kind === "lead" &&
+        a.source !== "rule" &&
+        ["event", "series"].includes(a.source),
+    );
+    // A personal occurrence keeps its own rings (its own options, else the usual tier's); one
+    // known only from the snapshot keeps the rings and options the phone reported.
+    const rings =
+      own.leadTimes != null
+        ? own.leadTimes.map((minutes) => ({
+            minutes,
+            ...((own.ringOptions ?? usual.options)[String(minutes)] ?? {}),
+          }))
+        : s.leadTimes == null && snapshotOwn.length && personalChoice
+          ? snapshotOwn
+          : usual.minutes.map((minutes) => ({
               minutes,
-              ...options[String(minutes)],
-            }))
-      ).map((a) => ({
-        minutes: a.minutes,
-        label: a.label ?? null,
-        style: a.style ?? "alarm",
-      }));
-      return {
+              ...(usual.options[String(minutes)] ?? {}),
+            }));
+    const skip = firstSkipMatch(e.title, keywords);
+    const eligible =
+      enabled &&
+      cal?.watched !== false &&
+      record.selected !== false &&
+      (!skip || !!own.keywordExempt || !!s.keywordExempt);
+    // Minutes turned off one by one. The snapshot's "off" also covers a switched-off event, rule
+    // silence, keyword skips and travel-covered defaults, so it is read only when none applies.
+    const ordinaryOff =
+      eligible &&
+      !e.skippedByKeyword &&
+      !e.silencedByRules?.length &&
+      !e.alarms.some((a) => a.kind === "travel")
+        ? e.alarms
+            .filter((a) => a.kind === "lead" && a.source !== "rule" && a.status === "off")
+            .map((a) => a.minutes)
+        : [];
+    const ringOn = e.alarms.some(
+      (a) => a.kind === "lead" && a.status !== "off",
+    );
+    return [
+      {
         ...e,
-        id: e.eventKey,
-        personalChoice:
-          personalChoice ||
-          e.alarms.some((a) => ["event", "series"].includes(a.source)),
+        id: e.eventKey ?? `#${index}`,
+        eventKey: e.eventKey ?? null,
+        end: Number.isFinite(e.end) ? e.end : e.start,
+        personalChoice,
         eligible,
+        ringOn,
+        offMinutes: ordinaryOff,
         travelRings: eligible
           ? e.alarms.filter((a) => a.kind === "travel" && a.status !== "off")
           : [],
-        rings: eligible ? rings : [],
-      };
-    });
+        rings: eligible
+          ? [...new Map(rings.map((a) => [a.minutes, a])).values()].map((a) => ({
+              minutes: a.minutes,
+              label: a.label ?? null,
+              style: a.style ?? "alarm",
+            }))
+          : [],
+      },
+    ];
+  });
+  const copies = new Map();
+  for (const e of built) {
+    const title = e.title.trim().replace(/\s+/g, " ").toLowerCase();
+    if (e.allDay || !title) continue;
+    const key = `${title}\u0000${e.start}`;
+    if (!copies.has(key)) copies.set(key, []);
+    copies.get(key).push(e);
+  }
+  for (const group of copies.values())
+    if (group.length > 1)
+      group
+        .sort(
+          (a, b) =>
+            Number(b.ringOn) - Number(a.ringOn) ||
+            Number(b.personalChoice) - Number(a.personalChoice) ||
+            (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+        )
+        .slice(1)
+        .forEach((e) => (e.duplicate = true));
+  return built.map(({ ringOn, ...e }) => e);
 }
 const digest = (data) =>
   sha256Hex(
@@ -325,17 +396,14 @@ const TOOLS = [
         throw new ToolError(
           "Rules changed while previewing. Call preview_rule again.",
         );
+      // Whole days are evaluated; only upcoming events are listed and counted.
       const out = preview(
-        eventsOf(snapshot, baseline, ctx.now()),
+        eventsOf(snapshot, baseline),
         rules,
         after,
         snapshot.timeZone,
-      );
-      out.changes = out.changes.filter((c) => c.start > ctx.now());
-      out.totalUpcoming = snapshot.events.filter(
         (e) => e.start > ctx.now(),
-      ).length;
-      out.changedCount = out.changes.length;
+      );
       out.silencedEvents = out.changes.filter(
         (c) => c.before.rings.length && !c.after.rings.length,
       );
