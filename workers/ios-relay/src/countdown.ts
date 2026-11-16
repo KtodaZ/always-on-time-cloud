@@ -41,8 +41,14 @@ export function validateCountdown(body: unknown, now: number): CountdownSnapshot
 function compareMilestones(a: Milestone, b: Milestone): number {
   return a.targetAtMs - b.targetAtMs || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0) || a.presentationID.localeCompare(b.presentationID);
 }
+/** Cards shown at once when windows overlap (two meetings minutes apart). The app's `CountdownMilestone.maxCards` matches it. */
+export const MAX_COUNTDOWN_CARDS = 2;
+/** The milestones to show now: in their window, not dismissed, soonest first. */
+export function selectedMilestones(snapshot: CountdownSnapshot, now: number): Milestone[] {
+  return snapshot.milestones.filter(m => now >= m.targetAtMs - COUNTDOWN_WINDOW_MS && now < m.targetAtMs && !snapshot.dismissedPresentationIDs.includes(m.presentationID)).sort(compareMilestones).slice(0, MAX_COUNTDOWN_CARDS);
+}
 export function selectedMilestone(snapshot: CountdownSnapshot, now: number): Milestone | undefined {
-  return snapshot.milestones.filter(m => now >= m.targetAtMs - COUNTDOWN_WINDOW_MS && now < m.targetAtMs && !snapshot.dismissedPresentationIDs.includes(m.presentationID)).sort(compareMilestones)[0];
+  return selectedMilestones(snapshot, now)[0];
 }
 interface KnownActivity extends ActivityToken { milestone: Milestone; sentRevision: number; retryAt: number; failures: number; lastTimestamp?: number }
 export interface CountdownState {
@@ -87,21 +93,27 @@ export function replaceCountdown(old: CountdownState | undefined, snapshot: Coun
   return state;
 }
 export function countdownWork(state: CountdownState, now: number, enabled: boolean): CountdownWork | undefined {
-  const selected = enabled ? selectedMilestone(state.snapshot, now) : undefined;
+  const selected = enabled ? selectedMilestones(state.snapshot, now) : [];
+  const byID = new Map(selected.map(m => [m.presentationID, m]));
   const activities = Object.values(state.activities).sort((a,b) => (a.activityID < b.activityID ? -1 : a.activityID > b.activityID ? 1 : 0));
-  const keeper = activities.find(a => a.presentationID === selected?.presentationID && a.sentRevision !== -1)?.activityID;
+  // One card per selected milestone: the lowest activity ID, as on the phone.
+  const keepers = new Set(selected.flatMap(m => {
+    const keeper = activities.find(a => a.presentationID === m.presentationID && a.sentRevision !== -1);
+    return keeper ? [keeper.activityID] : [];
+  }));
   for (const a of activities) {
     if (a.retryAt > now) continue;
-    if (!selected || a.presentationID !== selected.presentationID || a.sentRevision === -1 || a.activityID !== keeper || state.snapshot.dismissedPresentationIDs.includes(a.presentationID)) {
+    const milestone = byID.get(a.presentationID);
+    if (!milestone || a.sentRevision === -1 || !keepers.has(a.activityID) || state.snapshot.dismissedPresentationIDs.includes(a.presentationID)) {
       return { event: "end", token: a.pushToken, milestone: a.milestone, activityID: a.activityID, revision: state.snapshot.revision };
     }
-    if (a.sentRevision < state.snapshot.revision) return { event: "update", token: a.pushToken, milestone: selected, activityID: a.activityID, revision: state.snapshot.revision };
+    if (a.sentRevision < state.snapshot.revision) return { event: "update", token: a.pushToken, milestone, activityID: a.activityID, revision: state.snapshot.revision };
   }
-  if (selected && (state.startRetryAt ?? 0) <= now && state.snapshot.pushToStartToken && !state.attempted[selected.presentationID] && Object.keys(state.attempted).length < 1024) {
-    // Finish previous cards before starting another. Failed ends retry within a bounded window.
-    if (Object.values(state.activities).some(a => a.presentationID !== selected.presentationID)) return;
-    return { event: "start", token: state.snapshot.pushToStartToken, milestone: selected, revision: state.snapshot.revision };
-  }
+  if (!selected.length || (state.startRetryAt ?? 0) > now || !state.snapshot.pushToStartToken || Object.keys(state.attempted).length >= 1024) return;
+  // Finish cards that are no longer shown before starting another. Failed ends retry within a bounded window.
+  if (activities.some(a => !byID.has(a.presentationID))) return;
+  const next = selected.find(m => !state.attempted[m.presentationID]);
+  if (next) return { event: "start", token: state.snapshot.pushToStartToken, milestone: next, revision: state.snapshot.revision };
 }
 export function countdownWake(state: CountdownState, now: number, enabled: boolean): number | null {
   if (countdownWork(state, now, enabled)) return now;
@@ -112,7 +124,7 @@ export function countdownWake(state: CountdownState, now: number, enabled: boole
     if (m.targetAtMs - COUNTDOWN_WINDOW_MS > now) boundaries.push(m.targetAtMs - COUNTDOWN_WINDOW_MS);
   }
   for (const a of Object.values(state.activities)) if (a.retryAt > now) boundaries.push(a.retryAt);
-  if (enabled && selectedMilestone(state.snapshot, now) && (state.startRetryAt ?? 0) > now) boundaries.push(state.startRetryAt!);
+  if (enabled && selectedMilestones(state.snapshot, now).length && (state.startRetryAt ?? 0) > now) boundaries.push(state.startRetryAt!);
   return boundaries.length ? Math.min(...boundaries) : null;
 }
 export function countdownPayload(work: CountdownWork, at: number): string {

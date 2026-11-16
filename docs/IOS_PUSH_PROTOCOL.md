@@ -570,8 +570,9 @@ are lowercase hexadecimal (64–200 characters); activity IDs are printable ASCI
 `pushToStartToken: null` revokes remote starts. Invalid tokens never disable ordinary alarm refresh.
 
 The phone computes eligibility and supplies only departure and event-start anchors. A milestone is
-eligible from ten minutes before its target until, excluding, its target. At overlaps the earliest
-target wins, with kind and opaque ID as stable tie breakers. The server never derives countdowns
+eligible from ten minutes before its target until, excluding, its target. At overlaps the two
+earliest targets each get a card, with kind and opaque ID as stable tie breakers; a third waits
+for a free slot. A card that is no longer selected is ended before another starts. The server never derives countdowns
 from early alarm triggers. Moved or removed milestones cancel old cards. User-dismissed IDs are
 suppressed. Known activity tokens claim the presentation; a durable attempted-start marker prevents
 replay when a push token does not arrive or start acceptance is ambiguous. Local/remote creation
