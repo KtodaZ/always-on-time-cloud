@@ -1,36 +1,81 @@
 "use strict";
 const { firstSkipMatch, validateRule } = require("./assistant-records");
-const CONDITIONS = [
+// Conditions the cloud evaluates from the snapshot, and the ones only the phone can evaluate:
+// the snapshot never carries meeting links, locations or guest lists, and must not start to.
+const EVALUABLE = [
   "title_contains",
   "on_calendar",
   "first_of_day",
   "next_after",
+  "time_of_day",
+  "day_of_week",
 ];
+const PHONE_ONLY = ["video_link", "location", "attendees"];
+const CONDITIONS = [...EVALUABLE, ...PHONE_ONLY];
 const understood = (r) =>
   r.when.every((c) => CONDITIONS.includes(c.type)) &&
   ["add_ring", "dont_ring"].includes(r.then.type);
+/** Whether the rule uses a condition only the phone can check (links, locations, guests). */
+const phoneOnly = (r) => !!r && r.when.some((c) => PHONE_ONLY.includes(c.type));
 function leadText(minutes) {
   if (minutes % 1440 === 0) return minutes === 1440 ? "1 day" : `${minutes / 1440} days`;
   if (minutes % 60 === 0) return minutes === 60 ? "1 hour" : `${minutes / 60} hours`;
   return `${minutes} min`;
 }
+const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const sameDays = (days, want) =>
+  days.length === want.length && want.every((d) => days.includes(d));
+function daysText(days) {
+  if (sameDays(days, [1, 2, 3, 4, 5])) return "weekdays";
+  if (sameDays(days, [6, 7])) return "weekends";
+  if (days.length === 1) return DAY_NAMES[days[0] - 1];
+  return days.map((d) => DAY_NAMES[d - 1].slice(0, 3)).join(", ");
+}
+function clockText(minute) {
+  const hour = Math.floor(minute / 60);
+  return `${hour % 12 || 12}:${String(minute % 60).padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
+}
+function attendeesText(c) {
+  if (c.compare === "at_most")
+    return c.count === 1 ? "just you" : `${c.count} or fewer people`;
+  return `${c.count} or more people`;
+}
+// "When an event is on weekdays and starts before 9:00 AM → add a ring 1 hour before"
+function conditionText(c, calendars) {
+  switch (c.type) {
+    case "title_contains":
+      return `has ${c.text} in the title`;
+    case "on_calendar":
+      return `is on ${calendars.find((k) => k.key === c.calendarKey)?.name ?? "an unavailable calendar"}`;
+    case "first_of_day":
+      return "is the first of the day";
+    case "next_after":
+      return `is the next one after ${c.text}, within ${leadText((c.hours ?? 2) * 60)}`;
+    case "time_of_day":
+      return `starts ${c.compare} ${clockText(c.minute)}`;
+    case "day_of_week":
+      return `is on ${daysText(c.days)}`;
+    case "video_link":
+      return c.has ? "has a video link" : "has no video link";
+    case "location":
+      return c.has ? "has a location" : "has no location";
+    case "attendees":
+      return `has ${attendeesText(c)}`;
+    default:
+      return "has a condition from a newer app";
+  }
+}
 function sentence(rule, calendars = []) {
-  const conditions = rule.when.map((c) =>
-    c.type === "title_contains"
-      ? c.text
-      : c.type === "on_calendar"
-        ? `on ${calendars.find((k) => k.key === c.calendarKey)?.name ?? c.calendarKey}`
-        : c.type === "first_of_day"
-          ? "the first event of the day"
-          : c.type === "next_after"
-            ? `the next event within ${c.hours ?? 2} hours after ${c.text}`
-            : "an unsupported condition",
-  );
-  return rule.then.type === "dont_ring"
-    ? `Don't ring for ${conditions.join(" ")} `.trim()
-    : rule.then.type === "add_ring"
-      ? `Add a ring ${leadText(rule.then.minutes)} before ${conditions.join(" ")}${rule.then.label ? ` · ${rule.then.label}` : ""}${rule.then.style === "notification" ? " · notification" : ""}`
-      : "Unsupported rule";
+  const conditions = rule.when.map((c) => conditionText(c, calendars)).join(" and ");
+  const action =
+    rule.then.type === "dont_ring"
+      ? "don't ring"
+      : rule.then.type === "add_ring"
+        ? `add a ring ${leadText(rule.then.minutes)} before${rule.then.label ? ` · ${rule.then.label}` : ""}${rule.then.style === "notification" ? " · notification" : ""}`
+        : null;
+  return action === null
+    ? "Unsupported rule"
+    : `When an event ${conditions} → ${action}`;
 }
 const MAX_RULES = 30;
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -49,7 +94,8 @@ function activeRules(rules) {
       } catch {
         return false;
       }
-      return r.enabled && understood(r);
+      // Rules with a phone-only condition can't be evaluated here: they take no part.
+      return r.enabled && understood(r) && !phoneOnly(r);
     });
 }
 const isFirstOfDay = (r) => r.when.some((c) => c.type === "first_of_day");
@@ -64,17 +110,33 @@ const isFirstOfDay = (r) => r.when.some((c) => c.type === "first_of_day");
  * `duplicate` marks a silent copy; `offMinutes` are usual minutes turned off one by one.
  */
 function evaluate(events, rules, zone) {
-  const fmt = new Intl.DateTimeFormat("en-CA", {
+  const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: zone,
+    hourCycle: "h23",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "short",
   });
-  const days = new Map();
-  const day = (e) => {
-    if (!days.has(e.id)) days.set(e.id, fmt.format(e.start));
-    return days.get(e.id);
+  const ISO_DAY = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+  // The event's start in the user's time zone: local day, minute of the day and ISO weekday.
+  const locals = new Map();
+  const local = (e) => {
+    if (!locals.has(e.id)) {
+      const p = Object.fromEntries(
+        fmt.formatToParts(e.start).map((part) => [part.type, part.value]),
+      );
+      locals.set(e.id, {
+        day: `${p.year}-${p.month}-${p.day}`,
+        minute: (Number(p.hour) % 24) * 60 + Number(p.minute),
+        weekday: ISO_DAY[p.weekday],
+      });
+    }
+    return locals.get(e.id);
   };
+  const day = (e) => local(e).day;
   const endOf = (e) => (Number.isFinite(e.end) ? e.end : e.start);
   const byStart = (a, b) => a.start - b.start || cmp(String(a.id), String(b.id));
   const ordered = [...events].sort(byStart);
@@ -110,6 +172,11 @@ function evaluate(events, rules, zone) {
     if (c.type === "on_calendar")
       return e.calendarKey != null && e.calendarKey === c.calendarKey;
     if (c.type === "first_of_day") return true;
+    if (c.type === "time_of_day")
+      return c.compare === "before"
+        ? local(e).minute < c.minute
+        : local(e).minute >= c.minute;
+    if (c.type === "day_of_week") return c.days.includes(local(e).weekday);
     if (c.type === "next_after")
       return (predecessors.get(e.id) ?? []).some(
         (p) =>
@@ -251,4 +318,12 @@ function preview(events, beforeRules, afterRules, zone, shown = null) {
     largeShare: listed.length >= 10 && silencedCount * 2 > listed.length,
   };
 }
-module.exports = { evaluate, preview, sentence, understood, activeRules, MAX_RULES };
+module.exports = {
+  evaluate,
+  preview,
+  sentence,
+  understood,
+  phoneOnly,
+  activeRules,
+  MAX_RULES,
+};

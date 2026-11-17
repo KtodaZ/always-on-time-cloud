@@ -23,7 +23,40 @@ const {
   quoted,
   isoLocal,
 } = require("./assistant-snapshot");
-const { preview, sentence, understood } = require("./assistant-alarm-rules");
+const {
+  preview,
+  sentence,
+  understood,
+  phoneOnly,
+} = require("./assistant-alarm-rules");
+// The conditions only the phone can check; the snapshot never has links, locations or guests.
+const PHONE_ONLY_NOTE =
+  "This rule checks meeting links, locations or guest counts, which the assistant never sees, so it can't list the events it affects. Always On Time on the phone will show which events match once the rule is on (Alarm rules, then this rule). Tell the user that, and that applying works as usual.";
+// Fields each condition type takes, for rejecting stray ones in assistant-made rules.
+const CONDITION_FIELDS = {
+  first_of_day: [],
+  title_contains: ["text"],
+  on_calendar: ["calendarKey"],
+  next_after: ["text", "hours"],
+  time_of_day: ["compare", "minute"],
+  day_of_week: ["days"],
+  video_link: ["has"],
+  location: ["has"],
+  attendees: ["compare", "count"],
+};
+/** Assistant input: at most one condition per type, only that type's fields, days sorted. */
+function tidyConditions(when) {
+  const seen = new Set();
+  return when.map((c) => {
+    if (seen.has(c.type))
+      throw new ToolError(`Use each condition type at most once (${c.type}).`);
+    seen.add(c.type);
+    for (const field of Object.keys(c))
+      if (field !== "type" && !CONDITION_FIELDS[c.type].includes(field))
+        throw new ToolError(`${c.type} does not take ${field}.`);
+    return c.days ? { ...c, days: [...new Set(c.days)].sort((a, b) => a - b) } : c;
+  });
+}
 const RULE_ID = /^r_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const READ = {
   readOnlyHint: true,
@@ -246,7 +279,8 @@ const TOOLS = [
   {
     name: "list_rules",
     title: "List alarm rules",
-    description: "Alarm rules with their sentence, on/off state and creator.",
+    description:
+      "Alarm rules with their sentence, on/off state and creator. A rule has one to four conditions that must all hold: first_of_day, title_contains, on_calendar, next_after, time_of_day, day_of_week, video_link, location, attendees.",
     scope: "read",
     annotations: READ,
     inputSchema: {},
@@ -281,7 +315,7 @@ const TOOLS = [
     name: "preview_rule",
     title: "Preview an alarm rule",
     description:
-      "Preview creating, editing, deleting, enabling or disabling a rule. Show this preview and obtain the user’s yes in chat before apply_rule. Never writes a rule.",
+      "Preview creating, editing, deleting, enabling or disabling a rule. Show this preview and obtain the user’s yes in chat before apply_rule. Never writes a rule. A rule has 1–4 conditions that must all hold, at most one of each type: first_of_day; title_contains (text); on_calendar (calendarKey); next_after (text, hours 1–6); time_of_day (compare before|after, minute 0–1439 after midnight, local); day_of_week (days: 1 Monday to 7 Sunday, 1–6 of them); video_link (has true|false); location (has true|false); attendees (compare at_least|at_most, count 1–99 including the user; at_least 1 is not allowed). video_link, location and attendees can't be checked from the phone snapshot: the preview then lists no events (previewMode phone_only) and says the phone will show the matching events; tell the user, and apply_rule works as usual.",
     scope: "write",
     annotations: { ...READ, readOnlyHint: false },
     inputSchema: {
@@ -300,15 +334,31 @@ const TOOLS = [
                     "title_contains",
                     "on_calendar",
                     "next_after",
+                    "time_of_day",
+                    "day_of_week",
+                    "video_link",
+                    "location",
+                    "attendees",
                   ]),
                   text: z.string().optional(),
                   calendarKey: z.string().optional(),
                   hours: z.number().int().optional(),
+                  compare: z
+                    .enum(["before", "after", "at_least", "at_most"])
+                    .optional(),
+                  minute: z.number().int().min(0).max(1439).optional(),
+                  days: z
+                    .array(z.number().int().min(1).max(7))
+                    .min(1)
+                    .max(6)
+                    .optional(),
+                  has: z.boolean().optional(),
+                  count: z.number().int().min(1).max(99).optional(),
                 })
                 .strict(),
             )
             .min(1)
-            .max(2),
+            .max(4),
           then: z
             .object({
               type: z.enum(["add_ring", "dont_ring"]),
@@ -333,6 +383,7 @@ const TOOLS = [
         throw new ToolError("At most 30 rules are allowed.");
       if (["create", "edit"].includes(args.operation) !== !!args.rule)
         throw new ToolError("Supply rule only for create or edit.");
+      if (args.rule) args.rule = { ...args.rule, when: tidyConditions(args.rule.when) };
       let rule =
         args.operation === "delete"
           ? null
@@ -396,31 +447,51 @@ const TOOLS = [
         throw new ToolError(
           "Rules changed while previewing. Call preview_rule again.",
         );
-      // Whole days are evaluated; only upcoming events are listed and counted.
-      const out = preview(
-        eventsOf(snapshot, baseline),
-        rules,
-        after,
-        snapshot.timeZone,
-        (e) => e.start > ctx.now(),
-      );
-      out.silencedEvents = out.changes.filter(
-        (c) => c.before.rings.length && !c.after.rings.length,
-      );
-      out.silencedCount = out.changes.filter(
-        (c) => c.before.rings.length && !c.after.rings.length,
-      ).length;
-      out.largeShare =
-        out.totalUpcoming >= 10 && out.silencedCount * 2 > out.totalUpcoming;
-      for (const c of out.changes)
-        for (const side of ["before", "after"])
-          c[side].ringTimes = c[side].rings.map((r) =>
-            isoLocal(
-              r.kind === "travel" ? r.at : c.start - r.minutes * 60000,
-              snapshot.timeZone,
-            ),
-          );
+      // The phone alone can check links, locations and guest counts, so a rule using them (before
+      // or after the change) is validated and applied as usual but its events aren't listed.
+      const phoneOnlyPreview = phoneOnly(rules[ruleId]) || phoneOnly(rule);
+      const ignored = Object.entries(after)
+        .filter(([, r]) => r.enabled && phoneOnly(r))
+        .map(([id]) => id);
       const text = sentence(rule ?? rules[ruleId], snapshot.calendars);
+      let out;
+      if (phoneOnlyPreview) {
+        out = {
+          previewMode: "phone_only",
+          phoneOnlyNote: PHONE_ONLY_NOTE,
+          changes: null,
+          changedCount: null,
+          totalUpcoming: null,
+          silencedEvents: null,
+          silencedCount: 0,
+          largeShare: null,
+        };
+      } else {
+        // Whole days are evaluated; only upcoming events are listed and counted. Other enabled
+        // rules that use phone-only conditions take no part, so the preview is approximate.
+        out = preview(
+          eventsOf(snapshot, baseline),
+          rules,
+          after,
+          snapshot.timeZone,
+          (e) => e.start > ctx.now(),
+        );
+        out.previewMode = "events";
+        out.silencedEvents = out.changes.filter(
+          (c) => c.before.rings.length && !c.after.rings.length,
+        );
+        out.silencedCount = out.silencedEvents.length;
+        out.largeShare =
+          out.totalUpcoming >= 10 && out.silencedCount * 2 > out.totalUpcoming;
+        for (const c of out.changes)
+          for (const side of ["before", "after"])
+            c[side].ringTimes = c[side].rings.map((r) =>
+              isoLocal(
+                r.kind === "travel" ? r.at : c.start - r.minutes * 60000,
+                snapshot.timeZone,
+              ),
+            );
+      }
       const previewId = `pr_${randomUUID()}`;
       const data = {
         ruleId,
@@ -439,8 +510,14 @@ const TOOLS = [
           sentence: text,
           silencedCount: out.silencedCount,
         });
+      const ignoredNote =
+        !phoneOnlyPreview && ignored.length
+          ? " Other rules that check links, locations or guest counts aren't included here."
+          : "";
       return result(
-        `${args.operation}: ${quoted(text)}. Changes ${out.changedCount} upcoming events; silences ${out.silencedCount}.${out.largeShare ? " This silences more than half of at least 10 upcoming events." : ""}\n${out.changes.map((c) => `${quoted(c.title)}: ${c.before.ringTimes.join(" · ") || "no rings"} → ${c.after.ringTimes.join(" · ") || "silenced"}`).join("\n")}\nPreview uses the latest snapshot; local-only choices, merged rule rings and silenced travel timing may be incomplete. Show this preview and get the user’s yes in chat before apply_rule.`,
+        phoneOnlyPreview
+          ? `${args.operation}: ${quoted(text)}. ${PHONE_ONLY_NOTE} Show the sentence and get the user’s yes in chat before apply_rule.`
+          : `${args.operation}: ${quoted(text)}. Changes ${out.changedCount} upcoming events; silences ${out.silencedCount}.${out.largeShare ? " This silences more than half of at least 10 upcoming events." : ""}\n${out.changes.map((c) => `${quoted(c.title)}: ${c.before.ringTimes.join(" · ") || "no rings"} → ${c.after.ringTimes.join(" · ") || "silenced"}`).join("\n")}\nPreview uses the latest snapshot; local-only choices, merged rule rings and silenced travel timing may be incomplete.${ignoredNote} Show this preview and get the user’s yes in chat before apply_rule.`,
         {
           previewId,
           ruleId,
@@ -450,8 +527,9 @@ const TOOLS = [
             device: snapshot.device,
             publishedAt: snapshot.publishedAt,
           },
-          limitations:
-            "Approximate preview: based on the latest phone snapshot and synced settings. Local-only choices and travel timing are not fully reconstructible; the phone evaluates the final schedule.",
+          limitations: phoneOnlyPreview
+            ? "No event list: the phone shows which events match. The assistant never sees meeting links, locations or guest counts."
+            : `Approximate preview: based on the latest phone snapshot and synced settings. Local-only choices and travel timing are not fully reconstructible; the phone evaluates the final schedule.${ignoredNote}`,
         },
       );
     },
@@ -491,9 +569,12 @@ const TOOLS = [
       }[approved.operation];
       const summary = `${cleanText(ctx.grant.clientName, 100) || "Assistant"} ${verb} a rule: ${approved.sentence}${approved.silencedCount > 0 ? ` · ${approved.silencedCount} ${approved.silencedCount === 1 ? "event" : "events"}` : ""}`;
       const rule = parseStored(approved.payload);
+      // A rule using phone-only conditions has no silenced count; it still alerts when it
+      // switches on a don't-ring.
       const alert =
         approved.silencedCount > 0 ||
-        (approved.operation === "create" && rule?.then.type === "dont_ring")
+        (approved.operation === "create" && rule?.then.type === "dont_ring") ||
+        (phoneOnly(rule) && rule.enabled && rule.then.type === "dont_ring")
           ? "alarms_off"
           : null;
       return applyChange(ctx, {

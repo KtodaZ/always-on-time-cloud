@@ -424,12 +424,31 @@ compact JSON with declaration order:
 {"enabled":true,"order":0,"when":[{"type":"next_after","text":"Gym","hours":2}],"then":{"type":"add_ring","minutes":45,"label":"Time to shower","style":"notification"},"createdBy":"assistant","createdAt":1763200000000,"assistantName":"Claude"}
 ```
 
-Conditions have ordered fields `type, text, calendarKey, hours`; actions have
-`type, minutes, label, style`. Null fields are omitted and future fields retained. A rule has
-one or two conditions, all required: `first_of_day`, `title_contains` (the skip-keyword whole-word
-matcher), `on_calendar` (portable calendar key), or `next_after` (whole-word predecessor text;
-1–6 hours, default 2). At most one first-of-day and next-after condition per rule. Actions are
-`add_ring` (1–2880 minutes, optional label/style) or `dont_ring` (all rings, including travel).
+Conditions have ordered fields `type, text, calendarKey, hours, compare, minute, days, has, count`;
+actions have `type, minutes, label, style`. Null fields are omitted (`has: false` is kept) and
+future fields retained. A rule has one to four conditions, all required, and at most one of each
+type:
+
+| Condition | Fields |
+| --- | --- |
+| `first_of_day` | none |
+| `title_contains` | `text` (the skip-keyword whole-word matcher) |
+| `on_calendar` | `calendarKey` (portable calendar key) |
+| `next_after` | `text` (whole-word predecessor), `hours` 1–6, default 2 |
+| `time_of_day` | `compare` `before`/`after`, `minute` 0–1439 after local midnight (before is exclusive, after inclusive) |
+| `day_of_week` | `days`: ISO days 1 (Mon)–7 (Sun), 1–6 entries, strictly ascending (sorted, no repeats) |
+| `video_link` | `has` true/false |
+| `location` | `has` true/false |
+| `attendees` | `compare` `at_least`/`at_most`, `count` 1–99 (guests who haven't declined, you included); `at_least` 1 is invalid because it matches everything |
+
+Example conditions: `{"type":"time_of_day","compare":"before","minute":540}`,
+`{"type":"day_of_week","days":[6,7]}`, `{"type":"attendees","compare":"at_least","count":5}`.
+Validation accepts duplicate `title_contains` and `on_calendar` conditions only so rules made by
+older phones still load; the assistant tools refuse a repeated type. Rules with three or four
+conditions, and the five Round 3 types, are inert on older phones. Shared canonical vectors for
+the new fields are in [`assistant-protocol-vectors.json`](assistant-protocol-vectors.json).
+Actions are `add_ring` (1–2880 minutes, optional label/style) or `dont_ring` (all rings,
+including travel).
 Unknown condition/action vocabulary is retained and inert. `createdBy` is `user` or `assistant`;
 `createdAt` is nonnegative epoch ms; optional `assistantName` is 1–100 UTF-16 units and only valid
 for assistant-created rules. MCP sets it from the connected client name. There are at most 30 rules.
@@ -442,7 +461,10 @@ All-day events and silent duplicate copies are never matched or linked. `first_o
 events that would ring (a usual ring on, not silenced by `dont_ring`): first-of-day `dont_ring`
 rules look past events ordinary `dont_ring` rules silence, then first-of-day `add_ring` rules look
 past every silenced event. `next_after` links each event to the first start at/after its end on
-the same local day, within the inclusive gap (default 2 hours). Only the first 30 rules by
+the same local day, within the inclusive gap (default 2 hours). `time_of_day` and `day_of_week`
+read the event's start in the snapshot's `timeZone` (the minute of the local day and the local ISO
+weekday, so a Sunday-evening start is Sunday even when it is Monday in UTC, and DST changes follow
+the zone). Only the first 30 rules by
 `order`, then id, take effect. Rules evaluate whole local days; previews list and count only
 upcoming events. Rules are derived on the phone, never
 materialized as occurrence overrides by MCP.
@@ -460,6 +482,21 @@ Snapshot alarms accept `source: "rule"`, `ruleIds`, `label`, and `style`; events
 `silencedByRules`. Rule IDs in snapshot provenance may be bare UUIDs (the Android model's local
 IDs) or `r_<uuid>` keys; the reader keeps both and resolves either to its synced rule for
 `explain_alarm`. Read tools expose the metadata. This does not change snapshot schemaVersion.
+**Phone-only conditions.** `video_link`, `location` and `attendees` can't be evaluated here: the
+snapshot never carries meeting links, locations or guest lists, and must not start to. Rules using
+them are validated, given a sentence and applied like any other, but `preview_rule` lists no
+events: the result has `previewMode: "phone_only"`, `changes`, `changedCount`, `totalUpcoming`,
+`silencedEvents` and `largeShare` set to `null`, and `phoneOnlyNote` (plain text the assistant
+relays: the phone shows which events match once the rule is on). Ordinary previews carry
+`previewMode: "events"`. The path applies when the rule before or after the change uses one of the
+three. Such rules also take no part in other previews (which say so in `limitations`), and a phone-only
+`dont_ring` that is switched on still posts the `alarms_off` risky-change alert, although it has no
+silenced count. No event fact beyond the existing snapshot is added to Firestore.
+
+Sentences follow the app's list wording: `When an event {conditions joined by " and "} → {action}`,
+for example `When an event is on weekdays and starts before 9:00 AM → add a ring 1 hour before`,
+with ` · label` and ` · notification` after a ring.
+
 The current snapshot lacks enough ordinary/pre-rule inputs to guarantee exact previews of every
 edit/deletion (local-only choices, merged ring provenance, suppressed travel times, events that
 already ended today, and which same-title copies the phone keeps silent); MCP labels previews

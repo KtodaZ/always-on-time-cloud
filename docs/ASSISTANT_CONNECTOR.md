@@ -315,7 +315,11 @@ logged instead of sent, and APNs pushes are recorded in the `emulatorApnsPushes`
 `list_rules` returns each rule's sentence, enabled state and creator. `preview_rule` takes
 `operation: create | edit | delete | enable | disable`, an existing `ruleId` except for create,
 and a `rule: {enabled?, order?, when, then}` for create/edit. Conditions and actions follow the
-[portable protocol](ASSISTANT_PROTOCOL.md#alarm-rules-and-ring-options).
+[portable protocol](ASSISTANT_PROTOCOL.md#alarm-rules-and-ring-options): one to four conditions
+(first of the day, title, calendar, next after, time of day, day of week, video link, location,
+attendees). The preview lists events for the first six; for video link, location and attendees the
+assistant can't see that data, so the preview lists no events (`previewMode: "phone_only"`) and says
+the phone will show which events match. `apply_rule` works the same.
 
 Show the returned sentence, before/after ring times, silenced events, counts and large-share note,
 then obtain the user's yes in chat before `apply_rule({previewId})`. There is no second app approval.
