@@ -58,7 +58,7 @@ function model({ RecordError, cleanSkipKeyword, foldSkipKeyword }) {
       v.order > 2147483647 ||
       !Array.isArray(v.when) ||
       v.when.length < 1 ||
-      v.when.length > 2 ||
+      v.when.length > 4 ||
       !object(v.then)
     )
       fail("invalid rule structure");
@@ -78,9 +78,45 @@ function model({ RecordError, cleanSkipKeyword, foldSkipKeyword }) {
       if (
         (c.text != null && typeof c.text !== "string") ||
         (c.calendarKey != null && typeof c.calendarKey !== "string") ||
-        (c.hours != null && !Number.isInteger(c.hours))
+        (c.hours != null && !Number.isInteger(c.hours)) ||
+        (c.compare != null && typeof c.compare !== "string") ||
+        (c.minute != null && !Number.isInteger(c.minute)) ||
+        (c.days != null && !Array.isArray(c.days)) ||
+        (c.has != null && typeof c.has !== "boolean") ||
+        (c.count != null && !Number.isInteger(c.count))
       )
         fail("invalid condition field");
+      if (c.type === "time_of_day") {
+        if (!["before", "after"].includes(c.compare))
+          fail("time of day must be before or after");
+        if (c.minute == null || c.minute < 0 || c.minute > 1439)
+          fail("time of day minute must be 0–1439");
+      }
+      if (c.type === "day_of_week") {
+        if (
+          !Array.isArray(c.days) ||
+          c.days.length < 1 ||
+          c.days.length > 6 ||
+          !c.days.every(
+            (d, i) =>
+              Number.isInteger(d) &&
+              d >= 1 &&
+              d <= 7 &&
+              (i === 0 || d > c.days[i - 1]),
+          )
+        )
+          fail("days must be 1–6 sorted, unique ISO days 1–7");
+      }
+      if (["video_link", "location"].includes(c.type) && c.has == null)
+        fail(`${c.type} needs has true or false`);
+      if (c.type === "attendees") {
+        if (!["at_least", "at_most"].includes(c.compare))
+          fail("attendees must be at_least or at_most");
+        if (c.count == null || c.count < 1 || c.count > 99)
+          fail("attendees count must be 1–99");
+        if (c.compare === "at_least" && c.count === 1)
+          fail("at least 1 attendee matches everything");
+      }
       if (
         ["title_contains", "next_after"].includes(c.type) &&
         (typeof c.text !== "string" ||
@@ -102,7 +138,15 @@ function model({ RecordError, cleanSkipKeyword, foldSkipKeyword }) {
       )
         fail("invalid calendar key");
     }
-    for (const type of ["first_of_day", "next_after"])
+    for (const type of [
+      "first_of_day",
+      "next_after",
+      "time_of_day",
+      "day_of_week",
+      "video_link",
+      "location",
+      "attendees",
+    ])
       if (v.when.filter((c) => c.type === type).length > 1)
         fail("duplicate condition");
     if (typeof v.then.type !== "string") fail("invalid action");
@@ -134,7 +178,17 @@ function model({ RecordError, cleanSkipKeyword, foldSkipKeyword }) {
       "assistantName",
     ]);
     out.when = v.when.map((c) =>
-      ordered(c, ["type", "text", "calendarKey", "hours"]),
+      ordered(c, [
+        "type",
+        "text",
+        "calendarKey",
+        "hours",
+        "compare",
+        "minute",
+        "days",
+        "has",
+        "count",
+      ]),
     );
     out.then = ordered(v.then, ["type", "minutes", "label", "style"]);
     return out;

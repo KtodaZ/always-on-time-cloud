@@ -151,7 +151,7 @@ function compare(actual, operator, expected) {
 }
 
 class Query {
-  constructor(db, path, { filters = [], order = null, direction = "asc", maximum = null, fields = null } = {}) {
+  constructor(db, path, { filters = [], order = null, direction = "asc", maximum = null, fields = null, start = null, end = null } = {}) {
     this.db = db;
     this.path = path;
     this.filters = filters;
@@ -159,6 +159,8 @@ class Query {
     this.direction = direction;
     this.maximum = maximum;
     this.fields = fields;
+    this.start = start;
+    this.end = end;
   }
 
   select(...fields) {
@@ -181,6 +183,15 @@ class Query {
     return new Query(this.db, this.path, { ...this, order: field, direction });
   }
 
+  /** Document-id bounds for `orderBy("__name__")`: ids from `start` (inclusive) up to `end` (exclusive). */
+  startAt(start) {
+    return new Query(this.db, this.path, { ...this, start });
+  }
+
+  endBefore(end) {
+    return new Query(this.db, this.path, { ...this, end });
+  }
+
   limit(maximum) {
     return new Query(this.db, this.path, { ...this, maximum });
   }
@@ -198,7 +209,11 @@ class Query {
         matches.push([path, value]);
       }
     }
-    if (this.order) {
+    if (this.order === "__name__") {
+      const id = ([path]) => path.slice(this.path.length + 1);
+      matches = matches.filter((match) => (this.start === null || id(match) >= this.start) && (this.end === null || id(match) < this.end));
+      matches.sort((left, right) => (id(left) < id(right) ? -1 : id(left) > id(right) ? 1 : 0) * (this.direction === "desc" ? -1 : 1));
+    } else if (this.order) {
       matches = matches.filter(([, value]) => value[this.order] !== undefined && value[this.order] !== null);
       matches.sort(([, left], [, right]) => (left[this.order] - right[this.order]) * (this.direction === "desc" ? -1 : 1));
     }

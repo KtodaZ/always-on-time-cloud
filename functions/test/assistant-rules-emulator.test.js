@@ -99,7 +99,7 @@ test(
       ).data();
       assert.match(
         activity.summary,
-        /Claude added a rule: Don't ring for Lunch · 1 event/,
+        /Claude added a rule: When an event has Lunch in the title → don't ring · 1 event/,
       );
       assert.ok((await previewRef.get()).data().usedAt);
       await assert.rejects(
@@ -112,7 +112,7 @@ test(
       explainedPayload.events[0].silencedByRules = [p.data.ruleId.slice(2)];
       await refs.snapshots(db,uid).doc("phone").update({payload:JSON.stringify(explainedPayload)});
       const explanation = await call("explain_alarm",{event:payload.events[0].eventKey});
-      assert.match(explanation.text,/Silenced by rules:.*Don't ring for Lunch/);
+      assert.match(explanation.text,/Silenced by rules:.*When an event has Lunch in the title → don't ring/);
       assert.deepEqual(explanation.data.event.silencedByRules,[p.data.ruleId.slice(2)]);
       await refs.snapshots(db,uid).doc("phone").update({payload:JSON.stringify(payload)});
       await call("undo", { changeId: a.data.changeId });
