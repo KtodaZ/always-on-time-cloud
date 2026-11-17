@@ -97,7 +97,7 @@ const json = { 'Content-Type': 'application/json' };
   };
   const init = await rpc(tokens.access_token, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e', version: '1' } });
   assert.match(init.instructions, /test_connection/);
-  assert.equal((await rpc(tokens.access_token, 'tools/list')).tools.length, 18);
+  assert.equal((await rpc(tokens.access_token, 'tools/list')).tools.length, 21);
   const status = await rpc(tokens.access_token, 'tools/call', { name: 'get_status', arguments: {} });
   assert.match(status.content[0].text, /Phone: Pixel 9/);
   const upcoming = await rpc(tokens.access_token, 'tools/call', { name: 'list_upcoming_alarms', arguments: {} });
