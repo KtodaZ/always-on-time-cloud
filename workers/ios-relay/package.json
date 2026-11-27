@@ -11,10 +11,10 @@
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.5.1",
+    "@cloudflare/vitest-plugin": "^1.9.2",
     "typescript": "^7.0.2",
-    "vitest": "^5.1.0",
-    "wrangler": "^4.152.0"
+    "vitest": "^5.1.1",
+    "wrangler": "^4.168.0"
   },
   "allowScripts": {
     "esbuild@0.28.2": true,
