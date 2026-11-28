@@ -24,6 +24,13 @@ const {
 
 const MAX_LIST = 100;
 const MAX_EVENTS = 20;
+// find_events without a query lists the schedule: next LIST_DEFAULT_DAYS days, at most MAX_SCHEDULE events.
+const MAX_SCHEDULE = 60;
+const LIST_DEFAULT_DAYS = 7;
+// get_alarm_history summary reads at most this many of the newest entries.
+const SUMMARY_READ_LIMIT = 500;
+// A title needs this many alarms in the window before the summary counts it on its own line.
+const SUMMARY_MIN_ALARMS = 3;
 const MAX_HISTORY = 50;
 // How many of the newest history entries one call reads, before filtering by days and title.
 const HISTORY_READ_LIMIT = MAX_HISTORY * 4;
@@ -88,6 +95,81 @@ const SOURCE_TEXT = {
 
 const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
+/** "The phone shares events through Tue, Nov 3, 9:00 AM." from the window the phone reported. */
+const windowNote = (snapshot) => (snapshot.windowEnd
+  ? `The phone shares events through ${formatTime(snapshot.windowEnd, snapshot.timeZone)}.`
+  : `The phone shares events up to ${SNAPSHOT_WINDOW_DAYS} days ahead.`);
+
+function durationMinutes(event) {
+  return Number.isFinite(event.end) && event.end > event.start ? Math.round((event.end - event.start) / 60000) : null;
+}
+
+function durationText(minutes) {
+  if (minutes === null) return "";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
+function ringText(event) {
+  if (event.skippedByKeyword) return `alarms off: the title contains ${quoted(event.skippedByKeyword)}`;
+  if (event.silencedByRules?.length && !event.alarms.length) return "silenced by a rule";
+  const on = event.alarms.filter((alarm) => alarm.status === "on" || alarm.status === "paused");
+  return on.length ? `rings ${on.map(alarmDescription).join(", ")}` : "no alarms";
+}
+
+/**
+ * One history row per alarm. A phone and a tablet on the same account each write their own row
+ * for the same ring, so rows for the same title, time and lead time collapse; any phone's
+ * response counts (dismissing on one phone stops the alarm on the others).
+ */
+function dedupeHistory(entries) {
+  const RANK = { dismissed: 4, snoozed: 3, interrupted: 2, missed: 1 };
+  const rank = (entry) => RANK[String(entry.action ?? "").toLowerCase()] ?? 0;
+  const byAlarm = new Map();
+  for (const entry of entries) {
+    const key = `${entry.title}\u0000${entry.scheduledTime}\u0000${entry.leadTimeMinutes ?? ""}`;
+    const seen = byAlarm.get(key);
+    if (!seen) { byAlarm.set(key, { ...entry }); continue; }
+    if (rank(entry) > rank(seen)) Object.assign(seen, { action: entry.action, actionTime: entry.actionTime });
+    seen.snoozeCount = Math.max(seen.snoozeCount, entry.snoozeCount);
+  }
+  return [...byAlarm.values()];
+}
+
+function summarizeHistory(entries, days) {
+  const alarms = dedupeHistory(entries);
+  const count = (action) => alarms.filter((entry) => String(entry.action ?? "").toLowerCase() === action).length;
+  const totals = {
+    alarms: alarms.length,
+    dismissed: count("dismissed"),
+    snoozed: alarms.filter((entry) => entry.snoozeCount > 0).length,
+    snoozes: alarms.reduce((sum, entry) => sum + entry.snoozeCount, 0),
+    missed: count("missed"),
+  };
+  const byTitle = new Map();
+  for (const entry of alarms) {
+    const row = byTitle.get(entry.title) ?? { title: entry.title, alarms: 0, snoozed: 0, missed: 0 };
+    row.alarms += 1;
+    if (entry.snoozeCount > 0) row.snoozed += 1;
+    if (String(entry.action ?? "").toLowerCase() === "missed") row.missed += 1;
+    byTitle.set(entry.title, row);
+  }
+  const titles = [...byTitle.values()].filter((row) => row.alarms >= SUMMARY_MIN_ALARMS && (row.snoozed || row.missed))
+    .sort((a, b) => (b.snoozed + b.missed) - (a.snoozed + a.missed) || b.alarms - a.alarms).slice(0, 10);
+  const lines = [
+    `Alarm summary, last ${plural(days, "day")} (an alarm that rang on several phones counts once):`,
+    `- ${plural(totals.alarms, "alarm")}: ${totals.dismissed} dismissed, ${totals.snoozed} snoozed (${plural(totals.snoozes, "snooze")} in all), ${totals.missed} missed.`,
+  ];
+  if (titles.length) {
+    lines.push(`Events with ${SUMMARY_MIN_ALARMS} or more alarms that were snoozed or missed:`);
+    for (const row of titles) lines.push(`- ${quoted(row.title)}: ${row.alarms} alarms, ${row.snoozed} snoozed, ${row.missed} missed`);
+  }
+  lines.push("These are counts of what the alarms recorded, not of whether the user arrived on time.");
+  return { lines, totals, titles };
+}
+
 const TOOLS = [
   {
     name: "list_upcoming_alarms",
@@ -133,7 +215,7 @@ const TOOLS = [
         }
       }
       if (snapshot.windowEnd && to > snapshot.windowEnd) {
-        lines.push(`The phone shares events through ${formatTime(snapshot.windowEnd, snapshot.timeZone)} (${SNAPSHOT_WINDOW_DAYS} days).`);
+        lines.push(windowNote(snapshot));
       }
       return result(lines.join("\n"), {
         basedOn: basedOn(snapshot),
@@ -149,11 +231,12 @@ const TOOLS = [
   {
     name: "find_events",
     title: "Find events",
-    description: `Searches event titles on watched calendars in the next ${SNAPSHOT_WINDOW_DAYS} days and returns their keys and alarms. Use the keys with explain_alarm, set_event_alarms or set_series_alarms. It only knows titles and times.`,
+    description: `Searches event titles on watched calendars (up to ${SNAPSHOT_WINDOW_DAYS} days ahead; the phone may share fewer) and returns their keys and alarms. Without a query it lists the schedule instead: every event in the range (default the next ${LIST_DEFAULT_DAYS} days) with start, length and how its alarms ring, events without alarms included, for reviewing a week. Use the keys with explain_alarm, set_event_alarms or set_series_alarms. It only knows titles, times and invitation responses; it isn't a free/busy view of calendars the app doesn't watch.`,
     inputSchema: {
-      query: z.string().min(1).max(100).describe("Words from the event title (all must match, any case)."),
+      query: z.string().min(1).max(100).optional().describe("Words from the event title (all must match, any case). Leave out to list every event in the range."),
       from: z.string().max(40).optional().describe("Earliest start, ISO 8601. Default: now."),
-      to: z.string().max(40).optional().describe(`Latest start, ISO 8601. Default: the end of the phone's ${SNAPSHOT_WINDOW_DAYS}-day window.`),
+      to: z.string().max(40).optional().describe(`Latest start, ISO 8601. Default: the end of the phone's window with a query, ${LIST_DEFAULT_DAYS} days after from without one.`),
+      calendar: z.string().max(300).optional().describe("Only this calendar: its key, name, or Google calendarId."),
     },
     annotations: READ,
     scope: "read",
@@ -161,21 +244,24 @@ const TOOLS = [
       const snapshot = await requireSnapshot(ctx);
       const now = ctx.now();
       const from = args.from ? parseTime(args.from, snapshot.timeZone, "from") : now;
-      const to = args.to ? parseTime(args.to, snapshot.timeZone, "to") : Infinity;
-      const inRange = snapshot.events.filter((event) => (event.end ?? event.start) >= from && event.start <= to);
+      const listing = !args.query;
+      const to = args.to ? parseTime(args.to, snapshot.timeZone, "to") : listing ? from + LIST_DEFAULT_DAYS * DAY_MS : Infinity;
+      if (to <= from) throw new ToolError("to must be after from.");
+      if (listing && to - from > MAX_RANGE_DAYS * DAY_MS) throw new ToolError(`The range can be at most ${MAX_RANGE_DAYS} days.`);
+      const calendar = args.calendar ? resolveCalendar(snapshot, args.calendar, { accountEmails: await accountEmails(ctx) }) : null;
+      const inRange = snapshot.events.filter((event) => (event.end ?? event.start) >= from && event.start <= to
+        && (!calendar || event.calendarKey === calendar.key));
+      if (listing) return listSchedule(snapshot, now, inRange, from, to);
       const matches = searchEvents(inRange, args.query);
       const shown = matches.slice(0, MAX_EVENTS);
       const lines = [basis(snapshot, now)];
       if (!shown.length) {
-        lines.push(`No matching event in the next ${SNAPSHOT_WINDOW_DAYS} days on watched calendars. It may be further out or on a calendar the app doesn't watch; list_calendars shows which calendars are watched.`);
+        lines.push(`No matching event on watched calendars. ${windowNote(snapshot)} It may be further out or on a calendar the app doesn't watch; list_calendars shows which calendars are watched.`);
       } else {
         lines.push(`${plural(matches.length, "matching event")}${matches.length > shown.length ? ` (first ${MAX_EVENTS} shown)` : ""}:`);
         for (const event of shown) {
-          const on = event.alarms.filter((alarm) => alarm.status === "on" || alarm.status === "paused");
-          const alarmText = event.skippedByKeyword ? `alarms off: the title contains ${quoted(event.skippedByKeyword)}`
-            : on.length ? `rings ${on.map(alarmDescription).join(", ")}` : "no alarms";
-          const calendar = calendarName(snapshot, event.calendarKey);
-          lines.push(`- ${quoted(event.title)}: ${formatTime(event.start, snapshot.timeZone)}${calendar ? `, ${quoted(calendar)}` : ""}${event.recurring ? ", repeats" : ""}; ${alarmText}${keyNote(event)}`);
+          const name = calendarName(snapshot, event.calendarKey);
+          lines.push(`- ${quoted(event.title)}: ${formatTime(event.start, snapshot.timeZone)}${name ? `, ${quoted(name)}` : ""}${event.recurring ? ", repeats" : ""}; ${ringText(event)}${keyNote(event)}`);
         }
       }
       return result(lines.join("\n"), {
@@ -306,10 +392,11 @@ const TOOLS = [
   {
     name: "get_alarm_history",
     title: "Alarm history",
-    description: `What happened to alarms in the last 1-${HISTORY_DAYS} days: when each rang, snoozes, and how it was dismissed, per phone. Answers "did I snooze my 9am yesterday?".`,
+    description: `What happened to alarms in the last 1-${HISTORY_DAYS} days: when each rang, snoozes, and how it was dismissed, per phone. Answers "did I snooze my 9am yesterday?". With summary true it returns counts instead (alarms, dismissed, snoozed, missed, and the events snoozed or missed most), counting an alarm that rang on several phones once; use that to review patterns.`,
     inputSchema: {
       days: z.number().int().min(1).max(HISTORY_DAYS).optional().describe(`How many days back (default 7, at most ${HISTORY_DAYS}).`),
       query: z.string().max(100).optional().describe("Only events whose title contains these words."),
+      summary: z.boolean().optional().describe("Return counts for the period instead of each alarm."),
     },
     annotations: READ,
     scope: "read",
@@ -320,7 +407,7 @@ const TOOLS = [
       const timeZone = snapshot?.timeZone ?? "UTC";
       // At most the newest HISTORY_READ_LIMIT entries in the window; the title filter runs here.
       const page = await refs.history(ctx.db, ctx.uid).where("createdAt", ">=", now - days * DAY_MS)
-        .orderBy("createdAt", "desc").limit(HISTORY_READ_LIMIT).get();
+        .orderBy("createdAt", "desc").limit(args.summary ? SUMMARY_READ_LIMIT : HISTORY_READ_LIMIT).get();
       let entries = page.docs.map((doc) => parseStored(doc.data().payload))
         .filter((entry) => entry && typeof entry === "object" && Number.isFinite(entry.scheduledTime))
         .map((entry) => ({
@@ -332,6 +419,16 @@ const TOOLS = [
           snoozeMinutes: Number.isInteger(entry.snoozeMinutes) ? entry.snoozeMinutes : null,
         }));
       entries = searchEvents(entries, args.query).sort((a, b) => b.scheduledTime - a.scheduledTime);
+      if (args.summary) {
+        if (!entries.length) {
+          return result(`No alarm history in the last ${plural(days, "day")}${args.query ? " for that title" : ""}. History syncs from phones signed in to the account.`, { timeZone, summary: null });
+        }
+        const summary = summarizeHistory(entries.map((entry) => ({
+          ...entry, leadTimeMinutes: Number.isInteger(entry.leadTimeMinutes) ? entry.leadTimeMinutes : null,
+        })), days);
+        if (page.docs.length >= SUMMARY_READ_LIMIT) summary.lines.push(`Based on the newest ${SUMMARY_READ_LIMIT} history entries.`);
+        return result(summary.lines.join("\n"), { timeZone, days, summary: { ...summary.totals, titles: summary.titles } });
+      }
       const shown = entries.slice(0, MAX_HISTORY);
       const lines = shown.map((entry) => {
         const parts = [];
@@ -359,5 +456,37 @@ const TOOLS = [
     },
   },
 ];
+
+function listSchedule(snapshot, now, events, from, to) {
+  const shown = events.slice(0, MAX_SCHEDULE);
+  const range = `${formatTime(from, snapshot.timeZone)} and ${formatTime(to, snapshot.timeZone)}`;
+  const lines = [basis(snapshot, now)];
+  if (!shown.length) {
+    lines.push(`No events between ${range} on watched calendars.`);
+  } else {
+    lines.push(`${plural(events.length, "event")} between ${range}${events.length > shown.length ? ` (first ${shown.length} shown)` : ""}:`);
+    for (const event of shown) {
+      const name = calendarName(snapshot, event.calendarKey);
+      const length = event.allDay ? "all day" : durationText(durationMinutes(event));
+      const rsvp = ["TENTATIVE", "DECLINED", "INVITED"].includes(event.rsvp) ? `, invitation ${event.rsvp === "INVITED" ? "not answered" : event.rsvp.toLowerCase()}` : "";
+      lines.push(`- ${formatTime(event.start, snapshot.timeZone)}${length ? ` (${length})` : ""}: ${quoted(event.title)}${name ? `, ${quoted(name)}` : ""}${rsvp}; ${ringText(event)}${keyNote(event)}`);
+    }
+  }
+  lines.push(`Only events on watched calendars; this isn't a free/busy view. ${windowNote(snapshot)}`);
+  return result(lines.join("\n"), {
+    basedOn: basedOn(snapshot),
+    timeZone: snapshot.timeZone,
+    windowEnd: snapshot.windowEnd ? isoLocal(snapshot.windowEnd, snapshot.timeZone) : null,
+    total: events.length,
+    events: shown.map((event) => ({
+      eventKey: event.eventKey, seriesKey: event.seriesKey, title: event.title,
+      calendar: calendarName(snapshot, event.calendarKey),
+      start: isoLocal(event.start, snapshot.timeZone),
+      durationMinutes: event.allDay ? null : durationMinutes(event),
+      allDay: event.allDay, recurring: event.recurring, rsvp: event.rsvp,
+      rings: ringText(event),
+    })),
+  });
+}
 
 module.exports = { TOOLS, eventInputs };

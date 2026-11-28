@@ -110,7 +110,7 @@ its furthest events until it fits, and the server never parses a longer one):
   `accepted_or_tentative`, `not_declined` or `all_events` (the server also accepts older phones'
   upper-case names). `leadTimes`, `enabled`, `rsvpFilter` and `includeAllDay` are the calendar's
   effective settings and may be absent.
-- `events`: watched calendars, after the app's filters, from now until `windowEnd` (30 days).
+- `events`: watched calendars, after the app's filters, from now until `windowEnd` (up to 30 days on Android, a few days on iPhone; earlier when a dense snapshot is trimmed).
   Events filtered out by RSVP or all-day settings are omitted. `eventKey`/`seriesKey` are null when
   the event has no portable identity.
 - `rsvp`: `ACCEPTED`, `TENTATIVE`, `DECLINED`, `INVITED`, `NONE`, `ORGANIZER`, or absent.
