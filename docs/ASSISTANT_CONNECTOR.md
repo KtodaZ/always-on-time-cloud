@@ -110,11 +110,11 @@ parameter (RFC 9207).
 | `apply_rule` | Apply an approved preview once, with activity, confirmation and undo |
 | `get_status` | Connected phones, snapshot age, pause state, capabilities, whether setup is confirmed |
 | `list_upcoming_alarms` | Alarms that will ring in a time range (default next 24 h), in ring order |
-| `find_events` | Searches event titles in the next 30 days; returns keys and alarms |
+| `find_events` | Searches event titles in the phone's window; without a query, lists every event in a range (default 7 days) with length and rings |
 | `explain_alarm` | Why an event rings when it does (occurrence, series, calendar, app default or travel) |
 | `list_calendars` | Every calendar on the phone with its alarm settings |
 | `get_settings` | App-wide alarm, snooze, spoken-alarm and appearance settings |
-| `get_alarm_history` | What happened to alarms in the last 1–14 days |
+| `get_alarm_history` | What happened to alarms in the last 1–14 days; `summary` gives counts, an alarm on several phones counted once |
 | `set_event_alarms` | Lead times for one occurrence, off, or reset |
 | `set_series_alarms` | Lead times for every occurrence of a recurring event, off, or reset |
 | `set_calendar` | Watch a calendar or not, its lead times, invitation filter, whether it rings through Do Not Disturb (all-day events are an app-wide setting) |
