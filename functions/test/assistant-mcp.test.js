@@ -297,6 +297,9 @@ test("reads come from the snapshot, say what they are based on, and use short ke
     assert.ok(schedule.structuredContent.events.length > 0);
     assert.ok(schedule.structuredContent.events.every((event) => "durationMinutes" in event && "rings" in event));
     assert.ok(schedule.structuredContent.windowEnd);
+    assert.equal(schedule.structuredContent.truncated, false);
+    assert.match(schedule.text, /turned off: /, "a turned-off alarm is named, not reported as no alarms");
+    assert.doesNotMatch(schedule.text, /rings [^;]*paused/);
     const workOnly = await call(token, "find_events", { calendar: "alex@example.com", to: "2026-10-18" });
     assert.ok(workOnly.structuredContent.events.every((event) => event.calendar === "Work"));
     assert.equal((await call(token, "find_events", { to: "2026-12-31" })).isError, true, "a listing is limited to the window");
@@ -624,11 +627,28 @@ test("the alarm history summary counts an alarm that rang on several phones once
     const summary = await call(token, "get_alarm_history", { days: 7, summary: true });
     assert.deepEqual(
       { ...summary.structuredContent.summary, titles: undefined },
-      { alarms: 4, dismissed: 3, snoozed: 1, snoozes: 2, missed: 1, titles: undefined },
+      { alarms: 4, dismissed: 3, missed: 1, otherOrOpen: 0, hadSnooze: 1, titles: undefined },
     );
-    assert.match(summary.text, /- "Team standup": 3 alarms, 1 snoozed, 0 missed/);
+    assert.equal(summary.structuredContent.partial, false);
+    assert.match(summary.text, /- "Team standup": 3 times, snoozed on 1, missed on 0/);
     assert.doesNotMatch(summary.text, /"Lunch"/, "a title with fewer than three alarms gets no line of its own");
     assert.match(summary.text, /not of whether the user arrived on time/);
+  });
+});
+
+test("the history summary counts a meeting's several lead times as one occasion", async () => {
+  const { db, handler, token } = setup();
+  const start = T0 - 24 * HOUR;
+  for (const lead of [15, 10, 0]) {
+    db.documents.set(`accounts/alice/history/r${lead}`, { createdAt: T0 - HOUR, payload: JSON.stringify({
+      title: "Board review", leadTimeMinutes: lead, scheduledTime: start - lead * 60000, eventStartTime: start,
+      action: "DISMISSED", snoozeCount: 1, createdAt: T0 - HOUR,
+    }) });
+  }
+  await withServer(handler, async ({ call }) => {
+    const summary = await call(token, "get_alarm_history", { days: 7, summary: true });
+    assert.equal(summary.structuredContent.summary.alarms, 3);
+    assert.deepEqual(summary.structuredContent.summary.titles, [], "three rings of one meeting are not a pattern");
   });
 });
 

@@ -115,8 +115,13 @@ function durationText(minutes) {
 function ringText(event) {
   if (event.skippedByKeyword) return `alarms off: the title contains ${quoted(event.skippedByKeyword)}`;
   if (event.silencedByRules?.length && !event.alarms.length) return "silenced by a rule";
-  const on = event.alarms.filter((alarm) => alarm.status === "on" || alarm.status === "paused");
-  return on.length ? `rings ${on.map(alarmDescription).join(", ")}` : "no alarms";
+  const parts = [];
+  const of = (status) => event.alarms.filter((alarm) => alarm.status === status).map(alarmDescription).join(", ");
+  if (of("on")) parts.push(`rings ${of("on")}`);
+  if (of("paused")) parts.push(`paused: ${of("paused")}`);
+  if (of("off")) parts.push(`turned off: ${of("off")}`);
+  if (of("past")) parts.push(`already rang: ${of("past")}`);
+  return parts.length ? parts.join("; ") : "no alarms";
 }
 
 /**
@@ -144,27 +149,36 @@ function summarizeHistory(entries, days) {
   const totals = {
     alarms: alarms.length,
     dismissed: count("dismissed"),
-    snoozed: alarms.filter((entry) => entry.snoozeCount > 0).length,
-    snoozes: alarms.reduce((sum, entry) => sum + entry.snoozeCount, 0),
     missed: count("missed"),
+    otherOrOpen: 0,
+    hadSnooze: alarms.filter((entry) => entry.snoozeCount > 0).length,
   };
+  totals.otherOrOpen = totals.alarms - totals.dismissed - totals.missed;
+  // Patterns count occurrences (an event's start), not rings: one meeting with three lead times is one.
+  const occurrence = (entry) => (Number.isFinite(entry.eventStartTime) ? entry.eventStartTime
+    : entry.scheduledTime + (entry.leadTimeMinutes ?? 0) * 60000);
   const byTitle = new Map();
   for (const entry of alarms) {
-    const row = byTitle.get(entry.title) ?? { title: entry.title, alarms: 0, snoozed: 0, missed: 0 };
-    row.alarms += 1;
-    if (entry.snoozeCount > 0) row.snoozed += 1;
-    if (String(entry.action ?? "").toLowerCase() === "missed") row.missed += 1;
+    const row = byTitle.get(entry.title) ?? { title: entry.title, occurrences: new Map() };
+    const at = occurrence(entry);
+    const seen = row.occurrences.get(at) ?? { snoozed: false, missed: false };
+    if (entry.snoozeCount > 0) seen.snoozed = true;
+    if (String(entry.action ?? "").toLowerCase() === "missed") seen.missed = true;
+    row.occurrences.set(at, seen);
     byTitle.set(entry.title, row);
   }
-  const titles = [...byTitle.values()].filter((row) => row.alarms >= SUMMARY_MIN_ALARMS && (row.snoozed || row.missed))
-    .sort((a, b) => (b.snoozed + b.missed) - (a.snoozed + a.missed) || b.alarms - a.alarms).slice(0, 10);
+  const titles = [...byTitle.values()].map(({ title, occurrences }) => {
+    const list = [...occurrences.values()];
+    return { title, occurrences: list.length, snoozed: list.filter((o) => o.snoozed).length, missed: list.filter((o) => o.missed).length };
+  }).filter((row) => row.occurrences >= SUMMARY_MIN_ALARMS && (row.snoozed || row.missed))
+    .sort((a, b) => (b.snoozed + b.missed) - (a.snoozed + a.missed) || b.occurrences - a.occurrences).slice(0, 10);
   const lines = [
-    `Alarm summary, last ${plural(days, "day")} (an alarm that rang on several phones counts once):`,
-    `- ${plural(totals.alarms, "alarm")}: ${totals.dismissed} dismissed, ${totals.snoozed} snoozed (${plural(totals.snoozes, "snooze")} in all), ${totals.missed} missed.`,
+    `Alarm summary, last ${plural(days, "day")} (an alarm that rang on several phones counts once; approximate):`,
+    `- ${plural(totals.alarms, "alarm")}: ${totals.dismissed} dismissed, ${totals.missed} missed${totals.otherOrOpen ? `, ${totals.otherOrOpen} other or still open` : ""}. ${totals.hadSnooze} of them were snoozed first.`,
   ];
   if (titles.length) {
-    lines.push(`Events with ${SUMMARY_MIN_ALARMS} or more alarms that were snoozed or missed:`);
-    for (const row of titles) lines.push(`- ${quoted(row.title)}: ${row.alarms} alarms, ${row.snoozed} snoozed, ${row.missed} missed`);
+    lines.push(`Events on ${SUMMARY_MIN_ALARMS} or more occasions with a snooze or a missed alarm:`);
+    for (const row of titles) lines.push(`- ${quoted(row.title)}: ${row.occurrences} times, snoozed on ${row.snoozed}, missed on ${row.missed}`);
   }
   lines.push("These are counts of what the alarms recorded, not of whether the user arrived on time.");
   return { lines, totals, titles };
@@ -426,8 +440,9 @@ const TOOLS = [
         const summary = summarizeHistory(entries.map((entry) => ({
           ...entry, leadTimeMinutes: Number.isInteger(entry.leadTimeMinutes) ? entry.leadTimeMinutes : null,
         })), days);
-        if (page.docs.length >= SUMMARY_READ_LIMIT) summary.lines.push(`Based on the newest ${SUMMARY_READ_LIMIT} history entries.`);
-        return result(summary.lines.join("\n"), { timeZone, days, summary: { ...summary.totals, titles: summary.titles } });
+        const partial = page.docs.length >= SUMMARY_READ_LIMIT;
+        if (partial) summary.lines.push(`Based on the newest ${SUMMARY_READ_LIMIT} history entries, so older days are incomplete.`);
+        return result(summary.lines.join("\n"), { timeZone, days, partial, summary: { ...summary.totals, titles: summary.titles } });
       }
       const shown = entries.slice(0, MAX_HISTORY);
       const lines = shown.map((entry) => {
@@ -478,6 +493,7 @@ function listSchedule(snapshot, now, events, from, to) {
     timeZone: snapshot.timeZone,
     windowEnd: snapshot.windowEnd ? isoLocal(snapshot.windowEnd, snapshot.timeZone) : null,
     total: events.length,
+    truncated: events.length > shown.length,
     events: shown.map((event) => ({
       eventKey: event.eventKey, seriesKey: event.seriesKey, title: event.title,
       calendar: calendarName(snapshot, event.calendarKey),
